@@ -6,7 +6,7 @@ port = 15431
 [db]
 port = 15432
 shadow_port = 15433
-major_version = 15
+major_version = 17
 
 [studio]
 port = 15434

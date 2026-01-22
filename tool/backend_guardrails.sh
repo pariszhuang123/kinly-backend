@@ -116,8 +116,7 @@ run_deno_checks_if_needed() {
     exit 1
   fi
 
-  # ✅ Align paths with your repo layout:
-  # You said deno.json + deno.lock live inside supabase/
+  # Align paths with your repo layout:
   local DENO_CFG="supabase/deno.json"
   local DENO_LOCK="supabase/deno.lock"
 
@@ -145,18 +144,64 @@ run_deno_checks_if_needed() {
 }
 
 # ----------------------------
-# 2) Local Supabase start + reset
+# 2) Local Supabase start + reset (robust against transient 502s)
 # ----------------------------
 start_and_reset_supabase() {
   require_cmd supabase "supabase CLI is required but not found on PATH"
   require_cmd curl "curl is required (PostgREST readiness check)"
+  require_cmd docker "docker is required (local Supabase runs in containers)"
+
+  # Avoid Docker-over-TCP surprises that can break some containers.
+  unset DOCKER_HOST || true
 
   log "Starting local Supabase..."
   supabase start
   SUPABASE_STARTED="true"
 
   log "Resetting DB (apply migrations + seed)..."
-  supabase db reset --yes
+  local attempt=1
+  local max_attempts=3
+
+  while true; do
+    if supabase db reset --yes; then
+      log "supabase db reset succeeded (attempt ${attempt}/${max_attempts})"
+      break
+    fi
+
+    warn "supabase db reset failed (attempt ${attempt}/${max_attempts})"
+
+    # Print quick, actionable diagnostics (helps when reset flakes during restarts)
+    echo "::group::docker supabase services (kinly-local)"
+    docker ps -a --filter "name=supabase_.*_kinly-local" --format "table {{.Names}}\t{{.Status}}" || true
+    echo "::endgroup::"
+
+    echo "::group::logs kong (tail)"
+    docker logs --tail 160 supabase_kong_kinly-local 2>/dev/null || true
+    echo "::endgroup::"
+
+    echo "::group::logs rest (tail)"
+    docker logs --tail 160 supabase_rest_kinly-local 2>/dev/null || true
+    echo "::endgroup::"
+
+    echo "::group::logs auth (tail)"
+    docker logs --tail 160 supabase_auth_kinly-local 2>/dev/null || true
+    echo "::endgroup::"
+
+    # Optional services may exist depending on config; print if present
+    echo "::group::logs storage (tail)"
+    docker logs --tail 160 supabase_storage_kinly-local 2>/dev/null || true
+    echo "::endgroup::"
+
+    if [ "$attempt" -ge "$max_attempts" ]; then
+      err "supabase db reset failed after ${max_attempts} attempts"
+      err "Tip: run 'supabase db reset --yes --debug' to see upstream URL + more details."
+      exit 1
+    fi
+
+    attempt=$((attempt + 1))
+    log "Waiting briefly before retry..."
+    sleep 8
+  done
 }
 
 # ----------------------------
