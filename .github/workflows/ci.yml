@@ -60,6 +60,24 @@ jobs:
           path: ~/.cache/deno
           key: deno-${{ runner.os }}-${{ hashFiles('.denoversion', 'deno.lock', 'supabase/deno.json') }}
 
+                # Dart is required by tool/contracts_regen.sh (contracts_extract + validate_registry)
+      - name: Setup Dart
+        uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+
+      # Only needed if your Dart scripts depend on pub packages.
+      # (Safe even if there is no pubspec.yaml? No—so guard it.)
+      - name: Dart pub get (if needed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f "pubspec.yaml" ]; then
+            dart pub get
+          else
+            echo "::notice::No pubspec.yaml found; skipping dart pub get"
+          fi
+
       - name: Run backend guardrails (hard fail)
         shell: bash
         run: |
