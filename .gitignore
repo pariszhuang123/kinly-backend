@@ -1,0 +1,23 @@
+# Environment JSONs (ignore all real files; keep samples)
+env/*
+!env/*.sample.json
+
+# Generated files (examples)
+assets/env.json
+
+# Platform specific and build outputs (common)
+build/
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+pubspec.lock
+ios/Pods/
+android/.gradle/
+android/local.properties
+android/app/dev_keystore_base64.txt
+android/app/prod_keystore_base64.txt
+config/
+
+# Deno npm auto-install output for Supabase Edge Functions
+supabase/node_modules/

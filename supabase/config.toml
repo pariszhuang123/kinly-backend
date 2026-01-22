@@ -1,0 +1,28 @@
+project_id = "kinly-local"
+
+[api]
+port = 15431
+
+[db]
+port = 15432
+shadow_port = 15433
+major_version = 15
+
+[studio]
+port = 15434
+
+[inbucket]
+port = 15435
+smtp_port = 15436
+pop3_port = 15437
+
+[analytics]
+enabled = false
+
+[db.pooler]
+enabled = true
+port = 15440
+pool_mode = "transaction"
+
+[functions.notifications_daily]
+verify_jwt = false

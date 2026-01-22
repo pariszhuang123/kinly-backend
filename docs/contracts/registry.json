@@ -1,0 +1,1311 @@
+{
+  "generatedAt": "",
+  "domains": {
+    "app": {
+      "latest": "v1",
+      "docs": "docs/contracts/app_v1.md",
+      "entities": {
+        "AppVersion": {
+          "id": "uuid",
+          "versionNumber": "text",
+          "minSupportedVersion": "text",
+          "isCurrent": "boolean",
+          "releaseDate": "timestamptz",
+          "notes": "text|null"
+        },
+        "SharedPreference": {
+          "userId": "uuid",
+          "prefKey": "text",
+          "prefValue": "jsonb",
+          "createdAt": "timestamptz",
+          "updatedAt": "timestamptz"
+        },
+        "AnalyticsEvent": {
+          "id": "uuid",
+          "userId": "uuid",
+          "homeId": "uuid|null",
+          "eventType": "text",
+          "occurredAt": "timestamptz",
+          "metadata": "jsonb"
+        }
+      },
+      "functions": {
+        "app.checkVersion": {
+          "type": "rpc",
+          "auth": "anonymous",
+          "impl": "public.check_app_version",
+          "args": {
+            "client_version": "text"
+          },
+          "returns": "jsonb",
+          "semantics": [
+            "hardBlocked: client < minSupportedVersion",
+            "updateRecommended: client < currentVersion and not hardBlocked"
+          ]
+        }
+      },
+      "rls": [
+        {
+          "table": "public.app_version",
+          "rule": "no client access; function-only (RLS enabled; anon/auth revoked)"
+        },
+        {
+          "table": "public.shared_preferences",
+          "rule": "RPC-only access; rows scoped by user_id"
+        },
+        {
+          "table": "public.analytics_events",
+          "rule": "append-only via RPCs; no direct client access"
+        }
+      ],
+      "db": {
+        "extensions": [
+          "pgcrypto"
+        ],
+        "tables": {
+          "public.app_version": {
+            "indexes": [
+              "uq_app_version(version_number)",
+              "uq_app_version_is_current_true((true)) WHERE is_current"
+            ],
+            "constraints": [
+              "chk_version_number",
+              "chk_min_supported"
+            ]
+          },
+          "public.shared_preferences": {
+            "indexes": [
+              "pk_shared_preferences(user_id, pref_key)"
+            ],
+            "constraints": []
+          },
+          "public.analytics_events": {
+            "indexes": [
+              "idx_analytics_events_user_event_time(user_id, event_type, occurred_at)",
+              "idx_analytics_events_home_event_time(home_id, event_type, occurred_at)"
+            ],
+            "constraints": []
+          }
+        },
+        "functions": {
+          "public.check_app_version": {
+            "type": "rpc",
+            "args": {
+              "client_version": "text"
+            },
+            "returns": "jsonb",
+            "security": "definer",
+            "owner": "postgres",
+            "volatility": "stable",
+            "nullInput": "returns null on null input",
+            "grants": {
+              "schemaUsage": [
+                "anon",
+                "authenticated"
+              ],
+              "execute": [
+                "anon",
+                "authenticated"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "architecture_guardrails": {
+      "latest": "v1",
+      "docs": "docs/contracts/architecture_guardrails_amendment_foundation_surfaces_v1.md",
+      "entities": {},
+      "functions": {},
+      "rls": []
+    },
+    "chores": {
+      "latest": "v2",
+      "docs": "docs/contracts/chores_v2.md",
+      "entities": {
+        "Chore": {
+          "id": "uuid",
+          "homeId": "uuid",
+          "createdByUserId": "uuid",
+          "assigneeUserId": "uuid|null",
+          "name": "text",
+          "startDate": "date",
+          "recurrenceEvery": "int|null",
+          "recurrenceUnit": "text|null",
+          "recurrenceCursor": "timestamptz|null",
+          "nextOccurrence": "date|null",
+          "expectationPhotoPath": "text|null",
+          "howToVideoUrl": "text|null",
+          "notes": "text|null",
+          "state": "ChoreState",
+          "completedAt": "timestamptz|null",
+          "createdAt": "timestamptz",
+          "updatedAt": "timestamptz"
+        },
+        "ChoreEvent": {
+          "id": "uuid",
+          "choreId": "uuid",
+          "homeId": "uuid",
+          "actorUserId": "uuid",
+          "eventType": "ChoreEventType",
+          "payload": "jsonb",
+          "occurredAt": "timestamptz",
+          "fromState": "ChoreState",
+          "toState": "ChoreState"
+        },
+        "ChoreDetailDto": {
+          "id": "uuid",
+          "homeId": "uuid",
+          "createdByUserId": "uuid",
+          "assigneeUserId": "uuid|null",
+          "name": "text",
+          "startDate": "date|null",
+          "recurrenceEvery": "int|null",
+          "recurrenceUnit": "text|null",
+          "expectationPhotoPath": "text|null",
+          "howToVideoUrl": "text|null",
+          "notes": "text|null",
+          "assignee": "ChoreAssigneeInlineDto|null"
+        },
+        "ChoreAssigneeInlineDto": {
+          "id": "uuid",
+          "fullName": "text",
+          "avatarStoragePath": "text|null"
+        },
+        "ChoreAssigneeDto": {
+          "userId": "uuid",
+          "fullName": "text",
+          "avatarStoragePath": "text|null"
+        }
+      },
+      "functions": {
+        "chores.listForHome": {
+          "type": "rpc",
+          "caller": "member",
+          "impl": "public.chores_list_for_home",
+          "args": {
+            "p_home_id": "uuid"
+          },
+          "returns": {
+            "columns": {
+              "id": "uuid",
+              "home_id": "uuid",
+              "assignee_user_id": "uuid|null",
+              "name": "text",
+              "start_date": "date",
+              "assignee_full_name": "text|null",
+              "assignee_avatar_storage_path": "text|null"
+            }
+          }
+        },
+        "todayFlow.list": {
+          "type": "rpc",
+          "caller": "member",
+          "impl": "public.today_flow_list",
+          "args": {
+            "p_home_id": "uuid",
+            "p_state": "public.chore_state"
+          },
+          "returns": {
+            "columns": {
+              "id": "uuid",
+              "home_id": "uuid",
+              "name": "text",
+              "start_date": "date",
+              "state": "public.chore_state"
+            },
+            "ordering": "due only: next_occurrence <= current_date; internal ordering recommended by next_occurrence ASC, created_at ASC",
+            "notes": [
+              "Requires `_assert_home_member`",
+              "When `p_state='active'`, rows are limited to chores assigned to `auth.uid()`",
+              "When `p_state='active'`, only chores due today or earlier are returned (next_occurrence <= current_date)",
+              "When `p_state='draft'`, all draft chores for the home are returned"
+            ]
+          }
+        },
+        "homeAssignees.list": {
+          "type": "rpc",
+          "caller": "member",
+          "impl": "public.home_assignees_list",
+          "args": {
+            "p_home_id": "uuid"
+          },
+          "returns": {
+            "columns": {
+              "user_id": "uuid",
+              "full_name": "text",
+              "email": "text",
+              "avatar_storage_path": "text|null"
+            }
+          }
+        },
+        "chores.create": {
+          "type": "rpc",
+          "caller": "member",
+          "impl": "public.chores_create_v2",
+          "args": {
+            "p_home_id": "uuid",
+            "p_name": "text",
+            "p_assignee_user_id": "uuid|null",
+            "p_start_date": "date|null",
+            "p_recurrence_every": "int|null",
+            "p_recurrence_unit": "text|null",
+            "p_how_to_video_url": "text|null",
+            "p_notes": "text|null",
+            "p_expectation_photo_path": "text|null"
+          },
+          "returns": "Chore",
+          "notes": [
+            "recurrenceEvery/unit are paired: both null (one-off) OR both set (recurring).",
+            "Backend computes recurrenceCursor and nextOccurrence.",
+            "If assignee provided, state becomes active; otherwise draft."
+          ]
+        },
+        "chores.getForHome": {
+          "type": "rpc",
+          "caller": "member",
+          "impl": "public.chores_get_for_home",
+          "args": {
+            "p_home_id": "uuid",
+            "p_chore_id": "uuid"
+          },
+          "returns": "jsonb",
+          "notes": [
+            "Payload returns recurrenceEvery/recurrenceUnit (not legacy recurrence enum).",
+            "Edit DTO is partial; clients must not rely on state/cursors/timestamps being present."
+          ]
+        },
+        "chores.update": {
+          "type": "rpc",
+          "caller": "member",
+          "impl": "public.chores_update_v2",
+          "args": {
+            "p_chore_id": "uuid",
+            "p_name": "text",
+            "p_assignee_user_id": "uuid",
+            "p_start_date": "date|null",
+            "p_recurrence_every": "int|null",
+            "p_recurrence_unit": "text|null",
+            "p_expectation_photo_path": "text|null",
+            "p_how_to_video_url": "text|null",
+            "p_notes": "text|null"
+          },
+          "returns": "Chore",
+          "notes": [
+            "Assignee is required; state remains active after updates.",
+            "When recurrence fields change, backend recomputes recurrenceCursor/nextOccurrence."
+          ]
+        },
+        "chores.cancel": {
+          "type": "rpc",
+          "caller": "member",
+          "impl": "public.chores_cancel",
+          "args": {
+            "p_chore_id": "uuid"
+          },
+          "returns": "jsonb"
+        },
+        "chore.complete": {
+          "type": "rpc",
+          "caller": "assignee-only",
+          "impl": "public.chore_complete",
+          "args": {
+            "_chore_id": "uuid"
+          },
+          "returns": "jsonb",
+          "notes": [
+            "One-off: state=completed, completedAt=now(), nextOccurrence=null, decrements active_chores.",
+            "Recurring: keep state=active, emit complete event, advance nextOccurrence to the next date after today so it no longer appears in Today due list."
+          ]
+        }
+      },
+      "rls": [
+        {
+          "table": "public.chores",
+          "rule": "RLS enabled; anon/auth revoked; all client access via SECURITY DEFINER RPCs."
+        },
+        {
+          "table": "public.chore_events",
+          "rule": "RLS enabled; anon/auth revoked; rows inserted via trigger only; no direct client access."
+        }
+      ]
+    },
+    "composable_system": {
+      "latest": "v1",
+      "docs": "docs/contracts/kinly_foundation_surfaces_amendment_v1.md",
+      "entities": {},
+      "functions": {},
+      "rls": []
+    },
+    "design_system": {
+      "latest": "v1",
+      "docs": "docs/contracts/kinly_design_system_v1.md",
+      "entities": {},
+      "functions": {},
+      "rls": []
+    },
+    "expenses": {
+      "latest": "v2",
+      "docs": "docs/contracts/expenses_v2.md",
+      "entities": {
+        "Expense": {
+          "id": "uuid",
+          "homeId": "uuid",
+          "createdByUserId": "uuid",
+          "planId": "uuid|null",
+          "recurrenceEvery": "int|null",
+          "recurrenceUnit": "text|null",
+          "startDate": "date",
+          "status": "ExpenseStatus",
+          "splitType": "ExpenseSplitType|null",
+          "amountCents": "bigint|null",
+          "fullyPaidAt": "timestamptz|null",
+          "description": "text",
+          "notes": "text|null",
+          "createdAt": "timestamptz",
+          "updatedAt": "timestamptz"
+        },
+        "ExpensePlan": {
+          "id": "uuid",
+          "homeId": "uuid",
+          "createdByUserId": "uuid",
+          "splitType": "ExpenseSplitType",
+          "amountCents": "bigint",
+          "description": "text",
+          "notes": "text|null",
+          "recurrenceEvery": "int",
+          "recurrenceUnit": "text",
+          "startDate": "date",
+          "nextCycleDate": "date",
+          "status": "ExpensePlanStatus",
+          "terminatedAt": "timestamptz|null",
+          "createdAt": "timestamptz",
+          "updatedAt": "timestamptz"
+        },
+        "ExpensePlanDebtor": {
+          "planId": "uuid",
+          "debtorUserId": "uuid",
+          "shareAmountCents": "bigint"
+        },
+        "ExpenseSplit": {
+          "expenseId": "uuid",
+          "debtorUserId": "uuid",
+          "amountCents": "bigint",
+          "status": "ExpenseShareStatus",
+          "markedPaidAt": "timestamptz|null",
+          "recipientViewedAt": "timestamptz|null"
+        },
+        "ExpenseSummaryDto": {
+          "id": "uuid",
+          "homeId": "uuid",
+          "createdByUserId": "uuid",
+          "planId": "uuid|null",
+          "recurrenceEvery": "int|null",
+          "recurrenceUnit": "text|null",
+          "startDate": "date",
+          "status": "ExpenseStatus",
+          "splitType": "ExpenseSplitType|null",
+          "amountCents": "bigint|null",
+          "fullyPaidAt": "timestamptz|null",
+          "description": "text",
+          "createdAt": "timestamptz",
+          "totalShares": "int",
+          "paidShares": "int",
+          "paidAmountCents": "bigint",
+          "allPaid": "boolean"
+        }
+      },
+      "functions": {
+        "expenses.create": {
+          "type": "rpc",
+          "caller": "member",
+          "impl": "public.expenses_create_v2",
+          "args": {
+            "p_home_id": "uuid",
+            "p_description": "text",
+            "p_amount_cents": "bigint|null",
+            "p_notes": "text|null",
+            "p_split_mode": "ExpenseSplitType|null",
+            "p_member_ids": "uuid[]|null",
+            "p_splits": "jsonb|null",
+            "p_recurrence_every": "int|null",
+            "p_recurrence_unit": "text|null",
+            "p_start_date": "date"
+          },
+          "returns": "Expense",
+          "notes": [
+            "p_split_mode NULL => draft (recurrence must be null; amount optional)",
+            "p_split_mode set => activation; recurrence null creates one-off active; recurrence set creates plan + first cycle and marks draft converted"
+          ]
+        },
+        "expenses.edit": {
+          "type": "rpc",
+          "caller": "member",
+          "impl": "public.expenses_edit_v2",
+          "args": {
+            "p_expense_id": "uuid",
+            "p_amount_cents": "bigint",
+            "p_description": "text",
+            "p_notes": "text|null",
+            "p_split_mode": "ExpenseSplitType|null",
+            "p_member_ids": "uuid[]|null",
+            "p_splits": "jsonb|null",
+            "p_recurrence_every": "int|null",
+            "p_recurrence_unit": "text|null",
+            "p_start_date": "date"
+          },
+          "returns": "Expense",
+          "notes": [
+            "Only allowed for drafts; always activates",
+            "Recurrence set creates plan, marks draft converted, and generates first cycle",
+            "Existing active expenses are immutable"
+          ]
+        },
+        "expenses.payMyDue": {
+          "type": "rpc",
+          "caller": "member",
+          "impl": "public.expenses_pay_my_due",
+          "args": {
+            "p_recipient_user_id": "uuid"
+          },
+          "returns": "jsonb",
+          "notes": [
+            "Bulk marks caller's unpaid splits owed to the recipient as paid",
+            "Stamps marked_paid_at, stamps fully_paid_at once per expense, decrements usage per fully paid expense"
+          ]
+        },
+        "expensePlans.terminate": {
+          "type": "rpc",
+          "caller": "member (plan creator only)",
+          "impl": "public.expense_plans_terminate",
+          "args": {
+            "p_plan_id": "uuid"
+          },
+          "returns": "ExpensePlan",
+          "notes": [
+            "Stops future cycles; existing expenses remain payable"
+          ]
+        },
+        "expenses.cancel": {
+          "type": "rpc",
+          "caller": "member",
+          "impl": "public.expenses_cancel",
+          "args": {
+            "p_expense_id": "uuid"
+          },
+          "returns": "Expense"
+        },
+        "expenses.getCurrentOwed": {
+          "type": "rpc",
+          "caller": "member",
+          "impl": "public.expenses_get_current_owed",
+          "args": {
+            "p_home_id": "uuid"
+          },
+          "returns": "jsonb"
+        },
+        "expenses.getCreatedByMe": {
+          "type": "rpc",
+          "caller": "member",
+          "impl": "public.expenses_get_created_by_me",
+          "args": {
+            "p_home_id": "uuid"
+          },
+          "returns": "jsonb"
+        },
+        "expenses.getForEdit": {
+          "type": "rpc",
+          "caller": "member",
+          "impl": "public.expenses_get_for_edit",
+          "args": {
+            "p_expense_id": "uuid"
+          },
+          "returns": "jsonb",
+          "notes": [
+            "Creator-only; returns splits, planId, recurrenceEvery/Unit, startDate, canEdit flag, and editDisabledReason (ACTIVE_IMMUTABLE, RECURRING_CYCLE_IMMUTABLE, CONVERTED_TO_PLAN)"
+          ]
+        }
+      },
+      "rls": [
+        {
+          "table": "public.expenses",
+          "rule": "RLS disabled; anon/auth/service roles have no grants. All read/write access flows through SECURITY DEFINER RPCs."
+        },
+        {
+          "table": "public.expense_plans",
+          "rule": "RLS disabled; anon/auth/service roles have no grants. Only RPCs can mutate."
+        },
+        {
+          "table": "public.expense_plan_debtors",
+          "rule": "RLS disabled; anon/auth/service roles have no grants. Only RPCs can mutate."
+        },
+        {
+          "table": "public.expense_splits",
+          "rule": "RLS disabled; anon/auth have no grants. Splits are only visible/mutated inside SECURITY DEFINER RPCs."
+        }
+      ]
+    },
+    "gratitude_wall": {
+      "latest": "v1",
+      "docs": "docs/contracts/gratitude_wall_v1.md",
+      "entities": {
+        "SharedGratitude": {
+          "fields": [
+            "text",
+            "sharedWith=home",
+            "timeContext=this_week"
+          ]
+        },
+        "PersonalGratitude": {
+          "fields": [
+            "text",
+            "sender",
+            "receiver",
+            "timeContext",
+            "softenedReflection?"
+          ]
+        }
+      },
+      "functions": {},
+      "rls": []
+    },
+    "home_dynamics": {
+      "latest": "v1",
+      "docs": "docs/contracts/home_dynamics_v1.md",
+      "entities": {},
+      "functions": {},
+      "rls": []
+    },
+    "homes": {
+      "latest": "v2",
+      "docs": "docs/contracts/homes_v2.md",
+      "entities": {
+        "Home": {
+          "id": "uuid",
+          "name": "text",
+          "ownerUserId": "uuid",
+          "createdAt": "timestamptz",
+          "updatedAt": "timestamptz",
+          "isActive": "boolean",
+          "deactivatedAt": "timestamptz|null"
+        },
+        "Membership": {
+          "id": "uuid",
+          "userId": "uuid",
+          "homeId": "uuid",
+          "role": "text",
+          "validFrom": "timestamptz",
+          "validTo": "timestamptz|null",
+          "isCurrent": "boolean",
+          "createdAt": "timestamptz",
+          "updatedAt": "timestamptz"
+        },
+        "Invite": {
+          "id": "uuid",
+          "homeId": "uuid",
+          "code": "citext",
+          "revokedAt": "timestamptz|null",
+          "usedCount": "int4",
+          "createdAt": "timestamptz"
+        }
+      },
+      "functions": {
+        "homes.create": {
+          "type": "rpc",
+          "caller": "authenticated",
+          "impl": "public.homes_create_with_invite",
+          "args": {},
+          "returns": "jsonb",
+          "errors": [
+            "UNAUTHORIZED"
+          ],
+          "notes": "Creates a home, owner membership, and initial invite; returns { home: { id } }."
+        },
+        "homes.join": {
+          "type": "rpc",
+          "caller": "authenticated",
+          "impl": "public.homes_join",
+          "args": {
+            "p_code": "text"
+          },
+          "returns": "jsonb",
+          "errors": [
+            "INVALID_CODE",
+            "INACTIVE_INVITE",
+            "ALREADY_IN_OTHER_HOME",
+            "PAYWALL_LIMIT_ACTIVE_MEMBERS",
+            "FORBIDDEN",
+            "UNAUTHORIZED"
+          ]
+        },
+        "homes.transferOwner": {
+          "type": "rpc",
+          "caller": "owner-only",
+          "impl": "public.homes_transfer_owner",
+          "args": {
+            "p_home_id": "uuid",
+            "p_new_owner_id": "uuid"
+          },
+          "returns": "jsonb",
+          "errors": [
+            "INVALID_NEW_OWNER",
+            "NEW_OWNER_NOT_MEMBER",
+            "STATE_CHANGED_RETRY",
+            "FORBIDDEN",
+            "UNAUTHORIZED"
+          ]
+        },
+        "homes.leave": {
+          "type": "rpc",
+          "caller": "member",
+          "impl": "public.homes_leave",
+          "args": {
+            "p_home_id": "uuid"
+          },
+          "returns": "jsonb",
+          "errors": [
+            "NOT_MEMBER",
+            "OWNER_MUST_TRANSFER_FIRST",
+            "STATE_CHANGED_RETRY",
+            "FORBIDDEN",
+            "UNAUTHORIZED"
+          ]
+        },
+        "invites.getOrCreate": {
+          "type": "rpc",
+          "caller": "owner-only",
+          "status": "absent",
+          "notes": "Not present in DB; initial invite is created by homes.create; manual rotation via invites.rotate."
+        },
+        "invites.revoke": {
+          "type": "rpc",
+          "caller": "owner-only",
+          "impl": "public.invites_revoke",
+          "args": {
+            "p_home_id": "uuid"
+          },
+          "returns": "jsonb",
+          "errors": [
+            "FORBIDDEN",
+            "UNAUTHORIZED"
+          ],
+          "notes": "Idempotent when no active invite exists (returns info payload)."
+        },
+        "invites.rotate": {
+          "type": "rpc",
+          "caller": "owner-only",
+          "impl": "public.invites_rotate",
+          "args": {
+            "p_home_id": "uuid"
+          },
+          "returns": "jsonb",
+          "errors": [
+            "FORBIDDEN",
+            "UNAUTHORIZED"
+          ],
+          "notes": "Revokes existing active invite(s) and creates a new one; returns { invite_code }."
+        },
+        "membership.meCurrent": {
+          "type": "rpc",
+          "caller": "member",
+          "impl": "public.membership_me_current",
+          "args": {},
+          "returns": "jsonb",
+          "errors": [
+            "UNAUTHORIZED"
+          ],
+          "notes": "Returns { ok: true, current: null | { user_id, home_id, role, valid_from } }"
+        },
+        "members.listActiveByHome": {
+          "type": "rpc",
+          "caller": "member",
+          "impl": "public.members_list_active_by_home",
+          "args": {
+            "p_home_id": "uuid",
+            "p_exclude_self": "boolean"
+          },
+          "returns": {
+            "columns": {
+              "user_id": "uuid",
+              "username": "citext",
+              "role": "text",
+              "valid_from": "timestamptz",
+              "avatar_url": "text",
+              "can_transfer_to": "boolean"
+            }
+          }
+        }
+      },
+      "rls": [
+        {
+          "table": "homes",
+          "rule": "inactive home denied"
+        },
+        {
+          "table": "memberships",
+          "rule": "member allowed; non-member denied"
+        },
+        {
+          "table": "invites",
+          "rule": "no client access; RPC-only"
+        }
+      ],
+      "db": {
+        "tables": {
+          "public.homes": {
+            "constraints": [
+              "chk_homes_active_vs_deactivated_at"
+            ],
+            "indexes": [
+              "pk_homes(id)"
+            ]
+          },
+          "public.memberships": {
+            "constraints": [
+              "no_overlap_per_user_home"
+            ],
+            "indexes": [
+              "uq_memberships_user_one_current(user_id) WHERE is_current",
+              "uq_memberships_home_one_current_owner(home_id) WHERE is_current AND role = 'owner'"
+            ]
+          },
+          "public.invites": {
+            "constraints": [
+              "chk_invites_code_format",
+              "chk_invites_revoked_after_created",
+              "chk_invites_used_nonneg"
+            ],
+            "indexes": [
+              "uq_invites_active_one_per_home(home_id) WHERE revoked_at IS NULL",
+              "idx_invites_code_active(code) WHERE revoked_at IS NULL"
+            ]
+          },
+          "public.home_plan_limits": {
+            "constraints": [
+              "pk_home_plan_limits(plan, metric)"
+            ],
+            "indexes": []
+          },
+          "public.home_usage_counters": {
+            "constraints": [],
+            "indexes": [
+              "pk_home_usage_counters(home_id)"
+            ]
+          }
+        },
+        "functions": {
+          "public.homes_create_with_invite": {
+            "type": "rpc",
+            "args": {},
+            "returns": "jsonb",
+            "security": "definer",
+            "volatility": "volatile",
+            "grants": {
+              "execute": [
+                "authenticated"
+              ]
+            }
+          },
+          "public.homes_join": {
+            "type": "rpc",
+            "args": {
+              "p_code": "text"
+            },
+            "returns": "jsonb",
+            "security": "definer",
+            "volatility": "volatile",
+            "grants": {
+              "execute": [
+                "authenticated"
+              ]
+            }
+          },
+          "public.homes_transfer_owner": {
+            "type": "rpc",
+            "args": {
+              "p_home_id": "uuid",
+              "p_new_owner_id": "uuid"
+            },
+            "returns": "jsonb",
+            "security": "definer",
+            "volatility": "volatile",
+            "grants": {
+              "execute": [
+                "authenticated"
+              ]
+            }
+          },
+          "public.homes_leave": {
+            "type": "rpc",
+            "args": {
+              "p_home_id": "uuid"
+            },
+            "returns": "jsonb",
+            "security": "definer",
+            "volatility": "volatile",
+            "grants": {
+              "execute": [
+                "authenticated"
+              ]
+            }
+          },
+          "public.invites_revoke": {
+            "type": "rpc",
+            "args": {
+              "p_home_id": "uuid"
+            },
+            "returns": "jsonb",
+            "security": "definer",
+            "volatility": "volatile",
+            "grants": {
+              "execute": [
+                "authenticated"
+              ]
+            }
+          },
+          "public.invites_rotate": {
+            "type": "rpc",
+            "args": {
+              "p_home_id": "uuid"
+            },
+            "returns": "jsonb",
+            "security": "definer",
+            "volatility": "volatile",
+            "grants": {
+              "execute": [
+                "authenticated"
+              ]
+            }
+          },
+          "public.members_list_active_by_home": {
+            "type": "rpc",
+            "args": {
+              "p_home_id": "uuid",
+              "p_exclude_self": "boolean"
+            },
+            "returns": "setof record",
+            "security": "definer",
+            "volatility": "stable",
+            "grants": {
+              "execute": [
+                "authenticated"
+              ]
+            }
+          },
+          "public.membership_me_current": {
+            "type": "rpc",
+            "args": {},
+            "returns": "jsonb",
+            "security": "definer",
+            "volatility": "stable",
+            "grants": {
+              "execute": [
+                "authenticated"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "preference_reports": {
+      "latest": "v1",
+      "docs": "docs/contracts/preference_reports_v1.md",
+      "entities": {
+        "PreferenceTaxonomy": {
+          "preferenceId": "text",
+          "isActive": "boolean",
+          "createdAt": "timestamptz"
+        },
+        "PreferenceTaxonomyDef": {
+          "preferenceId": "text",
+          "domain": "text",
+          "label": "text",
+          "description": "text",
+          "valueKeys": "text[3]",
+          "aggregation": "text",
+          "safetyNotes": "text[]",
+          "createdAt": "timestamptz",
+          "updatedAt": "timestamptz"
+        },
+        "PreferenceResponse": {
+          "userId": "uuid",
+          "preferenceId": "text",
+          "optionIndex": "int2",
+          "capturedAt": "timestamptz"
+        },
+        "PreferenceReport": {
+          "id": "uuid",
+          "subjectUserId": "uuid",
+          "templateKey": "text",
+          "locale": "text",
+          "status": "text",
+          "generatedContent": "jsonb",
+          "publishedContent": "jsonb",
+          "generatedAt": "timestamptz",
+          "publishedAt": "timestamptz",
+          "lastEditedAt": "timestamptz|null",
+          "lastEditedBy": "uuid|null"
+        },
+        "PreferenceReportRevision": {
+          "id": "uuid",
+          "reportId": "uuid",
+          "editorUserId": "uuid",
+          "editedAt": "timestamptz",
+          "content": "jsonb",
+          "changeSummary": "text|null"
+        },
+        "PreferenceReportTemplate": {
+          "id": "uuid",
+          "templateKey": "text",
+          "locale": "text",
+          "body": "jsonb",
+          "createdAt": "timestamptz",
+          "updatedAt": "timestamptz"
+        },
+        "PreferenceReportAcknowledgement": {
+          "id": "uuid",
+          "reportId": "uuid",
+          "viewerUserId": "uuid",
+          "acknowledgedAt": "timestamptz"
+        }
+      },
+      "functions": {
+        "preference.responses.submit": {
+          "type": "rpc",
+          "caller": "authenticated",
+          "impl": "public.preference_responses_submit",
+          "args": {
+            "p_answers": "jsonb"
+          },
+          "returns": "jsonb"
+        },
+        "preference.reports.generate": {
+          "type": "rpc",
+          "caller": "authenticated",
+          "impl": "public.preference_reports_generate",
+          "args": {
+            "p_template_key": "text",
+            "p_locale": "text",
+            "p_force": "boolean"
+          },
+          "returns": "jsonb"
+        },
+        "preference.reports.editSectionText": {
+          "type": "rpc",
+          "caller": "subject-only",
+          "impl": "public.preference_reports_edit_section_text",
+          "args": {
+            "p_template_key": "text",
+            "p_locale": "text",
+            "p_section_key": "text",
+            "p_new_text": "text",
+            "p_change_summary": "text|null"
+          },
+          "returns": "jsonb"
+        },
+        "preference.reports.getForHome": {
+          "type": "rpc",
+          "caller": "member",
+          "impl": "public.preference_reports_get_for_home",
+          "args": {
+            "p_home_id": "uuid",
+            "p_subject_user_id": "uuid",
+            "p_template_key": "text",
+            "p_locale": "text"
+          },
+          "returns": "jsonb"
+        },
+        "preference.reports.listForHome": {
+          "type": "rpc",
+          "caller": "member",
+          "impl": "public.preference_reports_list_for_home",
+          "args": {
+            "p_home_id": "uuid",
+            "p_template_key": "text",
+            "p_locale": "text"
+          },
+          "returns": "jsonb"
+        },
+        "preference.reports.acknowledge": {
+          "type": "rpc",
+          "caller": "member",
+          "impl": "public.preference_reports_acknowledge",
+          "args": {
+            "p_report_id": "uuid"
+          },
+          "returns": "jsonb"
+        },
+        "preference.templates.getForUser": {
+          "type": "rpc",
+          "caller": "authenticated",
+          "impl": "public.preference_templates_get_for_user",
+          "args": {
+            "p_template_key": "text"
+          },
+          "returns": "jsonb"
+        }
+      },
+      "rls": []
+    },
+    "preference_scenarios": {
+      "latest": "v1",
+      "docs": "docs/contracts/preference_scenarios_v1.md",
+      "entities": {
+        "PreferenceScenario": {
+          "id": "text",
+          "domain": "text",
+          "scenario": "text",
+          "options": "text[3]",
+          "mapsToPreferenceId": "text",
+          "intensityModel": "implicit",
+          "enforceable": false
+        }
+      },
+      "functions": {},
+      "rls": []
+    },
+    "preference_taxonomy": {
+      "latest": "v1",
+      "docs": "docs/contracts/preference_taxonomy_v1.md",
+      "entities": {
+        "PreferenceTaxonomyItem": {
+          "id": "text",
+          "domain": "text",
+          "label": "text",
+          "description": "text",
+          "values": "text[]",
+          "aggregation": "text",
+          "safety": "text|null"
+        }
+      },
+      "functions": {},
+      "rls": []
+    },
+    "users": {
+      "latest": "v1",
+      "docs": "docs/contracts/users_v1.md",
+      "entities": {
+        "UserProfile": {
+          "id": "uuid",
+          "email": "text|null",
+          "fullName": "text|null",
+          "username": "citext",
+          "avatarId": "uuid",
+          "createdAt": "timestamptz",
+          "updatedAt": "timestamptz",
+          "deactivatedAt": "timestamptz|null"
+        },
+        "Avatar": {
+          "id": "uuid",
+          "storagePath": "text",
+          "category": "text",
+          "name": "text",
+          "createdAt": "timestamptz"
+        },
+        "ReservedUsername": {
+          "name": "citext"
+        }
+      },
+      "functions": {
+        "users.selfDelete": {
+          "type": "edge",
+          "auth": "service-role (self-only)",
+          "order": [
+            "db-first",
+            "anonymize",
+            "auth-delete"
+          ],
+          "effects": [
+            "auto-transfer-owned-homes-or-deactivate",
+            "close-nonowner-memberships",
+            "user_profile: email=NULL, fullName=NULL, avatarId=keep, username=keep"
+          ],
+          "calls": [
+            "homes.transferOwner"
+          ]
+        },
+        "users.profileMe": {
+          "type": "rpc",
+          "auth": "authenticated",
+          "caller": "member",
+          "impl": "public.profile_me",
+          "args": {},
+          "returns": {
+            "columns": {
+              "user_id": "uuid",
+              "username": "citext",
+              "avatar_storage_path": "text"
+            }
+          },
+          "notes": [
+            "SECURITY DEFINER + `_assert_authenticated`",
+            "Filters out deactivated profiles and joins avatars table for storage_path"
+          ]
+        },
+        "profile.identityUpdate": {
+          "type": "rpc",
+          "auth": "authenticated",
+          "caller": "member",
+          "impl": "public.profile_identity_update",
+          "args": {
+            "p_username": "citext",
+            "p_avatar_id": "uuid"
+          },
+          "returns": {
+            "columns": {
+              "username": "citext",
+              "avatar_id": "uuid",
+              "avatar_storage_path": "text"
+            }
+          },
+          "errors": [
+            "INVALID_USERNAME",
+            "AVATAR_NOT_FOUND",
+            "AVATAR_NOT_ALLOWED_FOR_PLAN",
+            "AVATAR_IN_USE",
+            "PROFILE_NOT_FOUND",
+            "USERNAME_TAKEN"
+          ]
+        },
+        "avatars.listForHome": {
+          "type": "rpc",
+          "auth": "authenticated",
+          "caller": "member",
+          "impl": "public.avatars_list_for_home",
+          "args": {
+            "p_home_id": "uuid"
+          },
+          "returns": {
+            "columns": {
+              "id": "uuid",
+              "storage_path": "text",
+              "category": "text"
+            }
+          },
+          "notes": [
+            "Enforces home membership + effective plan gating (free plan limited to animal category)",
+            "Ensures uniqueness by excluding avatars already in use by other current members"
+          ]
+        }
+      },
+      "rls": [
+        {
+          "table": "public.profiles",
+          "rule": "SELECT own row only; client writes revoked (triggers/RPC only)"
+        },
+        {
+          "table": "public.avatars",
+          "rule": "SELECT allowed for authenticated users"
+        },
+        {
+          "table": "public.reserved_usernames",
+          "rule": "no client access; RLS enabled; anon/auth revoked"
+        }
+      ],
+      "db": {
+        "extensions": [
+          "citext"
+        ],
+        "triggers": {
+          "public.handle_new_user": {
+            "type": "trigger",
+            "table": "auth.users",
+            "event": "AFTER INSERT",
+            "returns": "trigger",
+            "security": "definer",
+            "notes": "On new auth user, creates profile with default avatar and generated username."
+          }
+        },
+        "functions": {
+          "public._gen_unique_username": {
+            "type": "internal",
+            "args": {
+              "p_email": "text",
+              "p_id": "uuid"
+            },
+            "returns": "citext",
+            "volatility": "volatile",
+            "notes": "Generates a unique username; enforces regex; skips reserved names; uses advisory lock; citext + unique index ensures case-insensitive uniqueness."
+          },
+          "public.profile_me": {
+            "type": "rpc",
+            "args": {},
+            "returns": {
+              "user_id": "uuid",
+              "username": "citext",
+              "avatar_storage_path": "text"
+            },
+            "security": "definer",
+            "volatility": "stable",
+            "grants": {
+              "execute": [
+                "authenticated"
+              ]
+            }
+          },
+          "public.avatars_list_for_home": {
+            "type": "rpc",
+            "args": {
+              "p_home_id": "uuid"
+            },
+            "returns": {
+              "id": "uuid",
+              "storage_path": "text",
+              "category": "text"
+            },
+            "security": "definer",
+            "volatility": "stable",
+            "grants": {
+              "execute": [
+                "authenticated"
+              ]
+            }
+          },
+          "public.profile_identity_update": {
+            "type": "rpc",
+            "args": {
+              "p_username": "citext",
+              "p_avatar_id": "uuid"
+            },
+            "returns": {
+              "username": "citext",
+              "avatar_id": "uuid",
+              "avatar_storage_path": "text"
+            },
+            "security": "definer",
+            "volatility": "volatile",
+            "grants": {
+              "execute": [
+                "authenticated"
+              ]
+            }
+          }
+        },
+        "tables": {
+          "public.profiles": {
+            "indexes": [
+              "uq_profiles_username(username)"
+            ],
+            "constraints": [
+              "chk_profiles_username_format"
+            ]
+          },
+          "public.avatars": {
+            "indexes": [
+              "pk_avatars(id)"
+            ],
+            "constraints": [
+              "avatars_category_check (category IN ('animal','plant'))"
+            ]
+          },
+          "public.reserved_usernames": {
+            "indexes": [
+              "PRIMARY KEY(name)"
+            ],
+            "constraints": []
+          }
+        }
+      }
+    }
+  }
+}

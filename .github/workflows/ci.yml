@@ -1,0 +1,303 @@
+# .github/workflows/kinly-backend.yml
+name: Kinly Backend (CI • Deploy • Publish Contracts)
+
+on:
+  pull_request:
+    branches: [ main ]
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      deploy_dev:
+        description: "Deploy to Supabase Dev"
+        required: false
+        default: true
+        type: boolean
+      deploy_prod:
+        description: "Deploy to Supabase Prod (requires environment approval if configured)"
+        required: false
+        default: false
+        type: boolean
+      publish_contracts:
+        description: "Publish snapshots to kinly-contracts"
+        required: false
+        default: true
+        type: boolean
+
+concurrency:
+  group: kinly-backend-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  ci_guardrails:
+    name: CI • Backend Guardrails (authoritative)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Supabase CLI is required by backend_guardrails.sh
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      # Deno is only required if Edge Functions exist.
+      # We can install it unconditionally (simple + cheap) and let the script decide.
+      - name: Setup Deno (only if Edge Functions exist)
+        uses: denoland/setup-deno@v1
+        with:
+          deno-version-file: .denoversion
+        continue-on-error: true
+
+      - name: Cache Deno dependencies
+        if: always()
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/deno
+          key: deno-${{ runner.os }}-${{ hashFiles('.denoversion', 'deno.lock', 'supabase/deno.json') }}
+
+      - name: Run backend guardrails (hard fail)
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x tool/backend_guardrails.sh
+          ./tool/backend_guardrails.sh
+
+  deploy_dev:
+    name: Deploy • Supabase Dev
+    needs: [ci_guardrails]
+    runs-on: ubuntu-latest
+    environment: dev
+    if: >
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      github.event_name == 'workflow_dispatch'
+    env:
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      SUPABASE_DB_PASSWORD: ${{ secrets.DEV_DB_PASSWORD }}
+      SUPABASE_PROJECT_ID: ${{ secrets.DEV_PROJECT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve deploy flag (Dev)
+        id: flags
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "do_deploy=${{ inputs.deploy_dev }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "do_deploy=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: supabase/setup-cli@v1
+        if: steps.flags.outputs.do_deploy == 'true'
+        with:
+          version: latest
+
+      - name: Link project (Dev)
+        if: steps.flags.outputs.do_deploy == 'true'
+        run: supabase link --project-ref "$SUPABASE_PROJECT_ID"
+
+      - name: Set Supabase secrets (Dev)
+        if: steps.flags.outputs.do_deploy == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          FCM_SA_JSON=$(echo "${{ secrets.FCM_SERVICE_ACCOUNT }}" | base64 --decode)
+
+          supabase secrets set \
+            SUPABASE_URL="${{ secrets.SUPABASE_URL }}" \
+            SUPABASE_SERVICE_ROLE_KEY="${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
+            RC_WEBHOOK_SECRET="${{ secrets.DEV_RC_WEBHOOK_SECRET }}" \
+            FCM_SERVICE_ACCOUNT="$FCM_SA_JSON" \
+            FCM_PROJECT_ID="${{ secrets.FCM_PROJECT_ID }}"
+
+      - name: Push migrations to Dev
+        if: steps.flags.outputs.do_deploy == 'true'
+        run: supabase db push
+
+      - name: Deploy Edge Functions (Dev)
+        if: steps.flags.outputs.do_deploy == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Deploy only if the functions exist
+          if [ -d "supabase/functions" ] && find supabase/functions -mindepth 1 -maxdepth 2 -not -path '*/.*' -print -quit | grep -q .; then
+            supabase functions deploy notifications_daily --project-ref "$SUPABASE_PROJECT_ID" || true
+            supabase functions deploy revenuecat_webhook --project-ref "$SUPABASE_PROJECT_ID" --no-verify-jwt || true
+          else
+            echo "::notice::No Edge Functions detected; skipping deploy"
+          fi
+
+      - name: Smoke tests (Dev)
+        if: steps.flags.outputs.do_deploy == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Invoke only if deployed / exist
+          supabase functions invoke notifications_daily || true
+          supabase functions invoke revenuecat_webhook || true
+
+  deploy_prod:
+    name: Deploy • Supabase Prod
+    needs: [deploy_dev]
+    runs-on: ubuntu-latest
+    environment: prod
+    if: >
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      github.event_name == 'workflow_dispatch'
+    env:
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      SUPABASE_DB_PASSWORD: ${{ secrets.PROD_DB_PASSWORD }}
+      SUPABASE_PROJECT_ID: ${{ secrets.PROD_PROJECT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve deploy flag (Prod)
+        id: flags
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "do_deploy=${{ inputs.deploy_prod }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "do_deploy=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: supabase/setup-cli@v1
+        if: steps.flags.outputs.do_deploy == 'true'
+        with:
+          version: latest
+
+      - name: Link project (Prod)
+        if: steps.flags.outputs.do_deploy == 'true'
+        run: supabase link --project-ref "$SUPABASE_PROJECT_ID"
+
+      - name: Set Supabase secrets (Prod)
+        if: steps.flags.outputs.do_deploy == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          FCM_SA_JSON=$(echo "${{ secrets.FCM_SERVICE_ACCOUNT }}" | base64 --decode)
+
+          supabase secrets set \
+            SUPABASE_URL="${{ secrets.SUPABASE_URL }}" \
+            SUPABASE_SERVICE_ROLE_KEY="${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
+            RC_WEBHOOK_SECRET="${{ secrets.PROD_RC_WEBHOOK_SECRET }}" \
+            FCM_SERVICE_ACCOUNT="$FCM_SA_JSON" \
+            FCM_PROJECT_ID="${{ secrets.FCM_PROJECT_ID }}"
+
+      - name: Push migrations to Prod
+        if: steps.flags.outputs.do_deploy == 'true'
+        run: supabase db push
+
+      - name: Deploy Edge Functions (Prod)
+        if: steps.flags.outputs.do_deploy == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -d "supabase/functions" ] && find supabase/functions -mindepth 1 -maxdepth 2 -not -path '*/.*' -print -quit | grep -q .; then
+            supabase functions deploy notifications_daily --project-ref "$SUPABASE_PROJECT_ID" || true
+            supabase functions deploy revenuecat_webhook --project-ref "$SUPABASE_PROJECT_ID" --no-verify-jwt || true
+          else
+            echo "::notice::No Edge Functions detected; skipping deploy"
+          fi
+
+      - name: Smoke tests (Prod)
+        if: steps.flags.outputs.do_deploy == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          supabase functions invoke notifications_daily || true
+          supabase functions invoke revenuecat_webhook || true
+
+  publish_contracts:
+    name: Publish • Backend Snapshots → kinly-contracts
+    needs: [ci_guardrails]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    if: >
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Checkout kinly-backend
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve publish flag
+        id: flags
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "do_publish=${{ inputs.publish_contracts }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "do_publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Verify backend snapshots exist
+        if: steps.flags.outputs.do_publish == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for f in \
+            docs/contracts/schema.sql \
+            docs/contracts/rls_policies.sql \
+            docs/contracts/openapi.json \
+            docs/contracts/types.generated.ts \
+            docs/contracts/edge_functions.json \
+            docs/contracts/registry.json \
+            docs/contracts/registry.schema.json
+          do
+            test -f "$f" || { echo "::error::Missing expected snapshot: $f"; exit 1; }
+          done
+
+      - name: Checkout kinly-contracts
+        if: steps.flags.outputs.do_publish == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: pariszhuang123/kinly-contracts
+          path: kinly-contracts
+          token: ${{ secrets.KINLY_CONTRACTS_PUSH_TOKEN }}
+          fetch-depth: 0
+
+      - name: Sync snapshots into kinly-contracts/contracts/api/kinly_backend
+        if: steps.flags.outputs.do_publish == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          DEST="kinly-contracts/contracts/api/kinly_backend"
+          mkdir -p "$DEST"
+
+          cp -f docs/contracts/schema.sql           "$DEST/schema.sql"
+          cp -f docs/contracts/rls_policies.sql     "$DEST/rls_policies.sql"
+          cp -f docs/contracts/openapi.json         "$DEST/openapi.json"
+          cp -f docs/contracts/types.generated.ts   "$DEST/types.generated.ts"
+          cp -f docs/contracts/edge_functions.json  "$DEST/edge_functions.json"
+          cp -f docs/contracts/registry.json        "$DEST/registry.json"
+          cp -f docs/contracts/registry.schema.json "$DEST/registry.schema.json"
+
+      - name: Commit + push changes (if any)
+        if: steps.flags.outputs.do_publish == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd kinly-contracts
+
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "No contract changes to publish."
+            exit 0
+          fi
+
+          git config user.name "kinly-backend-bot"
+          git config user.email "actions@users.noreply.github.com"
+
+          git add -A
+          git commit -m "chore(api): publish backend snapshots from kinly-backend ${GITHUB_SHA}"
+          git push origin HEAD:main

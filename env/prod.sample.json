@@ -1,0 +1,13 @@
+{
+  "ENV": "prod",
+  "SUPABASE_URL": "https://your-prod-project.supabase.co",
+  "SUPABASE_ANON_KEY": "prod-anon-key",
+  "DEEPLINK_HOST": "example.com",
+  "WEB_CLIENT_ID": "optional-google-web-client-id",
+  "IOS_CLIENT_ID": "optional-google-ios-client-id",
+  "IOS_STORE_URL": "https://apps.apple.com/nz/app/coffee-pool/id6737482186",
+  "ANDROID_STORE_URL": "https://play.google.com/store/apps/details?id=com.makinglifeeasie.kinly",
+  "SENTRY_DSN": "",
+  "REVENUECAT_IOS_KEY": "test_VwhtoxfeVhciuoVrgQZTYxkGLds",
+  "REVENUECAT_ANDROID_KEY": "test_VwhtoxfeVhciuoVrgQZTYxkGLds"
+}

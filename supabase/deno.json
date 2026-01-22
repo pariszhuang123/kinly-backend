@@ -1,0 +1,13 @@
+{
+  "nodeModulesDir": "auto",
+  "lint": {
+    "rules": {
+      "exclude": ["no-import-prefix"]
+    }
+  },
+  "imports": {
+    "@std/http": "jsr:@std/http@0.224.0",
+    "supabase-js": "npm:@supabase/supabase-js@2.48.0",
+    "@types/node": "npm:@types/node@24"
+  }
+}

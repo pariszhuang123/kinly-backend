@@ -1,0 +1,67 @@
+name: Memory Bank Nudge
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  nudge:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Suggest memory bank updates
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const body = (pr.body || '').toLowerCase();
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pr.number,
+              per_page: 100,
+            });
+
+            const changed = files.map(f => f.filename);
+            const touchesDb = changed.some(p => p.startsWith('db/'));
+            const touchesWorkflows = changed.some(p => p.startsWith('.github/workflows/'));
+            const touchesLib = changed.some(p => p.startsWith('lib/'));
+            const touchesMemory = changed.some(p => p.startsWith('coordination/'));
+
+            if ((touchesDb || touchesWorkflows || touchesLib) && !touchesMemory) {
+              const body = [
+                'Heads up: This PR changes `db/`, `.github/workflows/`, or `lib/` but no `coordination/` files.',
+                '',
+                'Consider updating:',
+                '- `coordination/memory_bank/calibration_values.md` (CI flags, Supabase CLI params)',
+                '- `coordination/memory_bank/test_failures.md` (new failure patterns and fixes)',
+                '- `coordination/memory_bank/dependencies.md` (tooling/version changes)',
+                '- `coordination/orchestration/progress_tracker.md` (status/handoff if cross-role)',
+              ].join('\n');
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: pr.number,
+                body,
+              });
+            }
+
+            const mentionsSoWhat = body.includes('so what for kinly');
+            if (touchesLib && !mentionsSoWhat) {
+              const note = [
+                'Suggestion: Add a brief “So what for Kinly” section to the PR description to clarify user impact.',
+                '',
+                'See persona and template:',
+                '- `docs/agents/paris.md`',
+                '- `docs/templates/reasoning_note.md`',
+              ].join('\n');
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: pr.number,
+                body: note,
+              });
+            }
