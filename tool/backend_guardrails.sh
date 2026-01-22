@@ -116,25 +116,30 @@ run_deno_checks_if_needed() {
     exit 1
   fi
 
-  if [ ! -f "deno.lock" ]; then
-    err "deno.lock not found (Edge Functions present => frozen lock required)"
+  # ✅ Align paths with your repo layout:
+  # You said deno.json + deno.lock live inside supabase/
+  local DENO_CFG="supabase/deno.json"
+  local DENO_LOCK="supabase/deno.lock"
+
+  if [ ! -f "$DENO_LOCK" ]; then
+    err "$DENO_LOCK not found (Edge Functions present => frozen lock required)"
     exit 1
   fi
 
-  if [ ! -f "supabase/deno.json" ]; then
-    err "supabase/deno.json not found (Edge Functions present => Deno config required)"
+  if [ ! -f "$DENO_CFG" ]; then
+    err "$DENO_CFG not found (Edge Functions present => Deno config required)"
     exit 1
   fi
 
   log "Running Deno tests (edge functions) with frozen lock..."
   deno test -A \
-    --config supabase/deno.json \
-    --lock=deno.lock \
+    --config "$DENO_CFG" \
+    --lock="$DENO_LOCK" \
     --frozen \
     supabase/functions || {
-      err "Deno tests failed OR lockfile out of date. Fix locally then commit deno.lock."
+      err "Deno tests failed OR lockfile out of date. Fix locally then commit supabase/deno.lock."
       echo "Run locally:"
-      echo "  deno test -A --config supabase/deno.json --lock=deno.lock --frozen=false supabase/functions"
+      echo "  deno test -A --config $DENO_CFG --lock=$DENO_LOCK --frozen=false supabase/functions"
       exit 1
     }
 }
