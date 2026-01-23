@@ -6,8 +6,8 @@
 - **Capability**: Interest Capture (Country + Locale + Email)
 - **Surface**: Kinly Web (/get)
 - **Status**: Active
-- **Owners**: Web, Edge, DB
-- **Last updated**: 2026-01-20
+- **Owners**: Web, DB
+- **Last updated**: 2026-03-22
 
 ## Purpose
 
@@ -37,8 +37,8 @@ This is used for:
 4. **Minimal sensitive retention** Store only what we need; no IP storage
    required for v1.
 
-5. **RPC-only DB writes** Edge Function MUST call RPC; no direct table insert
-   from Edge.
+5. **RPC-only DB writes** Web calls RPC directly via supabase-js; no other write
+   path.
 
 ## UX Requirements
 
@@ -111,117 +111,91 @@ Priority order:
 
 **Important**: Detection is used only to prefill; user override wins.
 
-## API: Edge Function
+## API: RPC (direct from web)
 
-**Endpoint**: `POST /functions/v1/interest_capture_v1`
+- **RPC name**: `public.leads_upsert_v1`
+- **Invocation**: supabase-js from kinly-web (no Edge function)
+- **Inputs**:
+  - `p_email` (text) — required
+  - `p_country_code` (text) — required
+  - `p_ui_locale` (text) — required
+  - `p_source` (text, default `kinly_web_get`) — optional override for other
+    campaigns: `kinly_dating_web_get`, `kinly_rent_web_get`
 
-### Request JSON
+### Request example
 
 ```json
 {
-    "email": "someone@example.com",
-    "country_code": "AU",
-    "ui_locale": "en-AU"
+  "p_email": "someone@example.com",
+  "p_country_code": "AU",
+  "p_ui_locale": "en-AU"
 }
 ```
 
 ### Response JSON (success)
 
-**Status**: 200 OK
-
 ```json
 {
-    "ok": true,
-    "lead_id": "uuid",
-    "deduped": true
+  "ok": true,
+  "lead_id": "uuid",
+  "deduped": true
 }
 ```
 
-### Response JSON (validation error)
+### Errors (api_assert)
 
-**Status**: 400 Bad Request
+- `LEADS_MISSING_FIELDS` — email, country_code, ui_locale required.
+- `LEADS_EMAIL_TOO_LONG` — >254 chars.
+- `LEADS_EMAIL_TOO_SHORT` — <3 chars.
+- `LEADS_EMAIL_INVALID` — fails basic format check (must include `@` and a dot
+  after `@`, no spaces).
+- `LEADS_COUNTRY_CODE_INVALID` — not `^[A-Z]{2}$`.
+- `LEADS_UI_LOCALE_INVALID` — not 2–35 chars, has spaces, or fails light
+  BCP-47-ish regex `^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$`.
+- `LEADS_SOURCE_INVALID` — not in allowlist.
+- `LEADS_RATE_LIMIT_GLOBAL` — global limiter exceeded (per minute).
+- `LEADS_RATE_LIMIT_EMAIL` — per-email limiter exceeded (per day).
 
-```json
-{
-    "ok": false,
-    "error": "validation_failed",
-    "fields": {
-        "email": "invalid",
-        "country_code": "invalid"
-    }
-}
-```
+### Normalization inside RPC
 
-### Edge Validation (MUST)
+- `p_email = trim(p_email)` (case is preserved; uniqueness is case-insensitive
+  via `citext`).
+- `p_country_code = upper(trim(p_country_code))`.
+- `p_ui_locale = trim(p_ui_locale)`.
+- `p_source = trim(...)` with default `kinly_web_get` when blank.
 
-- Reject if missing any required field.
-- **Normalize**:
-  - `email = lower(trim(email))`
-  - `country_code = upper(trim(country_code))`
-  - `ui_locale = trim(ui_locale)` (then apply casing normalization if
-    implemented)
-- **Validate**:
-  - email format
-  - country_code regex `^[A-Z]{2}$`
-  - ui_locale basic constraints (length, no spaces)
+### Rate limits (RPC-level)
 
-### Abuse controls (SHOULD)
+- Global: 300 requests per minute (hashed key, advisory lock serialized).
+- Per-email: 5 submissions per email per day (case-insensitive via `citext`).
+- No IP handling; frontend SHOULD throttle to avoid waste.
 
-- Rate limit per IP (Edge-level) with a low threshold (e.g. 10/min). Return 429
-  Too Many Requests.
-- Add invisible honeypot field on web (optional).
-- Reject obviously automated payloads (optional).
+### Deduping semantics
 
-### Observability (SHOULD)
-
-- Log: `request_id`, result ok/failed, validation failure fields.
-- MUST NOT log raw email in plaintext logs (hash allowed).
-
-## DB Write: RPC
-
-**RPC name**: `public.leads_upsert_v1`
-
-### Signature
-
-```sql
-leads_upsert_v1(
-  p_email text,
-  p_country_code text,
-  p_ui_locale text,
-  p_source text default 'kinly_web_get'
-) returns jsonb
-```
-
-### Return JSONB
-
-```json
-{
-    "lead_id": "uuid",
-    "deduped": true
-}
-```
+- Key: `email` (case-insensitive via `citext`).
+- `deduped = true` when an existing row was updated; `false` when inserted.
+- `source`, `country_code`, and `ui_locale` are overwritten with the latest
+  provided values on conflict.
 
 ## Security
 
 - RPC MUST be `SECURITY DEFINER`.
 - RPC MUST set `search_path = ''`.
 - RPC MUST NOT require user authentication (public form).
-- Table `leads` MUST have Row Level Security (RLS) enabled to prevent direct
-  access.
+- Tables `leads` and `leads_rate_limits` MUST have Row Level Security (RLS)
+  enabled.
+- Revoke all table privileges from `anon` and `authenticated`; allow only RPC
+  execution.
 
 ## Idempotency rules (MUST)
 
-**Deduping key**: `email` (normalized lowercase)
+**Deduping key**: `email` (case-insensitive via `citext`)
 
 **Behavior**:
 
-- If email already exists:
-  - update `country_code`, `ui_locale` only if new values are non-null
-  - update `updated_at`
-  - return `deduped = true`
-- If email does not exist:
-  - insert new row
-  - return `deduped = false`
+- If email already exists: overwrite `country_code`, `ui_locale`, `source`; set
+  `deduped = true`.
+- If email does not exist: insert row; `deduped = false`.
 
 ## Storage Contract
 
@@ -230,7 +204,7 @@ leads_upsert_v1(
 **Columns**:
 
 - `id` uuid primary key default gen_random_uuid()
-- `email` text not null (stored lowercased)
+- `email` citext not null (case-insensitive uniqueness)
 - `country_code` text not null
 - `ui_locale` text not null
 - `source` text not null default 'kinly_web_get'
@@ -239,13 +213,21 @@ leads_upsert_v1(
 
 **Constraints (MUST)**:
 
-- `unique (email)`
+- `unique (email)` via `citext`
 - `check (country_code ~ '^[A-Z]{2}$')`
 - `check (position(' ' in ui_locale) = 0)`
+- `check (source in ('kinly_web_get', 'kinly_dating_web_get', 'kinly_rent_web_get'))`
 
 **Indexes (SHOULD)**:
 
 - index on `created_at desc` (for admin review)
+
+**Rate limit store**: `public.leads_rate_limits`
+
+- `k text primary key` (sha256 hex of key+window)
+- `n integer not null`
+- `updated_at timestamptz not null`
+- Index on `updated_at`
 
 ## Failure Modes
 
@@ -257,4 +239,4 @@ leads_upsert_v1(
 
 - No automatic translation behavior required.
 - No double-opt-in email flows.
-- No IP storage.
+- No IP storage; no IP-based rate limiting.

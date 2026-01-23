@@ -1393,6 +1393,54 @@ export type Database = {
           },
         ]
       }
+      leads: {
+        Row: {
+          country_code: string
+          created_at: string
+          email: string
+          id: string
+          source: string
+          ui_locale: string
+          updated_at: string
+        }
+        Insert: {
+          country_code: string
+          created_at?: string
+          email: string
+          id?: string
+          source?: string
+          ui_locale: string
+          updated_at?: string
+        }
+        Update: {
+          country_code?: string
+          created_at?: string
+          email?: string
+          id?: string
+          source?: string
+          ui_locale?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      leads_rate_limits: {
+        Row: {
+          k: string
+          n: number
+          updated_at: string
+        }
+        Insert: {
+          k: string
+          n?: number
+          updated_at?: string
+        }
+        Update: {
+          k?: string
+          n?: number
+          updated_at?: string
+        }
+        Relationships: []
+      }
       member_cap_join_requests: {
         Row: {
           created_at: string
@@ -2419,6 +2467,7 @@ export type Database = {
         }
         Returns: undefined
       }
+      _sha256_hex: { Args: { p_input: string }; Returns: string }
       _share_log_event_internal: {
         Args: {
           p_channel: string
@@ -3125,6 +3174,16 @@ export type Database = {
       is_home_owner: {
         Args: { p_home_id: string; p_user_id?: string }
         Returns: boolean
+      }
+      leads_rate_limits_cleanup: { Args: never; Returns: undefined }
+      leads_upsert_v1: {
+        Args: {
+          p_country_code: string
+          p_email: string
+          p_source?: string
+          p_ui_locale: string
+        }
+        Returns: Json
       }
       locale_base: { Args: { p_locale: string }; Returns: string }
       member_cap_owner_dismiss: {

@@ -2,6 +2,14 @@
 
 Tracks versioned contract changes and related ADRs.
 
+## v1.0.0 - App Store Reviewer Access
+- Date: 2026-01-23
+- Scope: `docs/contracts/app_store_reviewer_access_v2.md`
+- Changes:
+  - Adds deterministic reviewer login contract (email/password, confirmed Supabase user, standard profile link).
+  - Requires reviewer home to use normal plan/entitlement (premium) rather than reviewer-only flags.
+  - Documents lifecycle/runbook for credential storage, optional rotation, and manual plan setting; no backend seeding shipped.
+
 ## v1 - Gratitude Wall (Shared + Personal)
 - Date: 2026-01-17
 - Scope: `docs/contracts/gratitude_wall_v1.md`

@@ -1962,6 +1962,23 @@ $$;
 ALTER FUNCTION "public"."_preference_templates_validate"() OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."_sha256_hex"("p_input" "text") RETURNS "text"
+    LANGUAGE "sql" IMMUTABLE SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+  select encode(
+    extensions.digest(
+      convert_to(coalesce(p_input, ''), 'utf8'),
+      'sha256'::text
+    ),
+    'hex'
+  );
+$$;
+
+
+ALTER FUNCTION "public"."_sha256_hex"("p_input" "text") OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."_share_log_event_internal"("p_user_id" "uuid", "p_home_id" "uuid", "p_feature" "text", "p_channel" "text") RETURNS "void"
     LANGUAGE "plpgsql"
     SET "search_path" TO ''
@@ -8306,6 +8323,166 @@ $$;
 ALTER FUNCTION "public"."is_home_owner"("p_home_id" "uuid", "p_user_id" "uuid") OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."leads_rate_limits_cleanup"() RETURNS "void"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+begin
+  delete from public.leads_rate_limits
+   where updated_at < now() - interval '8 days';
+end;
+$$;
+
+
+ALTER FUNCTION "public"."leads_rate_limits_cleanup"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."leads_upsert_v1"("p_email" "text", "p_country_code" "text", "p_ui_locale" "text", "p_source" "text" DEFAULT 'kinly_web_get'::"text") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $_$
+declare
+  v_lead_id uuid;
+  v_deduped boolean := false;
+
+  v_now timestamptz := now();
+
+  v_email_key text;
+  v_global_key text;
+
+  v_email_lock_id bigint;
+  v_global_lock_id bigint;
+
+  v_email_window timestamptz;
+  v_global_window timestamptz;
+
+  v_email_n integer;
+  v_global_n integer;
+
+  c_email_limit_per_day constant integer := 5;
+  c_global_limit_per_minute constant integer := 300;
+begin
+  -- Normalize inputs
+  p_email := trim(coalesce(p_email, ''));
+  p_country_code := upper(trim(coalesce(p_country_code, '')));
+  p_ui_locale := trim(coalesce(p_ui_locale, ''));
+  p_source := coalesce(nullif(trim(p_source), ''), 'kinly_web_get');
+
+  perform public.api_assert(
+    p_email <> '' and p_country_code <> '' and p_ui_locale <> '',
+    'LEADS_MISSING_FIELDS',
+    'email, country_code, and ui_locale are required.'
+  );
+
+  -- Email (permissive) + max length
+  perform public.api_assert(length(p_email) <= 254,
+    'LEADS_EMAIL_TOO_LONG',
+    'Email must be 254 characters or fewer.'
+  );
+
+  perform public.api_assert(length(p_email) >= 3,
+    'LEADS_EMAIL_TOO_SHORT',
+    'Email must be at least 3 characters.'
+  );
+
+  perform public.api_assert(
+    p_email !~ '\s'
+    and position('@' in p_email) > 1
+    and position('.' in split_part(p_email, '@', 2)) > 1,
+    'LEADS_EMAIL_INVALID',
+    'Email format is invalid.'
+  );
+
+  -- country_code strict format only (ZZ allowed)
+  perform public.api_assert(p_country_code ~ '^[A-Z]{2}$',
+    'LEADS_COUNTRY_CODE_INVALID',
+    'country_code must be ISO alpha-2 (e.g., NZ).'
+  );
+
+  -- ui_locale: light BCP-47-ish, no spaces
+  perform public.api_assert(
+    length(p_ui_locale) between 2 and 35
+    and p_ui_locale !~ '\s'
+    and p_ui_locale ~ '^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$',
+    'LEADS_UI_LOCALE_INVALID',
+    'ui_locale must look like a locale tag (e.g., en-NZ).'
+  );
+
+  -- source allowlist
+  perform public.api_assert(
+    p_source in ('kinly_web_get', 'kinly_dating_web_get', 'kinly_rent_web_get'),
+    'LEADS_SOURCE_INVALID',
+    'source is not allowed.'
+  );
+
+  -- Abuse mitigation (NO IP)
+  v_email_window := date_trunc('day', v_now);
+  v_global_window := date_trunc('minute', v_now);
+
+  -- Hash keys (NO PII stored)
+  -- Canonicalize email with citext semantics: (p_email::public.citext)::text
+  v_email_key := public._sha256_hex(
+    'email:' || (p_email::public.citext)::text || ':' || v_email_window::text
+  );
+
+  v_global_key := public._sha256_hex(
+    'global:' || v_global_window::text
+  );
+
+  -- 64-bit advisory lock ids derived from sha256 hex keys (first 16 hex chars)
+  v_email_lock_id := ('x' || substr(v_email_key, 1, 16))::bit(64)::bigint;
+  v_global_lock_id := ('x' || substr(v_global_key, 1, 16))::bit(64)::bigint;
+
+  -- Global limiter
+  perform pg_advisory_xact_lock(v_global_lock_id);
+  insert into public.leads_rate_limits(k, n, updated_at)
+  values (v_global_key, 1, v_now)
+  on conflict (k) do update
+     set n = public.leads_rate_limits.n + 1,
+         updated_at = v_now
+  returning n into v_global_n;
+
+  perform public.api_assert(v_global_n <= c_global_limit_per_minute,
+    'LEADS_RATE_LIMIT_GLOBAL',
+    'Too many requests. Please try again later.'
+  );
+
+  -- Email limiter
+  perform pg_advisory_xact_lock(v_email_lock_id);
+  insert into public.leads_rate_limits(k, n, updated_at)
+  values (v_email_key, 1, v_now)
+  on conflict (k) do update
+     set n = public.leads_rate_limits.n + 1,
+         updated_at = v_now
+  returning n into v_email_n;
+
+  perform public.api_assert(v_email_n <= c_email_limit_per_day,
+    'LEADS_RATE_LIMIT_EMAIL',
+    'Too many requests for this email today.'
+  );
+
+  -- UPSERT (deduped is precise via xmax)
+  insert into public.leads (email, country_code, ui_locale, source)
+  values (p_email::public.citext, p_country_code, p_ui_locale, p_source)
+  on conflict (email) do update
+    set country_code = excluded.country_code,
+        ui_locale     = excluded.ui_locale,
+        source        = excluded.source
+  returning id, (xmax <> 0) as deduped
+    into v_lead_id, v_deduped;
+
+  return jsonb_build_object(
+    'ok', true,
+    'lead_id', v_lead_id,
+    'deduped', v_deduped
+  );
+end;
+$_$;
+
+
+ALTER FUNCTION "public"."leads_upsert_v1"("p_email" "text", "p_country_code" "text", "p_ui_locale" "text", "p_source" "text") OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."locale_base"("p_locale" "text") RETURNS "text"
     LANGUAGE "sql" IMMUTABLE SECURITY DEFINER
     SET "search_path" TO ''
@@ -11905,6 +12082,33 @@ CREATE TABLE IF NOT EXISTS "public"."house_vibes" (
 ALTER TABLE "public"."house_vibes" OWNER TO "postgres";
 
 
+CREATE TABLE IF NOT EXISTS "public"."leads" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "email" "public"."citext" NOT NULL,
+    "country_code" "text" NOT NULL,
+    "ui_locale" "text" NOT NULL,
+    "source" "text" DEFAULT 'kinly_web_get'::"text" NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "leads_country_code_check" CHECK (("country_code" ~ '^[A-Z]{2}$'::"text")),
+    CONSTRAINT "leads_source_check" CHECK (("source" = ANY (ARRAY['kinly_web_get'::"text", 'kinly_dating_web_get'::"text", 'kinly_rent_web_get'::"text"]))),
+    CONSTRAINT "leads_ui_locale_check" CHECK ((POSITION((' '::"text") IN ("ui_locale")) = 0))
+);
+
+
+ALTER TABLE "public"."leads" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."leads_rate_limits" (
+    "k" "text" NOT NULL,
+    "n" integer DEFAULT 0 NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL
+);
+
+
+ALTER TABLE "public"."leads_rate_limits" OWNER TO "postgres";
+
+
 CREATE TABLE IF NOT EXISTS "public"."memberships" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "user_id" "uuid" NOT NULL,
@@ -12471,6 +12675,21 @@ ALTER TABLE ONLY "public"."invites"
 
 
 
+ALTER TABLE ONLY "public"."leads"
+    ADD CONSTRAINT "leads_email_key" UNIQUE ("email");
+
+
+
+ALTER TABLE ONLY "public"."leads"
+    ADD CONSTRAINT "leads_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."leads_rate_limits"
+    ADD CONSTRAINT "leads_rate_limits_pkey" PRIMARY KEY ("k");
+
+
+
 ALTER TABLE ONLY "public"."member_cap_join_requests"
     ADD CONSTRAINT "member_cap_join_requests_pkey" PRIMARY KEY ("id");
 
@@ -12825,6 +13044,14 @@ CREATE INDEX "idx_preference_taxonomy_defs_domain" ON "public"."preference_taxon
 
 
 
+CREATE INDEX "leads_created_at_idx" ON "public"."leads" USING "btree" ("created_at" DESC);
+
+
+
+CREATE INDEX "leads_rate_limits_updated_at_idx" ON "public"."leads_rate_limits" USING "btree" ("updated_at");
+
+
+
 CREATE INDEX "memberships_home_user_current_idx" ON "public"."memberships" USING "btree" ("home_id", "user_id") WHERE ("is_current" = true);
 
 
@@ -12922,6 +13149,10 @@ CREATE OR REPLACE TRIGGER "trg_house_vibes_memberships_out_of_date" AFTER INSERT
 
 
 CREATE OR REPLACE TRIGGER "trg_house_vibes_preference_responses_out_of_date" AFTER INSERT OR DELETE OR UPDATE ON "public"."preference_responses" FOR EACH ROW EXECUTE FUNCTION "public"."_house_vibes_mark_out_of_date_preferences"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_leads_touch_updated_at" BEFORE UPDATE ON "public"."leads" FOR EACH ROW EXECUTE FUNCTION "public"."_touch_updated_at"();
 
 
 
@@ -13427,6 +13658,12 @@ ALTER TABLE "public"."house_vibes" ENABLE ROW LEVEL SECURITY;
 
 
 ALTER TABLE "public"."invites" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."leads" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."leads_rate_limits" ENABLE ROW LEVEL SECURITY;
 
 
 ALTER TABLE "public"."member_cap_join_requests" ENABLE ROW LEVEL SECURITY;
@@ -13999,6 +14236,13 @@ GRANT ALL ON FUNCTION "public"."_preference_reports_mark_out_of_date"() TO "serv
 GRANT ALL ON FUNCTION "public"."_preference_templates_validate"() TO "anon";
 GRANT ALL ON FUNCTION "public"."_preference_templates_validate"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."_preference_templates_validate"() TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_sha256_hex"("p_input" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_sha256_hex"("p_input" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."_sha256_hex"("p_input" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."_sha256_hex"("p_input" "text") TO "service_role";
 
 
 
@@ -15684,6 +15928,19 @@ GRANT ALL ON FUNCTION "public"."is_home_owner"("p_home_id" "uuid", "p_user_id" "
 
 
 
+GRANT ALL ON FUNCTION "public"."leads_rate_limits_cleanup"() TO "anon";
+GRANT ALL ON FUNCTION "public"."leads_rate_limits_cleanup"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."leads_rate_limits_cleanup"() TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."leads_upsert_v1"("p_email" "text", "p_country_code" "text", "p_ui_locale" "text", "p_source" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."leads_upsert_v1"("p_email" "text", "p_country_code" "text", "p_ui_locale" "text", "p_source" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."leads_upsert_v1"("p_email" "text", "p_country_code" "text", "p_ui_locale" "text", "p_source" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."leads_upsert_v1"("p_email" "text", "p_country_code" "text", "p_ui_locale" "text", "p_source" "text") TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."locale_base"("p_locale" "text") TO "anon";
 GRANT ALL ON FUNCTION "public"."locale_base"("p_locale" "text") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."locale_base"("p_locale" "text") TO "service_role";
@@ -16249,6 +16506,14 @@ GRANT ALL ON TABLE "public"."house_vibe_versions" TO "service_role";
 
 
 GRANT ALL ON TABLE "public"."house_vibes" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."leads" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."leads_rate_limits" TO "service_role";
 
 
 

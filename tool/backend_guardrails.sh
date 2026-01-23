@@ -10,12 +10,6 @@ err()  { echo "::error::$*"; }
 
 have_cmd() { command -v "$1" >/dev/null 2>&1; }
 
-is_ci() {
-  local v="${CI:-}"
-  v="$(echo "$v" | tr '[:upper:]' '[:lower:]' | xargs)"
-  [[ "$v" == "true" || "$v" == "1" || "$v" == "yes" ]]
-}
-
 require_cmd() {
   local c="$1"
   local msg="${2:-Required command not found: $c}"
@@ -75,12 +69,10 @@ trap cleanup EXIT
 # Detect if there is any Deno code to test
 # ----------------------------
 has_edge_functions() {
-  # Consider "exists and not empty" as "has deno code"
   if [ ! -d "supabase/functions" ]; then
     return 1
   fi
 
-  # Any non-hidden file/dir inside counts
   if find supabase/functions -mindepth 1 -maxdepth 2 \
       -not -path '*/.*' \
       -print -quit | grep -q .; then
@@ -116,7 +108,6 @@ run_deno_checks_if_needed() {
     exit 1
   fi
 
-  # Align paths with your repo layout:
   local DENO_CFG="supabase/deno.json"
   local DENO_LOCK="supabase/deno.lock"
 
@@ -144,64 +135,65 @@ run_deno_checks_if_needed() {
 }
 
 # ----------------------------
-# 2) Local Supabase start + reset (robust against transient 502s)
+# 2) Local Supabase start + reset
 # ----------------------------
 start_and_reset_supabase() {
   require_cmd supabase "supabase CLI is required but not found on PATH"
   require_cmd curl "curl is required (PostgREST readiness check)"
   require_cmd docker "docker is required (local Supabase runs in containers)"
+  require_cmd awk
+  require_cmd tr
+  require_cmd head
 
-  # Avoid Docker-over-TCP surprises that can break some containers.
   unset DOCKER_HOST || true
+
+  if ! docker ps >/dev/null 2>&1; then
+    err "Cannot talk to Docker. Start Docker Desktop (and enable WSL integration), then retry."
+    exit 1
+  fi
 
   log "Starting local Supabase..."
   supabase start
   SUPABASE_STARTED="true"
 
+  # Derive real ports from running containers (authoritative)
+  local api_port db_port
+  api_port="$(docker port supabase_kong_kinly-local 8000/tcp 2>/dev/null | awk -F: '{print $2}' | tr -d '\r' | head -n1 || true)"
+  db_port="$(docker port supabase_db_kinly-local 5432/tcp 2>/dev/null | awk -F: '{print $2}' | tr -d '\r' | head -n1 || true)"
+
+  if [[ -n "${api_port:-}" ]]; then API_PORT="$api_port"; fi
+  if [[ -n "${db_port:-}" ]]; then DB_PORT="$db_port"; fi
+
+  log "Using Supabase API port: ${API_PORT} (docker-derived)"
+  log "Using Supabase DB port:  ${DB_PORT} (docker-derived)"
+
   log "Resetting DB (apply migrations + seed)..."
-  local attempt=1
-  local max_attempts=3
+  supabase db reset --yes
 
-  while true; do
-    if supabase db reset --yes; then
-      log "supabase db reset succeeded (attempt ${attempt}/${max_attempts})"
-      break
-    fi
+  # Sanity-check required extensions + schemas exist in LOCAL DB
+  if have_cmd psql; then
+    local uri="postgresql://postgres:postgres@127.0.0.1:${DB_PORT}/postgres"
+    log "Sanity check: verifying required extensions + schemas in local DB..."
 
-    warn "supabase db reset failed (attempt ${attempt}/${max_attempts})"
+    # 1) extensions installed
+    psql "$uri" -v ON_ERROR_STOP=1 -c "
+      select extname
+      from pg_extension
+      where extname in ('pgcrypto','citext');
+    " >/dev/null
 
-    # Print quick, actionable diagnostics (helps when reset flakes during restarts)
-    echo "::group::docker supabase services (kinly-local)"
-    docker ps -a --filter "name=supabase_.*_kinly-local" --format "table {{.Names}}\t{{.Status}}" || true
-    echo "::endgroup::"
-
-    echo "::group::logs kong (tail)"
-    docker logs --tail 160 supabase_kong_kinly-local 2>/dev/null || true
-    echo "::endgroup::"
-
-    echo "::group::logs rest (tail)"
-    docker logs --tail 160 supabase_rest_kinly-local 2>/dev/null || true
-    echo "::endgroup::"
-
-    echo "::group::logs auth (tail)"
-    docker logs --tail 160 supabase_auth_kinly-local 2>/dev/null || true
-    echo "::endgroup::"
-
-    # Optional services may exist depending on config; print if present
-    echo "::group::logs storage (tail)"
-    docker logs --tail 160 supabase_storage_kinly-local 2>/dev/null || true
-    echo "::endgroup::"
-
-    if [ "$attempt" -ge "$max_attempts" ]; then
-      err "supabase db reset failed after ${max_attempts} attempts"
-      err "Tip: run 'supabase db reset --yes --debug' to see upstream URL + more details."
-      exit 1
-    fi
-
-    attempt=$((attempt + 1))
-    log "Waiting briefly before retry..."
-    sleep 8
-  done
+    # 2) digest is in schema extensions (Supabase convention)
+    psql "$uri" -v ON_ERROR_STOP=1 -c "
+      select 1
+      from pg_proc p
+      join pg_namespace n on n.oid = p.pronamespace
+      where p.proname = 'digest'
+        and n.nspname = 'extensions'
+      limit 1;
+    " >/dev/null
+  else
+    warn "psql not found; skipping local extension sanity check"
+  fi
 }
 
 # ----------------------------
@@ -211,6 +203,7 @@ wait_for_postgrest() {
   local port="$1"
   log "Waiting for PostgREST on port ${port}..."
   for i in {1..60}; do
+    local code
     code="$(curl -s -o /dev/null -w '%{http_code}' \
       -H 'Accept: application/openapi+json' \
       "http://127.0.0.1:${port}/rest/v1/" || true)"
@@ -323,8 +316,8 @@ verify_snapshots_committed_clean() {
 # ==========================================
 log "Backend guardrails starting..."
 log "CI mode: ${CI:-false}"
-log "Using Supabase API port: ${API_PORT}"
-log "Using Supabase DB port:  ${DB_PORT}"
+log "Config default API port: ${API_PORT}"
+log "Config default DB port:  ${DB_PORT}"
 
 run_deno_checks_if_needed
 start_and_reset_supabase

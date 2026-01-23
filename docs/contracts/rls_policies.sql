@@ -29,6 +29,8 @@ ALTER TABLE "public"."house_vibe_mapping_effects" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "public"."house_vibe_versions" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "public"."house_vibes" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "public"."invites" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "public"."leads" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "public"."leads_rate_limits" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "public"."member_cap_join_requests" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "public"."memberships" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "public"."notification_preferences" ENABLE ROW LEVEL SECURITY;
