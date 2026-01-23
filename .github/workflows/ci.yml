@@ -290,7 +290,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          DEST="kinly-contracts/contracts/api/kinly_backend"
+          DEST="kinly-contracts/contracts/api/kinly/backend"
           mkdir -p "$DEST"
 
           cp -f docs/contracts/schema.sql           "$DEST/schema.sql"
