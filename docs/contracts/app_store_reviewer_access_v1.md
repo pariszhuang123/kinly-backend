@@ -1,66 +1,183 @@
 ---
-Domain: app_store_review
-Capability: deterministic_reviewer_access
-Scope: kinly (iOS + Android)
+Domain: product
+Capability: app_store_review
+Scope: frontend
 Artifact-Type: contract
-Status: draft
-Stability: beta
-Version: v1.0.0
-Owner: paris
-Last-Updated: 2026-01-23
+Stability: evolving
+Status: active
+Version: v1.1
 ---
 
-# Contract: Deterministic Reviewer Access (Email/Password, Normal Auth)
+# Contract: Reviewer Demo Access (Hidden Entry → Email/Password → Normal Auth)
 
-## 1) Problem Statement
-App store reviewers must log in without Google/Apple prompts, MFA, or location checks. They need a deterministic email/password that produces a normal Supabase session so RLS and existing app flows work. No reviewer-only roles/flags are introduced.
+## 1. Purpose
 
-## 2) Goals
-- Deterministic login via Supabase Auth email/password (no OAuth prompts).
-- Reviewer session is a normal authenticated user; `auth.uid()` works everywhere.
-- Hidden/low-prominence entry point remains a client concern (out of this repo).
-- No new reviewer-specific DB state (roles, flags, bypass policies).
+Enable app store reviewers to authenticate **without Google or Apple OAuth prompts** by providing a deterministic, hidden **email/password login path** that results in a **normal authenticated session**.
 
-## 3) Non-Goals
-- Replacing Google/Apple sign-in for real users.
-- Adding reviewer-only columns, roles, or RLS exceptions.
-- Shipping demo-only data or fixtures from the backend (seeding handled manually in-app if desired).
+This contract defines **frontend behavior only**.  
+After successful login, the reviewer is treated exactly like a normal user.
 
-## 4) Backend Requirements
-R1 — Reviewer Auth user exists and is confirmed  
-- Create the reviewer in Supabase Auth (email/password).  
-- Ensure `email_confirmed_at`/`confirmed_at` is set so no email confirmation flow blocks sign-in.
+---
 
-R2 — Profiles linkage remains standard  
-- `public.profiles.id = auth.users.id`; `public.profiles.email = reviewer email`.  
-- Reuse the existing `handle_new_user` trigger path; if absent, insert once manually.
+## 2. Entry Point Contract
 
-R3 — Session + RLS unchanged  
-- Reviewer signs in through `supabase.auth.signInWithPassword(email, password)`.  
-- No RLS bypasses; all policies rely on `auth.uid()` as for any user.
+### C1 — Hidden access trigger
 
-R4 — Paywall/entitlement guard  
-- Reviewer’s active home must be placed on a plan that unblocks Flows/Bills (manual “premium” set via Supabase is acceptable).  
-- No reviewer-only overrides; use the normal plan/entitlement mechanism.
+**Location**
+- Welcome screen where Google Sign-In and Apple Sign-In buttons are displayed.
 
-## 5) Lifecycle / Operations
-- Provisioning: create the Auth user (email/password), mark confirmed, verify `profiles` row.  
-- Credential storage: store email/password in app-store submission notes and the team secret manager.  
-- Rotation: none planned; if ever rotated, update store notes and rerun provisioning checks.  
-- Reset: admin updates password via Supabase Auth admin/API; re-verify confirmation + profile linkage after reset.  
-- Plan setting: manually set reviewer home to premium (or equivalent) before sharing credentials.  
-- Data seeding: optional; reviewer may self-create data in-app. Backend does not ship seed fixtures.
+**Trigger**
+- User taps the **Kinly logo** exactly **7 times** within a single screen session.
 
-## 6) Acceptance Criteria
-- Reviewer logs in via email/password without third-party prompts or confirmation blocks.  
-- Standard session established (`auth.uid()` present; RLS behaves normally).  
-- Profile row exists and matches the Auth user.  
-- Reviewer home is on a plan that exposes Flows/Bills; no reviewer-only flags exist.  
-- Hidden entry instructions are present in store notes (client-owned), not enforced by backend.
+**Effect**
+- App navigates to a dedicated screen: **Demo Access**.
 
-## 7) Operations Runbook (Reviewer Account)
-1) Provisioning: create the reviewer Auth user (email/password) and mark confirmed; verify `public.profiles` row exists (`profiles.id = auth.users.id` and `profiles.email` matches).  
-2) Plan: ensure the reviewer’s current home has `home_entitlements.plan = 'premium'` (or equivalent) so Flows/Bills are reachable.  
-3) Credentials: store email/password in App Store Connect / Play Console review notes and the team secret manager.  
-4) Hidden entry note: include “Tap Kinly logo 7 times on login to open Reviewer Login, then use the provided email/password.” in store notes.  
-5) Reset (if ever needed): update password via Supabase Auth admin/API, keep the account confirmed, and re-verify profile linkage + premium plan afterward.
+---
+
+### C2 — Progressive tap counter disclosure
+
+To avoid confusion while keeping the entry hidden, the frontend MUST implement a progressive tap counter.
+
+#### C2.1 — Silent taps (1–2)
+- No visual or textual feedback.
+- Taps are counted internally.
+
+#### C2.2 — Counter revealed (3–6)
+- On the **3rd tap**, the app MUST reveal a subtle indicator that:
+  - Confirms a hidden action exists
+  - Shows progress toward activation
+
+**Allowed indicator formats (choose one):**
+- Toast
+- Snackbar
+- Small inline text near the logo
+- Lightweight overlay
+
+**Indicator content**
+- Localized via `S.of(context)`
+- Must communicate progress, e.g.:
+  - `S.of(context).demoAccessTapHint(remainingCount)`
+  - Example English:  
+    > “Demo access: 3 of 7 taps”  
+    > “Demo access: 4 taps remaining”
+
+**Behavior**
+- Indicator updates on each subsequent tap.
+- Indicator disappears automatically after a short duration (e.g. 1–2 seconds).
+
+#### C2.3 — Activation (7th tap)
+- On the **7th tap**:
+  - The indicator (if visible) is dismissed.
+  - Navigation to **Demo Access** screen occurs immediately.
+
+---
+
+## 3. Demo Access Screen Contract
+
+### C3 — Screen identity
+
+**Screen title**
+- `S.of(context).demoAccess`
+
+### C4 — Required UI elements
+
+The screen MUST contain:
+
+1. **Username / Email input**
+   - Label via localization (`S.of(context)`).
+   - Plain text input.
+
+2. **Password input**
+   - Label via localization (`S.of(context)`).
+   - Obscured input.
+
+3. **Submit button**
+   - Label: `S.of(context).submit`.
+
+---
+
+### C5 — Explicit exclusions
+
+The Demo Access screen MUST NOT include:
+
+- Password reset flow
+- “Forgot password” link
+- Account creation / sign-up option
+- OAuth buttons (Google / Apple)
+
+This screen exists solely for deterministic reviewer access.
+
+---
+
+## 4. Authentication Behavior Contract
+
+### C6 — Submit action
+
+On submit, the frontend MUST call the standard Supabase email/password login:
+
+await supabase.auth.signInWithPassword(
+  email: email,
+  password: password,
+);
+
+### C7 — Success handling
+
+On successful authentication:
+- A normal Supabase session is established.
+- auth.uid() is available immediately.
+- The app MUST continue using the standard post-login navigation path.
+
+No reviewer-specific routing, flags, or modes are applied.
+
+### C8 — Failure handling
+
+On authentication failure:
+- Display a user-safe, localized error message.
+- Do NOT expose raw Supabase error strings.
+
+Allow retry on the same screen.
+
+5. Backend Assumptions (Non-Negotiable)
+B1 — Demo user exists
+
+A Supabase Auth user exists with email/password credentials.
+
+B2 — Demo user is confirmed
+
+The account is confirmed (no email verification step required).
+
+B3 — Normal RLS applies
+
+No RLS bypasses, reviewer flags, or special roles exist.
+
+All access is governed by auth.uid() like any other user.
+
+B4 — Entitlements are pre-provisioned
+
+If premium features are required during review, the demo user is already entitled via the normal entitlement system.
+
+## 6. Out of Scope
+
+This contract explicitly does NOT define:
+
+- Post-login user flows or screens
+
+- Demo-only modes or feature restrictions
+
+- Backend provisioning steps
+- Credential rotation or password reset mechanics
+- App Store submission instructions text
+
+## 7. Acceptance Criteria
+
+Tapping the Kinly logo 1–2 times shows no feedback.
+
+On the 3rd tap, a localized progress indicator appears.
+
+Indicator updates until the 7th tap.
+
+On the 7th tap, the Demo Access screen opens.
+
+Demo Access performs email/password login only.
+
+Successful login behaves identically to any normal user.
