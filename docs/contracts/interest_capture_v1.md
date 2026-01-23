@@ -51,6 +51,13 @@ This is used for:
 - UI SHOULD show helper copy: “Prefilled from your device/network — change if
   needed.”
 
+### Locale handling
+
+- `ui_locale` MUST be auto-detected by the client.
+- `ui_locale` MUST NOT be a visible form field in v1.
+- UI MUST always send a resolved `ui_locale` value.
+- If detection fails or yields an invalid value, UI MUST fallback to `"en"`.
+
 ### Email field
 
 - UI MUST validate email format and require non-empty.
@@ -60,6 +67,7 @@ This is used for:
 - Button MUST remain disabled until:
   - valid email
   - country_code present (2-letter uppercase)
+  - `ui_locale` resolved (auto-detected or fallback)
 - On submit, UI sends only:
   - `email`
   - `country_code`
@@ -111,10 +119,30 @@ Priority order:
 
 **Important**: Detection is used only to prefill; user override wins.
 
+## UI Error Handling Rules
+
+- Validation errors:
+  - Show inline field error copy.
+  - Keep submit enabled after correction.
+
+- Rate limit errors (`LEADS_RATE_LIMIT_*`):
+  - Show non-blocking message: “Too many attempts. Please try again later.”
+  - UI MAY temporarily disable submit (cooldown optional).
+
+- Deduped success:
+  - Treated as success; show normal confirmation UI.
+
+- Unknown errors:
+  - Show generic retry message.
+
 ## API: RPC (direct from web)
 
 - **RPC name**: `public.leads_upsert_v1`
-- **Invocation**: supabase-js from kinly-web (no Edge function)
+- **Invocation**: `supabase-js` from `kinly-web`
+- **Edge Function**: Not used
+- **Approval**: This RPC is explicitly approved for direct Web invocation
+  under `AGENTS.md`.
+
 - **Inputs**:
   - `p_email` (text) — required
   - `p_country_code` (text) — required
