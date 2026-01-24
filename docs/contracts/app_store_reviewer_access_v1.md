@@ -70,6 +70,9 @@ To avoid confusion while keeping the entry hidden, the frontend MUST implement a
   - The indicator (if visible) is dismissed.
   - Navigation to **Demo Access** screen occurs immediately.
 
+#### C2.4 — Counter reset
+The tap counter MUST reset to zero if the user navigates away from the Welcome screen.
+
 ---
 
 ## 3. Demo Access Screen Contract
@@ -113,12 +116,16 @@ This screen exists solely for deterministic reviewer access.
 
 ### C6 — Submit action
 
-On submit, the frontend MUST call the standard Supabase email/password login:
+On submit, the frontend MUST emit an authentication event to the AuthBloc:
+- `DemoLoginRequested(email: email, password: password)`
 
-await supabase.auth.signInWithPassword(
-  email: email,
-  password: password,
-);
+The BLoC invokes the AuthRepository, which calls Supabase internally.
+
+### C6.1 — Loading state
+While authentication is in progress, the submit button MUST be disabled and show a loading indicator.
+
+### C6.2 — Input validation
+Both fields MUST be non-empty before submit is enabled.
 
 ### C7 — Success handling
 
@@ -137,7 +144,7 @@ On authentication failure:
 
 Allow retry on the same screen.
 
-5. Backend Assumptions (Non-Negotiable)
+## 5. Backend Assumptions (Non-Negotiable)
 B1 — Demo user exists
 
 A Supabase Auth user exists with email/password credentials.
