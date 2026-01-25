@@ -2439,6 +2439,13 @@ export type Database = {
         Args: { p_home_id: string }
         Returns: undefined
       }
+      _iso_week_utc: {
+        Args: { p_at?: string }
+        Returns: {
+          iso_week: number
+          iso_week_year: number
+        }[]
+      }
       _member_cap_enqueue_request: {
         Args: { p_home_id: string; p_joiner_user_id: string }
         Returns: {

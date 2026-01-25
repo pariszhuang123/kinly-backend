@@ -47,7 +47,8 @@ jobs:
 
       # Deno is only required if Edge Functions exist.
       # We can install it unconditionally (simple + cheap) and let the script decide.
-      - name: Setup Deno (only if Edge Functions exist)
+      - name: Setup Deno (if pinned)
+        if: hashFiles('.denoversion') != ''
         uses: denoland/setup-deno@v1
         with:
           deno-version-file: .denoversion
@@ -58,7 +59,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/deno
-          key: deno-${{ runner.os }}-${{ hashFiles('.denoversion', 'deno.lock', 'supabase/deno.json') }}
+          key: deno-${{ runner.os }}-${{ hashFiles('.denoversion', 'supabase/deno.lock', 'supabase/deno.json') }}
 
                 # Dart is required by tool/contracts_regen.sh (contracts_extract + validate_registry)
       - name: Setup Dart

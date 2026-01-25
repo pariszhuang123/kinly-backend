@@ -1691,6 +1691,19 @@ $$;
 ALTER FUNCTION "public"."_house_vibes_mark_out_of_date_preferences"() OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."_iso_week_utc"("p_at" timestamp with time zone DEFAULT "now"()) RETURNS TABLE("iso_week_year" integer, "iso_week" integer)
+    LANGUAGE "sql" STABLE SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+  SELECT
+    to_char((p_at AT TIME ZONE 'UTC')::date, 'IYYY')::int AS iso_week_year,
+    to_char((p_at AT TIME ZONE 'UTC')::date, 'IW')::int   AS iso_week;
+$$;
+
+
+ALTER FUNCTION "public"."_iso_week_utc"("p_at" timestamp with time zone) OWNER TO "postgres";
+
+
 CREATE TABLE IF NOT EXISTS "public"."member_cap_join_requests" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "home_id" "uuid" NOT NULL,
@@ -7396,10 +7409,15 @@ DECLARE
   v_now timestamptz := now();
   v_iso_week int;
   v_iso_week_year int;
+
   v_cv text := COALESCE(NULLIF(btrim(p_contract_version), ''), 'v1');
+
   v_row public.house_pulse_weekly;
   v_label public.house_pulse_labels;
   v_seen public.house_pulse_reads;
+
+  v_latest_entry_at timestamptz;
+  v_needs_recompute boolean := false;
 BEGIN
   PERFORM public._assert_authenticated();
 
@@ -7407,16 +7425,26 @@ BEGIN
   PERFORM public._assert_home_member(p_home_id);
   PERFORM public._assert_home_active(p_home_id);
 
+  -- Fix 3: canonical iso week/year (UTC ISO)
   SELECT
-    COALESCE(
-      p_iso_week,
-      to_char((v_now AT TIME ZONE 'UTC')::date, 'IW')::int
-    ),
-    COALESCE(
-      p_iso_week_year,
-      to_char((v_now AT TIME ZONE 'UTC')::date, 'IYYY')::int
-    )
-  INTO v_iso_week, v_iso_week_year;
+    COALESCE(p_iso_week_year, w.iso_week_year),
+    COALESCE(p_iso_week, w.iso_week)
+  INTO v_iso_week_year, v_iso_week
+  FROM public._iso_week_utc(v_now) w;
+
+  PERFORM public.api_assert(
+    p_iso_week IS NULL OR (p_iso_week BETWEEN 1 AND 53),
+    'INVALID_ARGUMENT',
+    'iso_week must be between 1 and 53.',
+    '22023'
+  );
+
+  PERFORM public.api_assert(
+    p_iso_week_year IS NULL OR (p_iso_week_year BETWEEN 2000 AND 2100),
+    'INVALID_ARGUMENT',
+    'iso_week_year is out of supported range.',
+    '22023'
+  );
 
   SELECT *
     INTO v_row
@@ -7427,6 +7455,27 @@ BEGIN
      AND w.contract_version = v_cv;
 
   IF FOUND THEN
+    -- Fix 1: determine whether new relevant entries exist since computed_at
+    -- Only consider entries authored by CURRENT members (matches compute semantics)
+    SELECT MAX(e.created_at)
+      INTO v_latest_entry_at
+      FROM public.home_mood_entries e
+      JOIN public.memberships m
+        ON m.home_id = p_home_id
+       AND m.user_id = e.user_id
+       AND m.is_current = TRUE
+     WHERE e.home_id = p_home_id
+       AND e.iso_week_year = v_iso_week_year
+       AND e.iso_week = v_iso_week;
+
+    v_needs_recompute :=
+      (v_latest_entry_at IS NOT NULL)
+      AND (v_latest_entry_at > v_row.computed_at);
+
+    IF v_needs_recompute THEN
+      v_row := public.house_pulse_compute_week(p_home_id, v_iso_week_year, v_iso_week, v_cv);
+    END IF;
+
     SELECT *
       INTO v_seen
       FROM public.house_pulse_reads r
@@ -7450,6 +7499,7 @@ BEGIN
     );
   END IF;
 
+  -- No snapshot yet -> compute
   v_row := public.house_pulse_compute_week(p_home_id, v_iso_week_year, v_iso_week, v_cv);
 
   SELECT *
@@ -8989,6 +9039,9 @@ DECLARE
   v_mention_count  int := 0;
 
   v_publish_requested boolean;
+
+  -- Fix 2: computed snapshot row (optional return use; we just force refresh)
+  v_pulse_row public.house_pulse_weekly;
 BEGIN
   PERFORM public._assert_authenticated();
   v_user_id := auth.uid();
@@ -8999,9 +9052,10 @@ BEGIN
   PERFORM public._assert_home_member(p_home_id);
   PERFORM public._assert_home_active(p_home_id);
 
-  SELECT extract('week' FROM timezone('UTC', v_now))::int,
-         extract('isoyear' FROM timezone('UTC', v_now))::int
-    INTO v_iso_week, v_iso_week_year;
+  -- Fix 3: canonical UTC ISO week/year
+  SELECT w.iso_week_year, w.iso_week
+    INTO v_iso_week_year, v_iso_week
+    FROM public._iso_week_utc(v_now) w;
 
   v_comment_trim := NULLIF(btrim(p_comment), '');
 
@@ -9029,6 +9083,10 @@ BEGIN
       );
   END;
 
+  -- Fix 2: eagerly recompute weekly pulse snapshot after a new entry
+  -- Keeps the UI fresh even if weekly_get hits an existing snapshot.
+  v_pulse_row := public.house_pulse_compute_week(p_home_id, v_iso_week_year, v_iso_week, 'v1');
+
   v_publish_requested :=
     COALESCE(p_public_wall, FALSE)
     OR COALESCE(array_length(v_mentions_raw, 1), 0) > 0;
@@ -9037,7 +9095,9 @@ BEGIN
     RETURN jsonb_build_object(
       'entry_id', v_entry_id,
       'public_post_id', NULL,
-      'mention_count', 0
+      'mention_count', 0,
+      -- optional: nice for immediate UI refresh without an extra call
+      'pulse', to_jsonb(v_pulse_row)
     );
   END IF;
 
@@ -9105,7 +9165,6 @@ BEGIN
     hashtext(v_entry_id::text)
   );
 
-  -- Idempotent insert without ON CONFLICT requirement
   IF COALESCE(p_public_wall, FALSE) THEN
     IF NOT EXISTS (
       SELECT 1 FROM public.gratitude_wall_posts WHERE source_entry_id = v_entry_id
@@ -9147,7 +9206,9 @@ BEGIN
   RETURN jsonb_build_object(
     'entry_id', v_entry_id,
     'public_post_id', v_post_id,
-    'mention_count', v_mention_count
+    'mention_count', v_mention_count,
+    -- optional: return pulse so UI can update instantly
+    'pulse', to_jsonb(v_pulse_row)
   );
 END;
 $$;
@@ -14210,6 +14271,13 @@ GRANT ALL ON FUNCTION "public"."_house_vibes_mark_out_of_date_memberships"() TO 
 
 REVOKE ALL ON FUNCTION "public"."_house_vibes_mark_out_of_date_preferences"() FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."_house_vibes_mark_out_of_date_preferences"() TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_iso_week_utc"("p_at" timestamp with time zone) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_iso_week_utc"("p_at" timestamp with time zone) TO "anon";
+GRANT ALL ON FUNCTION "public"."_iso_week_utc"("p_at" timestamp with time zone) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."_iso_week_utc"("p_at" timestamp with time zone) TO "service_role";
 
 
 
