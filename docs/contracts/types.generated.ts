@@ -1653,6 +1653,136 @@ export type Database = {
           },
         ]
       }
+      outreach_event_logs: {
+        Row: {
+          app_key: string
+          client_event_id: string | null
+          country: string | null
+          created_at: string
+          event: string
+          id: string
+          page_key: string
+          session_id: string
+          source_id_resolved: string
+          store: string
+          ui_locale: string | null
+          utm_campaign: string
+          utm_medium: string
+          utm_source: string
+        }
+        Insert: {
+          app_key: string
+          client_event_id?: string | null
+          country?: string | null
+          created_at?: string
+          event: string
+          id?: string
+          page_key: string
+          session_id: string
+          source_id_resolved?: string
+          store?: string
+          ui_locale?: string | null
+          utm_campaign?: string
+          utm_medium?: string
+          utm_source?: string
+        }
+        Update: {
+          app_key?: string
+          client_event_id?: string | null
+          country?: string | null
+          created_at?: string
+          event?: string
+          id?: string
+          page_key?: string
+          session_id?: string
+          source_id_resolved?: string
+          store?: string
+          ui_locale?: string | null
+          utm_campaign?: string
+          utm_medium?: string
+          utm_source?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "fk_outreach_event_logs_source_resolved"
+            columns: ["source_id_resolved"]
+            isOneToOne: false
+            referencedRelation: "outreach_sources"
+            referencedColumns: ["source_id"]
+          },
+        ]
+      }
+      outreach_rate_limits: {
+        Row: {
+          bucket_start: string
+          k: string
+          n: number
+          updated_at: string
+        }
+        Insert: {
+          bucket_start: string
+          k: string
+          n: number
+          updated_at?: string
+        }
+        Update: {
+          bucket_start?: string
+          k?: string
+          n?: number
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      outreach_source_aliases: {
+        Row: {
+          active: boolean
+          alias: string
+          created_at: string
+          source_id: string
+        }
+        Insert: {
+          active?: boolean
+          alias: string
+          created_at?: string
+          source_id: string
+        }
+        Update: {
+          active?: boolean
+          alias?: string
+          created_at?: string
+          source_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "outreach_source_aliases_source_id_fkey"
+            columns: ["source_id"]
+            isOneToOne: false
+            referencedRelation: "outreach_sources"
+            referencedColumns: ["source_id"]
+          },
+        ]
+      }
+      outreach_sources: {
+        Row: {
+          active: boolean
+          created_at: string
+          label: string
+          source_id: string
+        }
+        Insert: {
+          active?: boolean
+          created_at?: string
+          label: string
+          source_id: string
+        }
+        Update: {
+          active?: boolean
+          created_at?: string
+          label?: string
+          source_id?: string
+        }
+        Relationships: []
+      }
       paywall_events: {
         Row: {
           created_at: string
@@ -2473,6 +2603,10 @@ export type Database = {
           p_request_ids?: string[]
         }
         Returns: undefined
+      }
+      _outreach_rate_limit_bucketed: {
+        Args: { p_bucket_start: string; p_key: string; p_limit: number }
+        Returns: boolean
       }
       _sha256_hex: { Args: { p_input: string }; Returns: string }
       _share_log_event_internal: {
@@ -3329,6 +3463,30 @@ export type Database = {
       notifications_update_send_status: {
         Args: { p_error: string; p_send_id: string; p_status: string }
         Returns: undefined
+      }
+      outreach_event_logs_cleanup: {
+        Args: { p_keep?: string }
+        Returns: number
+      }
+      outreach_log_event: {
+        Args: {
+          p_app_key: string
+          p_client_event_id?: string
+          p_country?: string
+          p_event: string
+          p_page_key: string
+          p_session_id: string
+          p_store?: string
+          p_ui_locale?: string
+          p_utm_campaign: string
+          p_utm_medium: string
+          p_utm_source: string
+        }
+        Returns: Json
+      }
+      outreach_rate_limits_cleanup: {
+        Args: { p_keep?: string }
+        Returns: number
       }
       paywall_log_event: {
         Args: { p_event_type: string; p_home_id: string; p_source?: string }

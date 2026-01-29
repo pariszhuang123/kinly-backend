@@ -2,6 +2,14 @@
 
 Tracks versioned contract changes and related ADRs.
 
+## v1.0 - Outreach Event Logging
+- Date: 2026-01-29
+- Scope: `docs/contracts/outreach_event_log_v1.md`
+- Changes:
+  - Adds anonymous marketing outreach event logging contract (page views + CTA clicks).
+  - Defines RPC-only ingestion with source registry resolution, session format validation, rate limiting, and privacy guardrails.
+  - Locks down storage via RLS and forbids any identity linkage or profiling analytics.
+
 ## v1.0.0 - App Store Reviewer Access
 - Date: 2026-01-23
 - Scope: `docs/contracts/app_store_reviewer_access_v2.md`

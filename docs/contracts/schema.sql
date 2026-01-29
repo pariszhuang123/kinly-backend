@@ -1780,6 +1780,87 @@ $$;
 ALTER FUNCTION "public"."_member_cap_resolve_requests"("p_home_id" "uuid", "p_reason" "text", "p_request_ids" "uuid"[], "p_payload" "jsonb") OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."_outreach_aliases_protect_unknown"() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+BEGIN
+  IF (TG_OP = 'DELETE') AND (OLD.alias = 'unknown') THEN
+    RAISE EXCEPTION 'Cannot delete outreach_source_aliases.unknown' USING ERRCODE = '42501';
+  END IF;
+
+  IF (TG_OP = 'UPDATE') AND (OLD.alias = 'unknown') THEN
+    IF NEW.alias <> 'unknown' THEN
+      RAISE EXCEPTION 'Cannot rename outreach_source_aliases.unknown' USING ERRCODE = '42501';
+    END IF;
+    IF NEW.active IS DISTINCT FROM TRUE THEN
+      RAISE EXCEPTION 'Cannot deactivate outreach_source_aliases.unknown' USING ERRCODE = '42501';
+    END IF;
+    IF NEW.source_id <> 'unknown' THEN
+      RAISE EXCEPTION 'Cannot repoint outreach_source_aliases.unknown' USING ERRCODE = '42501';
+    END IF;
+  END IF;
+
+  RETURN COALESCE(NEW, OLD);
+END;
+$$;
+
+
+ALTER FUNCTION "public"."_outreach_aliases_protect_unknown"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_outreach_rate_limit_bucketed"("p_key" "text", "p_bucket_start" timestamp with time zone, "p_limit" integer) RETURNS boolean
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+DECLARE
+  v_hash text;
+  v_count integer;
+BEGIN
+  -- IMPORTANT: with search_path='', schema-qualify digest()
+  v_hash := encode(extensions.digest(p_key, 'sha256'), 'hex');
+
+  INSERT INTO public.outreach_rate_limits (k, bucket_start, n, updated_at)
+  VALUES (v_hash, p_bucket_start, 1, now())
+  ON CONFLICT (k, bucket_start) DO UPDATE
+    SET n = public.outreach_rate_limits.n + 1,
+        updated_at = now()
+  RETURNING n INTO v_count;
+
+  RETURN v_count <= p_limit;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."_outreach_rate_limit_bucketed"("p_key" "text", "p_bucket_start" timestamp with time zone, "p_limit" integer) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_outreach_sources_protect_unknown"() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+BEGIN
+  IF (TG_OP = 'DELETE') AND (OLD.source_id = 'unknown') THEN
+    RAISE EXCEPTION 'Cannot delete outreach_sources.unknown' USING ERRCODE = '42501';
+  END IF;
+
+  IF (TG_OP = 'UPDATE') AND (OLD.source_id = 'unknown') THEN
+    IF NEW.source_id <> 'unknown' THEN
+      RAISE EXCEPTION 'Cannot rename outreach_sources.unknown' USING ERRCODE = '42501';
+    END IF;
+    IF NEW.active IS DISTINCT FROM TRUE THEN
+      RAISE EXCEPTION 'Cannot deactivate outreach_sources.unknown' USING ERRCODE = '42501';
+    END IF;
+  END IF;
+
+  RETURN COALESCE(NEW, OLD);
+END;
+$$;
+
+
+ALTER FUNCTION "public"."_outreach_sources_protect_unknown"() OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."_preference_reports_mark_out_of_date"() RETURNS "trigger"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO ''
@@ -9687,6 +9768,166 @@ $$;
 ALTER FUNCTION "public"."notifications_update_send_status"("p_send_id" "uuid", "p_status" "text", "p_error" "text") OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."outreach_event_logs_cleanup"("p_keep" interval DEFAULT '180 days'::interval) RETURNS integer
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+DECLARE
+  v_deleted integer;
+BEGIN
+  DELETE FROM public.outreach_event_logs
+   WHERE created_at < (now() - p_keep);
+
+  GET DIAGNOSTICS v_deleted = ROW_COUNT;
+  RETURN v_deleted;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."outreach_event_logs_cleanup"("p_keep" interval) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."outreach_log_event"("p_event" "text", "p_app_key" "text", "p_page_key" "text", "p_utm_campaign" "text", "p_utm_source" "text", "p_utm_medium" "text", "p_session_id" "text", "p_store" "text" DEFAULT NULL::"text", "p_country" "text" DEFAULT NULL::"text", "p_ui_locale" "text" DEFAULT NULL::"text", "p_client_event_id" "uuid" DEFAULT NULL::"uuid") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $_$
+DECLARE
+  v_event text := lower(trim(p_event));
+  v_app_key text := trim(p_app_key);
+  v_page_key text := trim(p_page_key);
+
+  -- Default blanks to 'unknown'
+  v_utm_campaign text := COALESCE(NULLIF(trim(p_utm_campaign), ''), 'unknown');
+  v_utm_source   text := COALESCE(NULLIF(lower(trim(p_utm_source)), ''), 'unknown');
+  v_utm_medium   text := COALESCE(NULLIF(lower(trim(p_utm_medium)), ''), 'unknown');
+
+  -- store is non-null in table; normalize to 'unknown' if omitted/blank
+  v_store text := COALESCE(NULLIF(lower(trim(p_store)), ''), 'unknown');
+
+  v_session_id text := trim(p_session_id);
+  v_country text := NULLIF(upper(trim(p_country)), '');
+  v_ui_locale text := NULLIF(trim(p_ui_locale), '');
+
+  v_resolved text := 'unknown';
+  v_id uuid;
+
+  v_global_bucket timestamptz := date_trunc('minute', now());
+  v_session_bucket timestamptz := date_trunc('hour', now());
+BEGIN
+  PERFORM public.api_assert(v_session_id ~ '^anon_[A-Za-z0-9_-]{16,32}$', 'INVALID_SESSION', 'session_id format invalid', '22023');
+  PERFORM public.api_assert(v_event IN ('page_view', 'cta_click'), 'INVALID_EVENT', 'event must be page_view or cta_click', '22023');
+  PERFORM public.api_assert(v_store IN ('web', 'ios_app_store', 'google_play', 'unknown'), 'INVALID_STORE', 'store must be web, ios_app_store, google_play, or unknown', '22023');
+
+  PERFORM public.api_assert(v_app_key IS NOT NULL AND v_app_key <> '' AND char_length(v_app_key) <= 40, 'INVALID_INPUT', 'app_key is required', '22023');
+  PERFORM public.api_assert(v_page_key IS NOT NULL AND v_page_key <> '' AND char_length(v_page_key) <= 80, 'INVALID_INPUT', 'page_key is required', '22023');
+
+  -- UTMs are always at least 'unknown', so enforce max length only
+  PERFORM public.api_assert(char_length(v_utm_campaign) <= 128, 'INVALID_INPUT', 'utm_campaign too long', '22023');
+  PERFORM public.api_assert(char_length(v_utm_source)   <= 128, 'INVALID_INPUT', 'utm_source too long', '22023');
+  PERFORM public.api_assert(char_length(v_utm_medium)   <= 128, 'INVALID_INPUT', 'utm_medium too long', '22023');
+
+  PERFORM public.api_assert(v_session_id IS NOT NULL AND v_session_id <> '' AND char_length(v_session_id) <= 40, 'INVALID_INPUT', 'session_id is required', '22023');
+
+  -- Normalize best-effort country + locale
+  IF v_country IS NOT NULL AND v_country !~ '^[A-Z]{2}$' THEN
+    v_country := NULL;
+  END IF;
+
+  IF v_ui_locale IS NOT NULL AND (length(v_ui_locale) < 2 OR length(v_ui_locale) > 35 OR v_ui_locale ~ '\s') THEN
+    v_ui_locale := NULL;
+  END IF;
+
+  -- Rate limits: stable keys; bucket_start defines the window
+  PERFORM public.api_assert(
+    public._outreach_rate_limit_bucketed('global', v_global_bucket, 500),
+    'RATE_LIMIT_GLOBAL',
+    'Global outreach logging rate limit exceeded',
+    '42901'
+  );
+
+  PERFORM public.api_assert(
+    public._outreach_rate_limit_bucketed('session:' || v_session_id, v_session_bucket, 100),
+    'RATE_LIMIT_SESSION',
+    'Session outreach logging rate limit exceeded',
+    '42901'
+  );
+
+  -- Resolve canonical source: direct match (active) then alias (alias active + source active), else unknown
+  SELECT s.source_id
+    INTO v_resolved
+    FROM public.outreach_sources s
+   WHERE s.source_id = v_utm_source
+     AND s.active = TRUE
+   LIMIT 1;
+
+  IF v_resolved IS NULL THEN
+    SELECT s.source_id
+      INTO v_resolved
+      FROM public.outreach_source_aliases a
+      JOIN public.outreach_sources s ON s.source_id = a.source_id
+     WHERE a.alias = v_utm_source
+       AND a.active = TRUE
+       AND s.active = TRUE
+     LIMIT 1;
+  END IF;
+
+  IF v_resolved IS NULL THEN
+    v_resolved := 'unknown';
+  END IF;
+
+  -- Idempotency: insert; if another request inserted same client_event_id concurrently, return that row
+  BEGIN
+    INSERT INTO public.outreach_event_logs (
+      event, app_key, page_key, utm_campaign, utm_source, utm_medium,
+      source_id_resolved, store, session_id, country, ui_locale, client_event_id
+    ) VALUES (
+      v_event, v_app_key, v_page_key, v_utm_campaign, v_utm_source, v_utm_medium,
+      v_resolved, v_store, v_session_id, v_country, v_ui_locale, p_client_event_id
+    )
+    RETURNING id INTO v_id;
+
+  EXCEPTION WHEN unique_violation THEN
+    IF p_client_event_id IS NOT NULL THEN
+      SELECT id INTO v_id
+        FROM public.outreach_event_logs
+       WHERE client_event_id = p_client_event_id
+       LIMIT 1;
+
+      IF v_id IS NOT NULL THEN
+        RETURN jsonb_build_object('ok', true, 'id', v_id);
+      END IF;
+    END IF;
+
+    RAISE;
+  END;
+
+  RETURN jsonb_build_object('ok', true, 'id', v_id);
+END;
+$_$;
+
+
+ALTER FUNCTION "public"."outreach_log_event"("p_event" "text", "p_app_key" "text", "p_page_key" "text", "p_utm_campaign" "text", "p_utm_source" "text", "p_utm_medium" "text", "p_session_id" "text", "p_store" "text", "p_country" "text", "p_ui_locale" "text", "p_client_event_id" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."outreach_rate_limits_cleanup"("p_keep" interval DEFAULT '14 days'::interval) RETURNS integer
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+DECLARE
+  v_deleted integer;
+BEGIN
+  DELETE FROM public.outreach_rate_limits
+   WHERE bucket_start < (now() - p_keep);
+
+  GET DIAGNOSTICS v_deleted = ROW_COUNT;
+  RETURN v_deleted;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."outreach_rate_limits_cleanup"("p_keep" interval) OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."paywall_log_event"("p_home_id" "uuid", "p_event_type" "text", "p_source" "text" DEFAULT NULL::"text") RETURNS "void"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO ''
@@ -12319,6 +12560,149 @@ COMMENT ON COLUMN "public"."notification_sends"."status" IS 'Notification send s
 
 
 
+CREATE TABLE IF NOT EXISTS "public"."outreach_event_logs" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "event" "text" NOT NULL,
+    "app_key" "text" NOT NULL,
+    "page_key" "text" NOT NULL,
+    "utm_campaign" "text" DEFAULT 'unknown'::"text" NOT NULL,
+    "utm_source" "text" DEFAULT 'unknown'::"text" NOT NULL,
+    "utm_medium" "text" DEFAULT 'unknown'::"text" NOT NULL,
+    "source_id_resolved" "text" DEFAULT 'unknown'::"text" NOT NULL,
+    "store" "text" DEFAULT 'unknown'::"text" NOT NULL,
+    "session_id" "text" NOT NULL,
+    "country" "text",
+    "ui_locale" "text",
+    "client_event_id" "uuid",
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "chk_outreach_app_key" CHECK ((("char_length"("app_key") >= 1) AND ("char_length"("app_key") <= 40))),
+    CONSTRAINT "chk_outreach_campaign" CHECK ((("char_length"("utm_campaign") >= 1) AND ("char_length"("utm_campaign") <= 128))),
+    CONSTRAINT "chk_outreach_event_type" CHECK (("event" = ANY (ARRAY['page_view'::"text", 'cta_click'::"text"]))),
+    CONSTRAINT "chk_outreach_medium" CHECK ((("char_length"("utm_medium") >= 1) AND ("char_length"("utm_medium") <= 128))),
+    CONSTRAINT "chk_outreach_page_key" CHECK ((("char_length"("page_key") >= 1) AND ("char_length"("page_key") <= 80))),
+    CONSTRAINT "chk_outreach_session" CHECK ((("char_length"("session_id") >= 1) AND ("char_length"("session_id") <= 40))),
+    CONSTRAINT "chk_outreach_source" CHECK ((("char_length"("utm_source") >= 1) AND ("char_length"("utm_source") <= 128))),
+    CONSTRAINT "chk_outreach_store" CHECK (("store" = ANY (ARRAY['ios_app_store'::"text", 'google_play'::"text", 'web'::"text", 'unknown'::"text"])))
+);
+
+
+ALTER TABLE "public"."outreach_event_logs" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."outreach_event_logs" IS 'Append-only outreach events from marketing pages; RPC-only (except retention cleanup).';
+
+
+
+COMMENT ON COLUMN "public"."outreach_event_logs"."event" IS 'Allowed: page_view, cta_click.';
+
+
+
+COMMENT ON COLUMN "public"."outreach_event_logs"."app_key" IS 'Emitter app key (e.g., kinly-web).';
+
+
+
+COMMENT ON COLUMN "public"."outreach_event_logs"."page_key" IS 'Marketing page or section identifier.';
+
+
+
+COMMENT ON COLUMN "public"."outreach_event_logs"."utm_campaign" IS 'Campaign identifier (e.g., UTM campaign).';
+
+
+
+COMMENT ON COLUMN "public"."outreach_event_logs"."utm_source" IS 'Source bucket (utm_source; used for alias resolution).';
+
+
+
+COMMENT ON COLUMN "public"."outreach_event_logs"."utm_medium" IS 'Medium bucket (e.g., utm_medium).';
+
+
+
+COMMENT ON COLUMN "public"."outreach_event_logs"."source_id_resolved" IS 'Registry-resolved source id or ''unknown'' fallback.';
+
+
+
+COMMENT ON COLUMN "public"."outreach_event_logs"."store" IS 'Store target: web | ios_app_store | google_play | unknown.';
+
+
+
+COMMENT ON COLUMN "public"."outreach_event_logs"."session_id" IS 'Opaque client session token; never an auth id.';
+
+
+
+COMMENT ON COLUMN "public"."outreach_event_logs"."country" IS 'Optional ISO 3166-1 alpha-2 country code.';
+
+
+
+COMMENT ON COLUMN "public"."outreach_event_logs"."ui_locale" IS 'Optional BCP-47 locale.';
+
+
+
+CREATE TABLE IF NOT EXISTS "public"."outreach_rate_limits" (
+    "k" "text" NOT NULL,
+    "bucket_start" timestamp with time zone NOT NULL,
+    "n" integer NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL
+);
+
+
+ALTER TABLE "public"."outreach_rate_limits" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."outreach_source_aliases" (
+    "alias" "text" NOT NULL,
+    "source_id" "text" NOT NULL,
+    "active" boolean DEFAULT true NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "chk_outreach_alias_lower" CHECK (("alias" = "lower"("alias")))
+);
+
+
+ALTER TABLE "public"."outreach_source_aliases" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."outreach_source_aliases" IS 'Alias-to-canonical mapping for outreach sources.';
+
+
+
+COMMENT ON COLUMN "public"."outreach_source_aliases"."alias" IS 'Normalized alias key (lowercased).';
+
+
+
+COMMENT ON COLUMN "public"."outreach_source_aliases"."source_id" IS 'Canonical source id this alias maps to.';
+
+
+
+COMMENT ON COLUMN "public"."outreach_source_aliases"."active" IS 'Whether the alias is allowed for resolution.';
+
+
+
+CREATE TABLE IF NOT EXISTS "public"."outreach_sources" (
+    "source_id" "text" NOT NULL,
+    "label" "text" NOT NULL,
+    "active" boolean DEFAULT true NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL
+);
+
+
+ALTER TABLE "public"."outreach_sources" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."outreach_sources" IS 'Registry of allowed outreach sources (server-managed).';
+
+
+
+COMMENT ON COLUMN "public"."outreach_sources"."source_id" IS 'Canonical source identifier expected from clients.';
+
+
+
+COMMENT ON COLUMN "public"."outreach_sources"."label" IS 'Human-friendly label for the source.';
+
+
+
+COMMENT ON COLUMN "public"."outreach_sources"."active" IS 'Whether the source is allowed for resolution.';
+
+
+
 CREATE TABLE IF NOT EXISTS "public"."paywall_events" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "user_id" "uuid",
@@ -12844,6 +13228,21 @@ ALTER TABLE ONLY "public"."notification_sends"
 
 
 
+ALTER TABLE ONLY "public"."outreach_event_logs"
+    ADD CONSTRAINT "outreach_event_logs_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."outreach_source_aliases"
+    ADD CONSTRAINT "outreach_source_aliases_pkey" PRIMARY KEY ("alias");
+
+
+
+ALTER TABLE ONLY "public"."outreach_sources"
+    ADD CONSTRAINT "outreach_sources_pkey" PRIMARY KEY ("source_id");
+
+
+
 ALTER TABLE ONLY "public"."paywall_events"
     ADD CONSTRAINT "paywall_events_pkey" PRIMARY KEY ("id");
 
@@ -12896,6 +13295,11 @@ ALTER TABLE ONLY "public"."house_vibe_labels"
 
 ALTER TABLE ONLY "public"."house_vibe_mapping_effects"
     ADD CONSTRAINT "pk_house_vibe_mapping_effects" PRIMARY KEY ("mapping_version", "preference_id", "option_index", "axis");
+
+
+
+ALTER TABLE ONLY "public"."outreach_rate_limits"
+    ADD CONSTRAINT "pk_outreach_rate_limits" PRIMARY KEY ("k", "bucket_start");
 
 
 
@@ -13137,6 +13541,30 @@ CREATE INDEX "idx_memberships_home_current" ON "public"."memberships" USING "btr
 
 
 
+CREATE INDEX "idx_outreach_event_logs_campaign_source_created_at" ON "public"."outreach_event_logs" USING "btree" ("utm_campaign", "utm_source", "utm_medium", "created_at");
+
+
+
+CREATE INDEX "idx_outreach_event_logs_event_created_at" ON "public"."outreach_event_logs" USING "btree" ("event", "created_at");
+
+
+
+CREATE INDEX "idx_outreach_event_logs_session_id" ON "public"."outreach_event_logs" USING "btree" ("session_id");
+
+
+
+CREATE INDEX "idx_outreach_event_logs_source_resolved_created_at" ON "public"."outreach_event_logs" USING "btree" ("source_id_resolved", "created_at");
+
+
+
+CREATE INDEX "idx_outreach_rate_limits_bucket" ON "public"."outreach_rate_limits" USING "btree" ("bucket_start");
+
+
+
+CREATE INDEX "idx_outreach_rate_limits_updated" ON "public"."outreach_rate_limits" USING "btree" ("updated_at");
+
+
+
 CREATE INDEX "idx_personal_items_home_source_entry" ON "public"."gratitude_wall_personal_items" USING "btree" ("home_id", "source_entry_id");
 
 
@@ -13233,6 +13661,10 @@ CREATE UNIQUE INDEX "uq_notification_sends_token_date" ON "public"."notification
 
 
 
+CREATE UNIQUE INDEX "uq_outreach_event_logs_client_event_id" ON "public"."outreach_event_logs" USING "btree" ("client_event_id") WHERE ("client_event_id" IS NOT NULL);
+
+
+
 CREATE UNIQUE INDEX "uq_profiles_username" ON "public"."profiles" USING "btree" ("username");
 
 
@@ -13278,6 +13710,14 @@ CREATE OR REPLACE TRIGGER "trg_house_vibes_preference_responses_out_of_date" AFT
 
 
 CREATE OR REPLACE TRIGGER "trg_leads_touch_updated_at" BEFORE UPDATE ON "public"."leads" FOR EACH ROW EXECUTE FUNCTION "public"."_touch_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_outreach_aliases_protect_unknown" BEFORE DELETE OR UPDATE ON "public"."outreach_source_aliases" FOR EACH ROW EXECUTE FUNCTION "public"."_outreach_aliases_protect_unknown"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_outreach_sources_protect_unknown" BEFORE DELETE OR UPDATE ON "public"."outreach_sources" FOR EACH ROW EXECUTE FUNCTION "public"."_outreach_sources_protect_unknown"();
 
 
 
@@ -13398,6 +13838,11 @@ ALTER TABLE ONLY "public"."house_vibes"
 
 ALTER TABLE ONLY "public"."notification_sends"
     ADD CONSTRAINT "fk_notification_sends_token_id" FOREIGN KEY ("token_id") REFERENCES "public"."device_tokens"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."outreach_event_logs"
+    ADD CONSTRAINT "fk_outreach_event_logs_source_resolved" FOREIGN KEY ("source_id_resolved") REFERENCES "public"."outreach_sources"("source_id");
 
 
 
@@ -13593,6 +14038,11 @@ ALTER TABLE ONLY "public"."notification_preferences"
 
 ALTER TABLE ONLY "public"."notification_sends"
     ADD CONSTRAINT "notification_sends_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."profiles"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."outreach_source_aliases"
+    ADD CONSTRAINT "outreach_source_aliases_source_id_fkey" FOREIGN KEY ("source_id") REFERENCES "public"."outreach_sources"("source_id");
 
 
 
@@ -13803,6 +14253,18 @@ ALTER TABLE "public"."notification_preferences" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "public"."notification_sends" ENABLE ROW LEVEL SECURITY;
 
 
+ALTER TABLE "public"."outreach_event_logs" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."outreach_rate_limits" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."outreach_source_aliases" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."outreach_sources" ENABLE ROW LEVEL SECURITY;
+
+
 ALTER TABLE "public"."paywall_events" ENABLE ROW LEVEL SECURITY;
 
 
@@ -13845,6 +14307,22 @@ ALTER TABLE "public"."revenuecat_event_processing" ENABLE ROW LEVEL SECURITY;
 
 
 ALTER TABLE "public"."revenuecat_webhook_events" ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY "service_role_all_outreach_aliases" ON "public"."outreach_source_aliases" TO "service_role" USING (true) WITH CHECK (true);
+
+
+
+CREATE POLICY "service_role_all_outreach_rate_limits" ON "public"."outreach_rate_limits" TO "service_role" USING (true) WITH CHECK (true);
+
+
+
+CREATE POLICY "service_role_all_outreach_sources" ON "public"."outreach_sources" TO "service_role" USING (true) WITH CHECK (true);
+
+
+
+CREATE POLICY "service_role_read_outreach_event_logs" ON "public"."outreach_event_logs" FOR SELECT TO "service_role" USING (true);
+
 
 
 ALTER TABLE "public"."share_events" ENABLE ROW LEVEL SECURITY;
@@ -14356,6 +14834,24 @@ GRANT ALL ON FUNCTION "public"."_member_cap_enqueue_request"("p_home_id" "uuid",
 
 REVOKE ALL ON FUNCTION "public"."_member_cap_resolve_requests"("p_home_id" "uuid", "p_reason" "text", "p_request_ids" "uuid"[], "p_payload" "jsonb") FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."_member_cap_resolve_requests"("p_home_id" "uuid", "p_reason" "text", "p_request_ids" "uuid"[], "p_payload" "jsonb") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."_outreach_aliases_protect_unknown"() TO "anon";
+GRANT ALL ON FUNCTION "public"."_outreach_aliases_protect_unknown"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."_outreach_aliases_protect_unknown"() TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."_outreach_rate_limit_bucketed"("p_key" "text", "p_bucket_start" timestamp with time zone, "p_limit" integer) TO "anon";
+GRANT ALL ON FUNCTION "public"."_outreach_rate_limit_bucketed"("p_key" "text", "p_bucket_start" timestamp with time zone, "p_limit" integer) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."_outreach_rate_limit_bucketed"("p_key" "text", "p_bucket_start" timestamp with time zone, "p_limit" integer) TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."_outreach_sources_protect_unknown"() TO "anon";
+GRANT ALL ON FUNCTION "public"."_outreach_sources_protect_unknown"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."_outreach_sources_protect_unknown"() TO "service_role";
 
 
 
@@ -16197,6 +16693,27 @@ GRANT ALL ON FUNCTION "public"."oid_dist"("oid", "oid") TO "service_role";
 
 
 
+REVOKE ALL ON FUNCTION "public"."outreach_event_logs_cleanup"("p_keep" interval) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."outreach_event_logs_cleanup"("p_keep" interval) TO "anon";
+GRANT ALL ON FUNCTION "public"."outreach_event_logs_cleanup"("p_keep" interval) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."outreach_event_logs_cleanup"("p_keep" interval) TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."outreach_log_event"("p_event" "text", "p_app_key" "text", "p_page_key" "text", "p_utm_campaign" "text", "p_utm_source" "text", "p_utm_medium" "text", "p_session_id" "text", "p_store" "text", "p_country" "text", "p_ui_locale" "text", "p_client_event_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."outreach_log_event"("p_event" "text", "p_app_key" "text", "p_page_key" "text", "p_utm_campaign" "text", "p_utm_source" "text", "p_utm_medium" "text", "p_session_id" "text", "p_store" "text", "p_country" "text", "p_ui_locale" "text", "p_client_event_id" "uuid") TO "anon";
+GRANT ALL ON FUNCTION "public"."outreach_log_event"("p_event" "text", "p_app_key" "text", "p_page_key" "text", "p_utm_campaign" "text", "p_utm_source" "text", "p_utm_medium" "text", "p_session_id" "text", "p_store" "text", "p_country" "text", "p_ui_locale" "text", "p_client_event_id" "uuid") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."outreach_log_event"("p_event" "text", "p_app_key" "text", "p_page_key" "text", "p_utm_campaign" "text", "p_utm_source" "text", "p_utm_medium" "text", "p_session_id" "text", "p_store" "text", "p_country" "text", "p_ui_locale" "text", "p_client_event_id" "uuid") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."outreach_rate_limits_cleanup"("p_keep" interval) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."outreach_rate_limits_cleanup"("p_keep" interval) TO "anon";
+GRANT ALL ON FUNCTION "public"."outreach_rate_limits_cleanup"("p_keep" interval) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."outreach_rate_limits_cleanup"("p_keep" interval) TO "service_role";
+
+
+
 REVOKE ALL ON FUNCTION "public"."paywall_log_event"("p_home_id" "uuid", "p_event_type" "text", "p_source" "text") FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."paywall_log_event"("p_home_id" "uuid", "p_event_type" "text", "p_source" "text") TO "anon";
 GRANT ALL ON FUNCTION "public"."paywall_log_event"("p_home_id" "uuid", "p_event_type" "text", "p_source" "text") TO "authenticated";
@@ -16663,6 +17180,22 @@ GRANT ALL ON TABLE "public"."memberships" TO "service_role";
 GRANT ALL ON TABLE "public"."notification_sends" TO "anon";
 GRANT ALL ON TABLE "public"."notification_sends" TO "authenticated";
 GRANT ALL ON TABLE "public"."notification_sends" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."outreach_event_logs" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."outreach_rate_limits" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."outreach_source_aliases" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."outreach_sources" TO "service_role";
 
 
 
