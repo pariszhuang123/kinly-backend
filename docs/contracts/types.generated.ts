@@ -3006,6 +3006,7 @@ export type Database = {
         Args: { p_recipient_user_id: string }
         Returns: Json
       }
+      get_plan_status: { Args: never; Returns: Json }
       gratitude_wall_list: {
         Args: {
           p_cursor_created_at?: string

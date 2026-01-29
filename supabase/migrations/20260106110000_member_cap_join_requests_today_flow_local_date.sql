@@ -323,7 +323,10 @@ BEGIN
       'INVALID_CODE',
       'Invite code not found. Please check and try again.',
       '22023',
-      jsonb_build_object('code', p_code)
+      jsonb_build_object(
+        'context', 'homes_join',
+        'reason', 'code_not_found'
+      )
     );
   END IF;
 
@@ -333,7 +336,10 @@ BEGIN
       'INACTIVE_INVITE',
       'This invite or household is no longer active.',
       'P0001',
-      jsonb_build_object('code', p_code)
+      jsonb_build_object(
+        'context', 'homes_join',
+        'reason', 'revoked_or_home_inactive'
+      )
     );
   END IF;
 
@@ -367,7 +373,11 @@ BEGIN
     PERFORM public.api_error(
       'ALREADY_IN_OTHER_HOME',
       'You are already a member of another household. Leave it first before joining a new one.',
-      '42501'
+      '42501',
+      jsonb_build_object(
+        'context', 'homes_join',
+        'reason', 'single_home_rule'
+      )
     );
   END IF;
 
@@ -424,7 +434,11 @@ BEGIN
       PERFORM public.api_error(
         'ALREADY_IN_OTHER_HOME',
         'You are already a member of another household. Leave it first before joining a new one.',
-        '42501'
+        '42501',
+        jsonb_build_object(
+          'context', 'homes_join',
+          'reason', 'unique_violation_memberships'
+        )
       );
   END;
 
