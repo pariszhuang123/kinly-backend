@@ -1,0 +1,13 @@
+{
+  "case_id": "cleanliness_peer_full_reframe_09",
+  "topic": "cleanliness",
+  "power_mode": "peer",
+  "rewrite_strength": "full_reframe",
+  "source_locale": "en",
+  "target_locale": "en",
+  "original_text": "Your crusty pans have sat for days, it is gross",
+  "expected_intent": "concern",
+  "expected_lexicon_violations": [
+    "personal_attack"
+  ]
+}

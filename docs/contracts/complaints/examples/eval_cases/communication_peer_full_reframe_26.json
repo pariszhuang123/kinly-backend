@@ -1,0 +1,14 @@
+{
+  "case_id": "communication_peer_full_reframe_26",
+  "topic": "communication",
+  "power_mode": "peer",
+  "rewrite_strength": "full_reframe",
+  "source_locale": "en",
+  "target_locale": "en",
+  "original_text": "Replying once a week is ridiculous; act like an adult",
+  "expected_intent": "concern",
+  "expected_lexicon_violations": [
+    "personal_attack",
+    "blame"
+  ]
+}

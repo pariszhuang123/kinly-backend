@@ -1,0 +1,14 @@
+{
+  "case_id": "cleanliness_peer_full_reframe_06",
+  "topic": "cleanliness",
+  "power_mode": "peer",
+  "rewrite_strength": "full_reframe",
+  "source_locale": "en",
+  "target_locale": "en",
+  "original_text": "The bathroom looks like a swamp after you use it, clean your mess",
+  "expected_intent": "boundary",
+  "expected_lexicon_violations": [
+    "vulgarity",
+    "personal_attack"
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "case_id": "schedule-peer-fr-vulgar-1",
+  "topic": "schedule",
+  "power_mode": "peer",
+  "rewrite_strength": "full_reframe",
+  "source_locale": "en",
+  "target_locale": "en",
+  "original_text": "Stop slamming doors at 6am, some of us aren't clowns on circus hours",
+  "expected_intent": "boundary",
+  "expected_lexicon_violations": ["vulgarity", "personal_attack"],
+  "notes": "Early-morning noise framed as schedule issue with insult."
+}

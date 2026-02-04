@@ -1,0 +1,13 @@
+{
+  "case_id": "schedule_peer_full_reframe_25",
+  "topic": "schedule",
+  "power_mode": "peer",
+  "rewrite_strength": "full_reframe",
+  "source_locale": "en",
+  "target_locale": "en",
+  "original_text": "Your midnight laundry shakes the walls; it needs to stop",
+  "expected_intent": "boundary",
+  "expected_lexicon_violations": [
+    "blame"
+  ]
+}

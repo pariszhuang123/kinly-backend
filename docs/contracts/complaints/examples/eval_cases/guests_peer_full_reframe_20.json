@@ -1,0 +1,14 @@
+{
+  "case_id": "guests_peer_full_reframe_20",
+  "topic": "guests",
+  "power_mode": "peer",
+  "rewrite_strength": "full_reframe",
+  "source_locale": "en",
+  "target_locale": "en",
+  "original_text": "Having guests during my exams is selfish",
+  "expected_intent": "concern",
+  "expected_lexicon_violations": [
+    "personal_attack",
+    "blame"
+  ]
+}

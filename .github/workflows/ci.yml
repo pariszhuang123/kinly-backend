@@ -40,13 +40,10 @@ jobs:
         with:
           fetch-depth: 0
 
-      # Supabase CLI is required by backend_guardrails.sh
       - uses: supabase/setup-cli@v1
         with:
           version: latest
 
-      # Deno is only required if Edge Functions exist.
-      # We can install it unconditionally (simple + cheap) and let the script decide.
       - name: Setup Deno (if pinned)
         if: hashFiles('.denoversion') != ''
         uses: denoland/setup-deno@v1
@@ -61,14 +58,11 @@ jobs:
           path: ~/.cache/deno
           key: deno-${{ runner.os }}-${{ hashFiles('.denoversion', 'supabase/deno.lock', 'supabase/deno.json') }}
 
-                # Dart is required by tool/contracts_regen.sh (contracts_extract + validate_registry)
       - name: Setup Dart
         uses: dart-lang/setup-dart@v1
         with:
           sdk: stable
 
-      # Only needed if your Dart scripts depend on pub packages.
-      # (Safe even if there is no pubspec.yaml? No—so guard it.)
       - name: Dart pub get (if needed)
         shell: bash
         run: |
@@ -131,6 +125,9 @@ jobs:
           supabase secrets set \
             SUPABASE_URL="${{ secrets.SUPABASE_URL }}" \
             SUPABASE_SERVICE_ROLE_KEY="${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
+            OPENAI_CLASSIFIER_API_KEY="${{ secrets.OPENAI_CLASSIFIER_API_KEY }}" \
+            OPENAI_REWRITE_API_KEY="${{ secrets.OPENAI_REWRITE_API_KEY }}" \
+            WORKER_SHARED_SECRET="${{ secrets.DEV_WORKER_SHARED_SECRET }}" \
             RC_WEBHOOK_SECRET="${{ secrets.DEV_RC_WEBHOOK_SECRET }}" \
             FCM_SERVICE_ACCOUNT="$FCM_SA_JSON" \
             FCM_PROJECT_ID="${{ secrets.FCM_PROJECT_ID }}"
@@ -144,10 +141,27 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Deploy only if the functions exist
-          if [ -d "supabase/functions" ] && find supabase/functions -mindepth 1 -maxdepth 2 -not -path '*/.*' -print -quit | grep -q .; then
-            supabase functions deploy notifications_daily --project-ref "$SUPABASE_PROJECT_ID" || true
-            supabase functions deploy revenuecat_webhook --project-ref "$SUPABASE_PROJECT_ID" --no-verify-jwt || true
+
+          if [ -d "supabase/functions" ] && find supabase/functions -mindepth 2 -maxdepth 2 -type f -name "index.ts" -print -quit | grep -q .; then
+            # Deploy all functions that exist (folder name = function name)
+            for fn in $(find supabase/functions -mindepth 1 -maxdepth 1 -type d -not -path '*/.*' -printf '%f\n' | sort); do
+              echo "::group::Deploy function $fn"
+              if [ "$fn" = "revenuecat_webhook" ]; then
+                supabase functions deploy "$fn" --project-ref "$SUPABASE_PROJECT_ID" --no-verify-jwt
+              else
+                # Internal workers / cron endpoints usually also want no-verify-jwt.
+                # Safe default: no-verify-jwt for anything not explicitly user-authenticated.
+                case "$fn" in
+                  rewrite_worker|complaint_orchestrator|rewrite_batch_submitter|rewrite_batch_collector)
+                    supabase functions deploy "$fn" --project-ref "$SUPABASE_PROJECT_ID" --no-verify-jwt
+                    ;;
+                  *)
+                    supabase functions deploy "$fn" --project-ref "$SUPABASE_PROJECT_ID" || true
+                    ;;
+                esac
+              fi
+              echo "::endgroup::"
+            done
           else
             echo "::notice::No Edge Functions detected; skipping deploy"
           fi
@@ -155,11 +169,21 @@ jobs:
       - name: Smoke tests (Dev)
         if: steps.flags.outputs.do_deploy == 'true'
         shell: bash
+        env:
+          INTERNAL_SECRET: ${{ secrets.DEV_WORKER_SHARED_SECRET }}
         run: |
           set -euo pipefail
-          # Invoke only if deployed / exist
+
+          # User-facing functions (if any) can be invoked normally
           supabase functions invoke notifications_daily || true
           supabase functions invoke revenuecat_webhook || true
+
+          # Internal-only endpoints require the internal header
+          # (supabase functions invoke supports --headers)
+          supabase functions invoke rewrite_batch_submitter --headers "x-internal-secret: $INTERNAL_SECRET" || true
+          supabase functions invoke rewrite_batch_collector --headers "x-internal-secret: $INTERNAL_SECRET" || true
+          supabase functions invoke rewrite_worker         --headers "x-internal-secret: $INTERNAL_SECRET" || true
+          supabase functions invoke complaint_orchestrator --headers "x-internal-secret: $INTERNAL_SECRET" || true
 
   deploy_prod:
     name: Deploy • Supabase Prod
@@ -206,6 +230,9 @@ jobs:
           supabase secrets set \
             SUPABASE_URL="${{ secrets.SUPABASE_URL }}" \
             SUPABASE_SERVICE_ROLE_KEY="${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
+            OPENAI_CLASSIFIER_API_KEY="${{ secrets.OPENAI_CLASSIFIER_API_KEY }}" \
+            OPENAI_REWRITE_API_KEY="${{ secrets.OPENAI_REWRITE_API_KEY }}" \
+            WORKER_SHARED_SECRET="${{ secrets.PROD_WORKER_SHARED_SECRET }}" \
             RC_WEBHOOK_SECRET="${{ secrets.PROD_RC_WEBHOOK_SECRET }}" \
             FCM_SERVICE_ACCOUNT="$FCM_SA_JSON" \
             FCM_PROJECT_ID="${{ secrets.FCM_PROJECT_ID }}"
@@ -219,9 +246,24 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ -d "supabase/functions" ] && find supabase/functions -mindepth 1 -maxdepth 2 -not -path '*/.*' -print -quit | grep -q .; then
-            supabase functions deploy notifications_daily --project-ref "$SUPABASE_PROJECT_ID" || true
-            supabase functions deploy revenuecat_webhook --project-ref "$SUPABASE_PROJECT_ID" --no-verify-jwt || true
+
+          if [ -d "supabase/functions" ] && find supabase/functions -mindepth 2 -maxdepth 2 -type f -name "index.ts" -print -quit | grep -q .; then
+            for fn in $(find supabase/functions -mindepth 1 -maxdepth 1 -type d -not -path '*/.*' -printf '%f\n' | sort); do
+              echo "::group::Deploy function $fn"
+              if [ "$fn" = "revenuecat_webhook" ]; then
+                supabase functions deploy "$fn" --project-ref "$SUPABASE_PROJECT_ID" --no-verify-jwt
+              else
+                case "$fn" in
+                  rewrite_worker|complaint_orchestrator|rewrite_batch_submitter|rewrite_batch_collector)
+                    supabase functions deploy "$fn" --project-ref "$SUPABASE_PROJECT_ID" --no-verify-jwt
+                    ;;
+                  *)
+                    supabase functions deploy "$fn" --project-ref "$SUPABASE_PROJECT_ID" || true
+                    ;;
+                esac
+              fi
+              echo "::endgroup::"
+            done
           else
             echo "::notice::No Edge Functions detected; skipping deploy"
           fi
@@ -229,10 +271,18 @@ jobs:
       - name: Smoke tests (Prod)
         if: steps.flags.outputs.do_deploy == 'true'
         shell: bash
+        env:
+          INTERNAL_SECRET: ${{ secrets.PROD_WORKER_SHARED_SECRET }}
         run: |
           set -euo pipefail
+
           supabase functions invoke notifications_daily || true
           supabase functions invoke revenuecat_webhook || true
+
+          supabase functions invoke rewrite_batch_submitter --headers "x-internal-secret: $INTERNAL_SECRET" || true
+          supabase functions invoke rewrite_batch_collector --headers "x-internal-secret: $INTERNAL_SECRET" || true
+          supabase functions invoke rewrite_worker         --headers "x-internal-secret: $INTERNAL_SECRET" || true
+          supabase functions invoke complaint_orchestrator --headers "x-internal-secret: $INTERNAL_SECRET" || true
 
   publish_contracts:
     name: Publish • Backend Snapshots → kinly-contracts
@@ -286,7 +336,7 @@ jobs:
           token: ${{ secrets.KINLY_CONTRACTS_PUSH_TOKEN }}
           fetch-depth: 0
 
-      - name: Sync snapshots into kinly-contracts/contracts/api/kinly_backend
+      - name: Sync snapshots into kinly-contracts/contracts/api/kinly/backend
         if: steps.flags.outputs.do_publish == 'true'
         shell: bash
         run: |

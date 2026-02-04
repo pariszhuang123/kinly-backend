@@ -1,0 +1,14 @@
+{
+  "case_id": "privacy_peer_full_reframe_11",
+  "topic": "privacy",
+  "power_mode": "peer",
+  "rewrite_strength": "full_reframe",
+  "source_locale": "en",
+  "target_locale": "en",
+  "original_text": "Stop snooping through my stuff, that is creepy",
+  "expected_intent": "boundary",
+  "expected_lexicon_violations": [
+    "personal_attack",
+    "vulgarity"
+  ]
+}

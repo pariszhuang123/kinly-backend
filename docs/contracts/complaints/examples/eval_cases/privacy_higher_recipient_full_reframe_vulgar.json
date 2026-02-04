@@ -1,0 +1,12 @@
+{
+  "case_id": "privacy-hr-fr-vulgar-1",
+  "topic": "privacy",
+  "power_mode": "higher_recipient",
+  "rewrite_strength": "full_reframe",
+  "source_locale": "en",
+  "target_locale": "en",
+  "original_text": "Quit barging into my room like some creep, it's not your damn space",
+  "expected_intent": "boundary",
+  "expected_lexicon_violations": ["vulgarity", "personal_attack", "authority"],
+  "notes": "Higher recipient power requires invitational tone; contains vulgarity and attack."
+}

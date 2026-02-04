@@ -1,0 +1,13 @@
+{
+  "case_id": "noise_higher_recipient_light_touch_03",
+  "topic": "noise",
+  "power_mode": "higher_recipient",
+  "rewrite_strength": "light_touch",
+  "source_locale": "en",
+  "target_locale": "en",
+  "original_text": "Could you maybe keep the volume lower after 11? walls are thin",
+  "expected_intent": "request",
+  "expected_lexicon_violations": [
+    "hedge_warn"
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "case_id": "cleanliness_higher_recipient_full_reframe_07",
+  "topic": "cleanliness",
+  "power_mode": "higher_recipient",
+  "rewrite_strength": "full_reframe",
+  "source_locale": "en",
+  "target_locale": "en",
+  "original_text": "Please stop leaving food rotting on the counter; it smells awful",
+  "expected_intent": "concern",
+  "expected_lexicon_violations": [
+    "blame"
+  ]
+}

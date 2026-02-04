@@ -2,7 +2,7 @@ SET search_path = pgtap, public, auth, extensions;
 
 -- pgTAP tests for notifications daily migration
 BEGIN;
-SELECT plan(31);
+SELECT plan(32);
 
 CREATE TEMP TABLE tmp_users (
   label   text PRIMARY KEY,
@@ -42,7 +42,9 @@ INSERT INTO tmp_users (label, user_id, email) VALUES
   ('reserve_target',  '20000000-0000-4000-9000-000000000004', 'reserve-notify@example.com'),
   ('success_target',  '20000000-0000-4000-9000-000000000005', 'success-notify@example.com'),
   ('failure_target',  '20000000-0000-4000-9000-000000000006', 'failure-notify@example.com'),
-  ('minute_mismatch', '20000000-0000-4000-9000-000000000007', 'minute-mismatch@example.com');
+  ('within_window',   '20000000-0000-4000-9000-000000000007', 'within-window@example.com'),
+  ('outside_window',  '20000000-0000-4000-9000-000000000008', 'outside-window@example.com'),
+  ('already_sent',    '20000000-0000-4000-9000-000000000009', 'already-sent@example.com');
 
 INSERT INTO auth.users (id, instance_id, email, raw_user_meta_data, raw_app_meta_data, aud, role, encrypted_password)
 SELECT
@@ -205,11 +207,10 @@ FROM tmp_users u
 CROSS JOIN now_parts np
 WHERE u.label IN ('eligible', 'no_content', 'expired_token', 'success_target', 'failure_target');
 
--- Seed a user whose minute is offset so they should not be in candidates
+-- Seed a user whose preferred time is 10 minutes before now
 WITH now_parts AS (
   SELECT
-    date_part('hour', timezone('UTC', now()))::int   AS current_hour,
-    date_part('minute', timezone('UTC', now()))::int AS current_minute
+    timezone('UTC', now()) AS local_now
 )
 INSERT INTO public.notification_preferences (
   user_id,
@@ -227,8 +228,8 @@ INSERT INTO public.notification_preferences (
 SELECT
   u.user_id,
   TRUE,
-  np.current_hour,
-  (np.current_minute + 1) % 60,
+  date_part('hour', np.local_now - INTERVAL '10 minutes')::int,
+  date_part('minute', np.local_now - INTERVAL '10 minutes')::int,
   'UTC',
   'en',
   'allowed',
@@ -238,7 +239,75 @@ SELECT
   now()
 FROM tmp_users u
 CROSS JOIN now_parts np
-WHERE u.label = 'minute_mismatch';
+WHERE u.label = 'within_window';
+
+-- Seed a user whose preferred time is outside the 15-minute window
+WITH now_parts AS (
+  SELECT
+    timezone('UTC', now()) AS local_now
+)
+INSERT INTO public.notification_preferences (
+  user_id,
+  wants_daily,
+  preferred_hour,
+  preferred_minute,
+  timezone,
+  locale,
+  os_permission,
+  last_os_sync_at,
+  last_sent_local_date,
+  created_at,
+  updated_at
+)
+SELECT
+  u.user_id,
+  TRUE,
+  date_part('hour', np.local_now - INTERVAL '16 minutes')::int,
+  date_part('minute', np.local_now - INTERVAL '16 minutes')::int,
+  'UTC',
+  'en',
+  'allowed',
+  now(),
+  NULL,
+  now(),
+  now()
+FROM tmp_users u
+CROSS JOIN now_parts np
+WHERE u.label = 'outside_window';
+
+-- Seed a user whose preferred time is within the window but already sent today
+WITH now_parts AS (
+  SELECT
+    timezone('UTC', now()) AS local_now
+)
+INSERT INTO public.notification_preferences (
+  user_id,
+  wants_daily,
+  preferred_hour,
+  preferred_minute,
+  timezone,
+  locale,
+  os_permission,
+  last_os_sync_at,
+  last_sent_local_date,
+  created_at,
+  updated_at
+)
+SELECT
+  u.user_id,
+  TRUE,
+  date_part('hour', np.local_now)::int,
+  date_part('minute', np.local_now)::int,
+  'UTC',
+  'en',
+  'allowed',
+  now(),
+  np.local_now::date,
+  now(),
+  now()
+FROM tmp_users u
+CROSS JOIN now_parts np
+WHERE u.label = 'already_sent';
 
 -- Keep success/failure users out of candidate list while still allowing status updates
 UPDATE public.notification_preferences
@@ -255,7 +324,9 @@ VALUES
   ('30000000-0000-4000-9000-000000000003', '20000000-0000-4000-9000-000000000003', 'expired-token', 'fcm', 'ios', 'expired', now(), now(), now()),
   ('30000000-0000-4000-9000-000000000004', '20000000-0000-4000-9000-000000000006', 'failure-token', 'fcm', 'android', 'active', now(), now(), now()),
   ('30000000-0000-4000-9000-000000000005', '20000000-0000-4000-9000-000000000005', 'success-token', 'fcm', 'android', 'active', now(), now(), now()),
-  ('30000000-0000-4000-9000-000000000006', '20000000-0000-4000-9000-000000000007', 'minute-mismatch-token', 'fcm', 'ios', 'active', now(), now(), now()),
+  ('30000000-0000-4000-9000-000000000006', '20000000-0000-4000-9000-000000000007', 'within-window-token', 'fcm', 'ios', 'active', now(), now(), now()),
+  ('30000000-0000-4000-9000-000000000009', '20000000-0000-4000-9000-000000000008', 'outside-window-token', 'fcm', 'ios', 'active', now(), now(), now()),
+  ('30000000-0000-4000-9000-000000000010', '20000000-0000-4000-9000-000000000009', 'already-sent-token', 'fcm', 'ios', 'active', now(), now(), now()),
   ('30000000-0000-4000-9000-000000000007', '20000000-0000-4000-9000-000000000004', 'reserve-token-1', 'fcm', 'android', 'active', now(), now(), now()),
   ('30000000-0000-4000-9000-000000000008', '20000000-0000-4000-9000-000000000004', 'reserve-token-2', 'fcm', 'android', 'active', now(), now(), now());
 
@@ -265,7 +336,9 @@ INSERT INTO tmp_tokens (label, token_id, user_id) VALUES
   ('expired', '30000000-0000-4000-9000-000000000003', '20000000-0000-4000-9000-000000000003'),
   ('failure', '30000000-0000-4000-9000-000000000004', '20000000-0000-4000-9000-000000000006'),
   ('success', '30000000-0000-4000-9000-000000000005', '20000000-0000-4000-9000-000000000005'),
-  ('minute_mismatch', '30000000-0000-4000-9000-000000000006', '20000000-0000-4000-9000-000000000007'),
+  ('within_window', '30000000-0000-4000-9000-000000000006', '20000000-0000-4000-9000-000000000007'),
+  ('outside_window', '30000000-0000-4000-9000-000000000009', '20000000-0000-4000-9000-000000000008'),
+  ('already_sent', '30000000-0000-4000-9000-000000000010', '20000000-0000-4000-9000-000000000009'),
   ('reserve_one', '30000000-0000-4000-9000-000000000007', '20000000-0000-4000-9000-000000000004'),
   ('reserve_two', '30000000-0000-4000-9000-000000000008', '20000000-0000-4000-9000-000000000004');
 
@@ -277,15 +350,11 @@ SELECT * FROM public.notifications_daily_candidates(10, 0);
 RESET ROLE;
 SET LOCAL search_path = pgtap, public, auth, extensions;
 
-SELECT is(
-  (SELECT COUNT(*)::int FROM tmp_candidates),
-  1,
-  'Only eligible users with active tokens are returned'
-);
-
-SELECT is(
-  (SELECT user_id::text FROM tmp_candidates LIMIT 1),
-  '20000000-0000-4000-9000-000000000001',
+SELECT ok(
+  EXISTS (
+    SELECT 1 FROM tmp_candidates
+    WHERE user_id = '20000000-0000-4000-9000-000000000001'
+  ),
   'Eligible user returned'
 );
 
@@ -296,10 +365,53 @@ SELECT is(
 );
 
 SELECT ok(
-  NOT EXISTS (
-    SELECT 1 FROM tmp_candidates WHERE user_id = '20000000-0000-4000-9000-000000000007'
+  (
+    SELECT
+      EXISTS (
+        SELECT 1 FROM tmp_candidates
+        WHERE user_id = '20000000-0000-4000-9000-000000000007'
+      ) =
+      (
+        local_now >= date_trunc('day', local_now)
+          + make_interval(hours => np.preferred_hour, mins => np.preferred_minute)
+        AND local_now <= date_trunc('day', local_now)
+          + make_interval(hours => np.preferred_hour, mins => np.preferred_minute)
+          + INTERVAL '15 minutes'
+      )
+    FROM public.notification_preferences np
+    CROSS JOIN (SELECT timezone('UTC', now()) AS local_now) ts
+    WHERE np.user_id = '20000000-0000-4000-9000-000000000007'
   ),
-  'Candidate list excludes users whose preferred_minute does not match current minute'
+  'Candidate list matches 15-minute window rule for user with preferred time 10 minutes earlier'
+);
+
+SELECT ok(
+  (
+    SELECT
+      EXISTS (
+        SELECT 1 FROM tmp_candidates
+        WHERE user_id = '20000000-0000-4000-9000-000000000008'
+      ) =
+      (
+        local_now >= date_trunc('day', local_now)
+          + make_interval(hours => np.preferred_hour, mins => np.preferred_minute)
+        AND local_now <= date_trunc('day', local_now)
+          + make_interval(hours => np.preferred_hour, mins => np.preferred_minute)
+          + INTERVAL '15 minutes'
+      )
+    FROM public.notification_preferences np
+    CROSS JOIN (SELECT timezone('UTC', now()) AS local_now) ts
+    WHERE np.user_id = '20000000-0000-4000-9000-000000000008'
+  ),
+  'Candidate list matches 15-minute window rule for user with preferred time 16 minutes earlier'
+);
+
+SELECT ok(
+  NOT EXISTS (
+    SELECT 1 FROM tmp_candidates
+    WHERE user_id = '20000000-0000-4000-9000-000000000009'
+  ),
+  'Candidate list excludes users already sent today'
 );
 
 SELECT is(

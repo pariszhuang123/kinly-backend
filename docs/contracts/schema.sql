@@ -460,6 +460,25 @@ $$;
 ALTER FUNCTION "public"."_chores_base_for_home"("p_home_id" "uuid") OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."_complaint_topics_valid"("p" "jsonb") RETURNS boolean
+    LANGUAGE "sql" IMMUTABLE STRICT
+    SET "search_path" TO ''
+    AS $$
+  select
+    jsonb_typeof(p) = 'array'
+    and jsonb_array_length(p) between 1 and 3
+    and (
+      select coalesce(bool_and(elem in (
+        'noise','cleanliness','privacy','guests','schedule','communication','other'
+      )), false)
+      from jsonb_array_elements_text(p) e(elem)
+    );
+$$;
+
+
+ALTER FUNCTION "public"."_complaint_topics_valid"("p" "jsonb") OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."_current_user_id"() RETURNS "uuid"
     LANGUAGE "sql" STABLE
     SET "search_path" TO ''
@@ -1704,6 +1723,17 @@ $$;
 ALTER FUNCTION "public"."_iso_week_utc"("p_at" timestamp with time zone) OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."_locale_primary"("p" "text") RETURNS "text"
+    LANGUAGE "sql" IMMUTABLE
+    SET "search_path" TO ''
+    AS $$
+  select nullif(lower(split_part(coalesce(p,''), '-', 1)), '');
+$$;
+
+
+ALTER FUNCTION "public"."_locale_primary"("p" "text") OWNER TO "postgres";
+
+
 CREATE TABLE IF NOT EXISTS "public"."member_cap_join_requests" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "home_id" "uuid" NOT NULL,
@@ -1859,6 +1889,23 @@ $$;
 
 
 ALTER FUNCTION "public"."_outreach_sources_protect_unknown"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_preference_report_to_value_map"("p_report" "jsonb") RETURNS "jsonb"
+    LANGUAGE "sql" IMMUTABLE
+    SET "search_path" TO ''
+    AS $$
+  select coalesce((
+    select jsonb_object_agg(k, (v->>'value_key'))
+    from jsonb_each(coalesce(p_report->'resolved', '{}'::jsonb)) as e(k, v)
+    where (v ? 'value_key')
+      and (v->>'value_key') is not null
+      and (v->>'value_key') <> ''
+  ), '{}'::jsonb);
+$$;
+
+
+ALTER FUNCTION "public"."_preference_report_to_value_map"("p_report" "jsonb") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."_preference_reports_mark_out_of_date"() RETURNS "trigger"
@@ -2095,11 +2142,10 @@ CREATE OR REPLACE FUNCTION "public"."_touch_updated_at"() RETURNS "trigger"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO ''
     AS $$
-BEGIN
-  NEW.updated_at = now();
-  RETURN NEW;
-END;
-$$;
+begin
+  new.updated_at = now();
+  return new;
+end $$;
 
 
 ALTER FUNCTION "public"."_touch_updated_at"() OWNER TO "postgres";
@@ -3341,6 +3387,678 @@ $$;
 
 
 ALTER FUNCTION "public"."chores_update_v2"("p_chore_id" "uuid", "p_name" "text", "p_assignee_user_id" "uuid", "p_start_date" "date", "p_recurrence_every" integer, "p_recurrence_unit" "text", "p_expectation_photo_path" "text", "p_how_to_video_url" "text", "p_notes" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."claim_rewrite_jobs_by_ids_for_collect_v1"("p_job_ids" "uuid"[]) RETURNS TABLE("job_id" "uuid", "rewrite_request_id" "uuid", "recipient_user_id" "uuid", "provider_batch_id" "text", "routing_decision" "jsonb")
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+declare
+  worker_id text := coalesce(
+    nullif(current_setting('request.headers.x-worker-id', true), ''),
+    'rewrite_batch_collector'
+  );
+begin
+  return query
+  with claimed as (
+    update public.rewrite_jobs j
+       set status='processing',
+           claimed_at=now(),
+           claimed_by=worker_id,
+           updated_at=now()
+     where j.job_id = any(p_job_ids)
+       and j.status = 'batch_submitted'
+     returning j.job_id, j.rewrite_request_id, j.recipient_user_id, j.provider_batch_id, j.routing_decision
+  ),
+  mark_req as (
+    update public.rewrite_requests r
+       set status='processing',
+           updated_at=now()
+     where r.rewrite_request_id in (select rewrite_request_id from claimed)
+       and r.status='queued'
+  )
+  select * from claimed;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."claim_rewrite_jobs_by_ids_for_collect_v1"("p_job_ids" "uuid"[]) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."claim_rewrite_jobs_for_batch_collect_v1"("p_limit" integer DEFAULT 200) RETURNS TABLE("job_id" "uuid", "rewrite_request_id" "uuid", "recipient_user_id" "uuid", "provider_batch_id" "text", "routing_decision" "jsonb")
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+declare
+  worker_id text := coalesce(
+    nullif(current_setting('request.headers.x-worker-id', true), ''),
+    'rewrite_batch_collector'
+  );
+begin
+  return query
+  with cte as (
+    select j.job_id
+    from public.rewrite_jobs j
+    where j.status = 'batch_submitted'
+    order by j.submitted_at asc nulls last, j.created_at asc
+    for update skip locked
+    limit p_limit
+  ),
+  claimed as (
+    update public.rewrite_jobs j
+       set status = 'processing',
+           claimed_at = now(),
+           claimed_by = worker_id,
+           updated_at = now()
+    from cte
+    where j.job_id = cte.job_id
+    returning j.job_id, j.rewrite_request_id, j.recipient_user_id, j.provider_batch_id, j.routing_decision
+  ),
+  mark_req as (
+    update public.rewrite_requests r
+       set status = 'processing',
+           updated_at = now()
+     where r.rewrite_request_id in (select rewrite_request_id from claimed)
+       and r.status = 'queued'
+  )
+  select * from claimed;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."claim_rewrite_jobs_for_batch_collect_v1"("p_limit" integer) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."claim_rewrite_jobs_for_batch_submit_v1"("p_limit" integer DEFAULT 50) RETURNS TABLE("job_id" "uuid", "rewrite_request_id" "uuid", "recipient_user_id" "uuid", "routing_decision" "jsonb")
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+declare
+  worker_id text := coalesce(
+    nullif(current_setting('request.headers.x-worker-id', true), ''),
+    'rewrite_batch_submitter'
+  );
+begin
+  return query
+  with cte as (
+    select j.job_id
+    from public.rewrite_jobs j
+    where j.status = 'queued'
+      and (j.not_before_at is null or j.not_before_at <= now())
+      and j.provider_batch_id is null
+      and j.submitted_at is null
+    order by j.created_at asc
+    for update skip locked
+    limit p_limit
+  ),
+  claimed as (
+    update public.rewrite_jobs j
+       set status = 'processing',
+           claimed_at = now(),
+           claimed_by = worker_id,
+           attempt_count = j.attempt_count + 1,
+           updated_at = now()
+    from cte
+    where j.job_id = cte.job_id
+    returning j.job_id, j.rewrite_request_id, j.recipient_user_id, j.routing_decision
+  )
+  select * from claimed;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."claim_rewrite_jobs_for_batch_submit_v1"("p_limit" integer) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."complaint_build_recipient_snapshots"("p_rewrite_request_id" "uuid", "p_home_id" "uuid", "p_recipient_user_id" "uuid", "p_preference_payload" "jsonb") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+declare
+  v_recipient_snapshot_id uuid;
+  v_pref_snapshot_id uuid;
+begin
+  perform public.api_assert(p_rewrite_request_id is not null, 'INVALID_REQ', 'rewrite_request_id required', '22023');
+  perform public.api_assert(p_home_id is not null, 'INVALID_HOME', 'home_id required', '22023');
+  perform public.api_assert(p_recipient_user_id is not null, 'INVALID_RECIP', 'recipient_user_id required', '22023');
+  perform public.api_assert(jsonb_typeof(p_preference_payload) = 'object', 'INVALID_PREF_PAYLOAD', 'preference_payload must be an object', '22023');
+
+  -- 1) recipient snapshot: 1 per rewrite_request_id
+  begin
+    insert into public.recipient_snapshots(
+      recipient_snapshot_id,
+      rewrite_request_id,
+      home_id,
+      recipient_user_ids
+    )
+    values (
+      gen_random_uuid(),
+      p_rewrite_request_id,
+      p_home_id,
+      array[p_recipient_user_id]
+    )
+    returning recipient_snapshot_id into v_recipient_snapshot_id;
+  exception when unique_violation then
+    select rs.recipient_snapshot_id
+      into v_recipient_snapshot_id
+      from public.recipient_snapshots rs
+     where rs.rewrite_request_id = p_rewrite_request_id
+     limit 1;
+  end;
+
+  perform public.api_assert(v_recipient_snapshot_id is not null, 'SNAPSHOT_MISSING', 'recipient snapshot missing', '22023');
+
+  -- 2) preference snapshot: 1 per (rewrite_request_id, recipient_user_id)
+  begin
+    insert into public.recipient_preference_snapshots(
+      recipient_preference_snapshot_id,
+      rewrite_request_id,
+      recipient_user_id,
+      preference_payload
+    )
+    values (
+      gen_random_uuid(),
+      p_rewrite_request_id,
+      p_recipient_user_id,
+      p_preference_payload
+    )
+    returning recipient_preference_snapshot_id into v_pref_snapshot_id;
+  exception when unique_violation then
+    select ps.recipient_preference_snapshot_id
+      into v_pref_snapshot_id
+      from public.recipient_preference_snapshots ps
+     where ps.rewrite_request_id = p_rewrite_request_id
+       and ps.recipient_user_id = p_recipient_user_id
+     limit 1;
+  end;
+
+  perform public.api_assert(v_pref_snapshot_id is not null, 'PREF_SNAPSHOT_MISSING', 'recipient preference snapshot missing', '22023');
+
+  return jsonb_build_object(
+    'recipient_snapshot_id', v_recipient_snapshot_id,
+    'recipient_preference_snapshot_id', v_pref_snapshot_id
+  );
+end;
+$$;
+
+
+ALTER FUNCTION "public"."complaint_build_recipient_snapshots"("p_rewrite_request_id" "uuid", "p_home_id" "uuid", "p_recipient_user_id" "uuid", "p_preference_payload" "jsonb") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."complaint_context_build"("p_recipient_user_id" "uuid", "p_recipient_preference_snapshot_id" "uuid", "p_topics" "text"[], "p_target_language" "text", "p_power_mode" "text" DEFAULT 'peer'::"text") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+declare
+  v_payload jsonb := null;
+  v_value_map jsonb := '{}'::jsonb;
+  v_topics text[] := coalesce(p_topics, array['other']);
+  v_pref_ids text[] := '{}';
+  v_included text[] := '{}';
+  v_signals jsonb := '[]'::jsonb;
+begin
+  v_value_map := public.complaint_preference_payload(p_recipient_user_id, p_recipient_preference_snapshot_id);
+
+  if p_recipient_preference_snapshot_id is not null then
+    select rps.preference_payload
+      into v_payload
+    from public.recipient_preference_snapshots rps
+    where rps.recipient_preference_snapshot_id = p_recipient_preference_snapshot_id
+    limit 1;
+  end if;
+
+  v_value_map := coalesce(v_value_map, '{}'::jsonb);
+
+  v_pref_ids := array(
+    select distinct x
+    from unnest(array_cat(
+      case when 'noise' = any(v_topics) then array['environment_noise_tolerance','schedule_quiet_hours_preference','conflict_resolution_style','communication_directness'] else '{}'::text[] end,
+      case when 'privacy' = any(v_topics) then array['privacy_room_entry','privacy_notifications','communication_channel','conflict_resolution_style'] else '{}'::text[] end
+    )) as t(x)
+    where x <> ''
+  );
+
+  if v_pref_ids is null then v_pref_ids := '{}'; end if;
+
+  v_included := (
+    select array_agg(key)
+    from jsonb_each_text(v_value_map)
+    where key = any(v_pref_ids)
+  );
+
+  if v_included is null then v_included := '{}'; end if;
+
+  v_signals := (
+    select jsonb_agg(jsonb_build_object(
+      'preference_id', key,
+      'value_key', value,
+      'instruction', public.map_instruction(key, value)
+    ))
+    from jsonb_each_text(v_value_map)
+    where key = any(v_included)
+  );
+
+  v_signals := coalesce(v_signals, '[]'::jsonb);
+
+  return jsonb_build_object(
+    'context_version', 'v1',
+    'recipient_user_id', p_recipient_user_id,
+    'target_language', p_target_language,
+    'power', jsonb_build_object(
+      'sender_role','housemate',
+      'recipient_role','housemate',
+      'power_mode', p_power_mode
+    ),
+    'topic_scope', jsonb_build_object(
+      'topics', v_topics,
+      'included_preference_ids', v_included
+    ),
+    'instructions', jsonb_build_object(
+      'tone','warm_clear',
+      'directness','soft',
+      'avoid', jsonb_build_array('authority_language','rules_language','enforcement_language','preference_disclosure')
+    ),
+    'recipient_signals', v_signals,
+    'preference_payload', coalesce(v_payload, '{}'::jsonb),
+    'preference_value_map', v_value_map
+  );
+end;
+$$;
+
+
+ALTER FUNCTION "public"."complaint_context_build"("p_recipient_user_id" "uuid", "p_recipient_preference_snapshot_id" "uuid", "p_topics" "text"[], "p_target_language" "text", "p_power_mode" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."complaint_fetch_entry_locales"("p_entry_id" "uuid", "p_recipient_user_id" "uuid") RETURNS TABLE("original_text" "text", "recipient_locale" "text", "home_id" "uuid", "author_user_id" "uuid", "recipient_user_id" "uuid")
+    LANGUAGE "sql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+  select
+    coalesce(hme.comment, '') as original_text,
+    coalesce(lower(split_part(np.locale, '-', 1)), 'en') as recipient_locale,
+    hme.home_id as home_id,
+    hme.user_id as author_user_id,
+    p_recipient_user_id as recipient_user_id
+  from public.home_mood_entries hme
+  left join public.notification_preferences np
+    on np.user_id = p_recipient_user_id
+  where hme.id = p_entry_id;
+$$;
+
+
+ALTER FUNCTION "public"."complaint_fetch_entry_locales"("p_entry_id" "uuid", "p_recipient_user_id" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."complaint_preference_payload"("p_recipient_user_id" "uuid", "p_recipient_preference_snapshot_id" "uuid" DEFAULT NULL::"uuid") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+declare
+  v_payload jsonb := null;
+  v_value_map jsonb := '{}'::jsonb;
+begin
+  if p_recipient_preference_snapshot_id is not null then
+    select rps.preference_payload
+      into v_payload
+    from public.recipient_preference_snapshots rps
+    where rps.recipient_preference_snapshot_id = p_recipient_preference_snapshot_id
+    limit 1;
+  end if;
+
+  if v_payload is null then
+    select r.published_content
+      into v_payload
+    from public.preference_reports r
+    where r.subject_user_id = p_recipient_user_id
+      and r.template_key = 'personal_preferences_v1'
+      and r.status = 'published'
+    order by r.published_at desc nulls last
+    limit 1;
+  end if;
+
+  if v_payload is not null and (v_payload ? 'resolved') then
+    v_value_map := public._preference_report_to_value_map(v_payload);
+  else
+    v_value_map := coalesce(v_payload, '{}'::jsonb);
+  end if;
+
+  if v_value_map is null or v_value_map = '{}'::jsonb then
+    v_value_map := public.complaint_preference_payload_from_responses(p_recipient_user_id);
+  end if;
+
+  return coalesce(v_value_map, '{}'::jsonb);
+end;
+$$;
+
+
+ALTER FUNCTION "public"."complaint_preference_payload"("p_recipient_user_id" "uuid", "p_recipient_preference_snapshot_id" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."complaint_preference_payload_from_responses"("p_recipient_user_id" "uuid") RETURNS "jsonb"
+    LANGUAGE "sql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+  select coalesce(
+    jsonb_object_agg(pr.preference_id, defs.value_keys[pr.option_index + 1]),
+    '{}'::jsonb
+  )
+  from public.preference_responses pr
+  join public.preference_taxonomy_defs defs
+    on defs.preference_id = pr.preference_id
+  where pr.user_id = p_recipient_user_id;
+$$;
+
+
+ALTER FUNCTION "public"."complaint_preference_payload_from_responses"("p_recipient_user_id" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."complaint_rewrite_enqueue"("p_rewrite_request_id" "uuid", "p_home_id" "uuid", "p_sender_user_id" "uuid", "p_recipient_user_id" "uuid", "p_surface" "text", "p_original_text" "text", "p_rewrite_request" "jsonb", "p_classifier_result" "jsonb", "p_context_pack" "jsonb", "p_source_locale" "text", "p_target_locale" "text", "p_lane" "text", "p_topics" "jsonb", "p_intent" "text", "p_rewrite_strength" "text", "p_classifier_version" "text", "p_context_pack_version" "text", "p_policy_version" "text", "p_routing_decision" "jsonb", "p_language_pair" "jsonb", "p_preference_payload" "jsonb", "p_max_attempts" integer DEFAULT 2) RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+declare
+  v_job_id uuid := gen_random_uuid();
+  v_inserted_request int := 0;
+  v_inserted_job int := 0;
+  v_snap jsonb;
+  v_recipient_snapshot_id uuid;
+  v_recipient_preference_snapshot_id uuid;
+begin
+  perform public.api_assert(p_surface in ('weekly_harmony','direct_message','other'), 'INVALID_SURFACE', 'Invalid surface.', '22023');
+  perform public.api_assert(p_lane in ('same_language','cross_language'), 'INVALID_LANE', 'Invalid lane.', '22023');
+  perform public.api_assert(p_rewrite_strength in ('light_touch','full_reframe'), 'INVALID_REWRITE_STRENGTH', 'Invalid rewrite_strength.', '22023');
+  perform public.api_assert(nullif(btrim(p_original_text),'') is not null, 'INVALID_TEXT', 'original_text required.', '22023');
+  perform public.api_assert(length(p_original_text) <= 500, 'TEXT_TOO_LONG', 'original_text max 500 chars.', '22023');
+  perform public.api_assert(jsonb_typeof(p_preference_payload) = 'object', 'INVALID_PREF_PAYLOAD', 'preference_payload must be an object', '22023');
+
+  -- 1) Insert rewrite_request stub FIRST
+  insert into public.rewrite_requests(
+    rewrite_request_id, home_id, sender_user_id, recipient_user_id,
+    surface, original_text, source_locale, target_locale, lane,
+    topics, intent, rewrite_strength,
+    classifier_result, context_pack, rewrite_request,
+    classifier_version, context_pack_version, policy_version,
+    status
+  ) values (
+    p_rewrite_request_id, p_home_id, p_sender_user_id, p_recipient_user_id,
+    p_surface, left(p_original_text, 500), p_source_locale, p_target_locale, p_lane,
+    p_topics, p_intent, p_rewrite_strength,
+    p_classifier_result, p_context_pack, p_rewrite_request,
+    p_classifier_version, p_context_pack_version, p_policy_version,
+    'queued'
+  )
+  on conflict (rewrite_request_id) do nothing;
+
+  get diagnostics v_inserted_request = row_count;
+
+  -- 2) Build snapshots (idempotent)
+  v_snap := public.complaint_build_recipient_snapshots(
+    p_rewrite_request_id,
+    p_home_id,
+    p_recipient_user_id,
+    p_preference_payload
+  );
+
+  v_recipient_snapshot_id := (v_snap->>'recipient_snapshot_id')::uuid;
+  v_recipient_preference_snapshot_id := (v_snap->>'recipient_preference_snapshot_id')::uuid;
+
+  perform public.api_assert(v_recipient_snapshot_id is not null, 'SNAPSHOT_MISSING', 'recipient snapshot missing', '22023');
+  perform public.api_assert(v_recipient_preference_snapshot_id is not null, 'PREF_SNAPSHOT_MISSING', 'recipient preference snapshot missing', '22023');
+
+  -- 3) Update request with snapshot FKs (nullable-at-insert pattern)
+  update public.rewrite_requests r
+     set recipient_snapshot_id = coalesce(r.recipient_snapshot_id, v_recipient_snapshot_id),
+         recipient_preference_snapshot_id = coalesce(r.recipient_preference_snapshot_id, v_recipient_preference_snapshot_id),
+         updated_at = now()
+   where r.rewrite_request_id = p_rewrite_request_id;
+
+  -- 4) Insert job (idempotent)
+  insert into public.rewrite_jobs(
+    job_id,
+    rewrite_request_id,
+    recipient_user_id,
+    recipient_snapshot_id,
+    recipient_preference_snapshot_id,
+    task,
+    surface,
+    rewrite_strength,
+    language_pair,
+    lane,
+    routing_decision,
+    status,
+    max_attempts
+  ) values (
+    v_job_id,
+    p_rewrite_request_id,
+    p_recipient_user_id,
+    v_recipient_snapshot_id,
+    v_recipient_preference_snapshot_id,
+    'complaint_rewrite',
+    p_surface,
+    p_rewrite_strength,
+    p_language_pair,
+    p_lane,
+    p_routing_decision,
+    'queued',
+    coalesce(p_max_attempts, 2)
+  )
+  on conflict (rewrite_request_id, recipient_user_id) do nothing;
+
+  get diagnostics v_inserted_job = row_count;
+
+  if not v_inserted_job then
+    select j.job_id into v_job_id
+      from public.rewrite_jobs j
+     where j.rewrite_request_id = p_rewrite_request_id
+       and j.recipient_user_id = p_recipient_user_id
+     limit 1;
+  end if;
+
+  return jsonb_build_object(
+    'rewrite_request_id', p_rewrite_request_id,
+    'job_id', v_job_id,
+    'recipient_snapshot_id', v_recipient_snapshot_id,
+    'recipient_preference_snapshot_id', v_recipient_preference_snapshot_id,
+    'inserted_request', v_inserted_request = 1,
+    'inserted_job', v_inserted_job = 1
+  );
+end;
+$$;
+
+
+ALTER FUNCTION "public"."complaint_rewrite_enqueue"("p_rewrite_request_id" "uuid", "p_home_id" "uuid", "p_sender_user_id" "uuid", "p_recipient_user_id" "uuid", "p_surface" "text", "p_original_text" "text", "p_rewrite_request" "jsonb", "p_classifier_result" "jsonb", "p_context_pack" "jsonb", "p_source_locale" "text", "p_target_locale" "text", "p_lane" "text", "p_topics" "jsonb", "p_intent" "text", "p_rewrite_strength" "text", "p_classifier_version" "text", "p_context_pack_version" "text", "p_policy_version" "text", "p_routing_decision" "jsonb", "p_language_pair" "jsonb", "p_preference_payload" "jsonb", "p_max_attempts" integer) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."complaint_rewrite_job_fail_or_requeue"("p_job_id" "uuid", "p_error" "text", "p_backoff_seconds" integer DEFAULT 600) RETURNS "void"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+declare
+  v_attempt int;
+  v_max int;
+  v_backoff int := greatest(30, least(coalesce(p_backoff_seconds, 600), 6*3600)); -- 30s..6h
+begin
+  select attempt_count, max_attempts
+    into v_attempt, v_max
+  from public.rewrite_jobs
+  where job_id = p_job_id;
+
+  if v_attempt is null then
+    return;
+  end if;
+
+  if v_attempt >= v_max then
+    update public.rewrite_jobs
+      set status='failed',
+          last_error=left(coalesce(p_error,'unknown'),512),
+          last_error_at=now(),
+          updated_at=now()
+    where job_id=p_job_id;
+  else
+    update public.rewrite_jobs
+      set status='queued',
+          not_before_at=now() + make_interval(secs => v_backoff),
+          last_error=left(coalesce(p_error,'unknown'),512),
+          last_error_at=now(),
+          updated_at=now()
+    where job_id=p_job_id;
+  end if;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."complaint_rewrite_job_fail_or_requeue"("p_job_id" "uuid", "p_error" "text", "p_backoff_seconds" integer) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."complaint_rewrite_request_exists"("p_rewrite_request_id" "uuid") RETURNS boolean
+    LANGUAGE "sql" STABLE SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+  select exists (
+    select 1
+    from public.rewrite_requests r
+    where r.rewrite_request_id = p_rewrite_request_id
+  );
+$$;
+
+
+ALTER FUNCTION "public"."complaint_rewrite_request_exists"("p_rewrite_request_id" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."complaint_rewrite_request_fetch_v1"("p_rewrite_request_id" "uuid") RETURNS TABLE("rewrite_request" "jsonb", "target_locale" "text", "policy_version" "text")
+    LANGUAGE "sql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+  select
+    r.rewrite_request,
+    r.target_locale,
+    r.policy_version
+  from public.rewrite_requests r
+  where r.rewrite_request_id = p_rewrite_request_id
+  limit 1;
+$$;
+
+
+ALTER FUNCTION "public"."complaint_rewrite_request_fetch_v1"("p_rewrite_request_id" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."complaint_rewrite_route"("p_surface" "text", "p_lane" "text", "p_rewrite_strength" "text") RETURNS "jsonb"
+    LANGUAGE "sql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+  select jsonb_build_object(
+    'route_id', r.route_id,
+    'provider', r.provider,
+    'adapter_kind', p.adapter_kind,
+    'base_url', p.base_url,
+    'model', r.model,
+    'prompt_version', r.prompt_version,
+    'policy_version', r.policy_version,
+    'execution_mode', r.execution_mode,
+    'supports_translation', true,
+    'cache_eligible', r.cache_eligible,
+    'max_retries', r.max_retries
+  )
+  from public.complaint_rewrite_routes r
+  join public.complaint_ai_providers p
+    on p.provider = r.provider
+  where r.surface = p_surface
+    and r.lane = p_lane
+    and r.rewrite_strength = p_rewrite_strength
+    and r.active = true
+    and p.active = true
+  order by r.priority asc, r.created_at asc
+  limit 1;
+$$;
+
+
+ALTER FUNCTION "public"."complaint_rewrite_route"("p_surface" "text", "p_lane" "text", "p_rewrite_strength" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."complete_complaint_rewrite_job"("p_job_id" "uuid", "p_rewrite_request_id" "uuid", "p_recipient_user_id" "uuid", "p_rewritten_text" "text", "p_output_language" "text", "p_target_locale" "text", "p_model" "text", "p_provider" "text", "p_prompt_version" "text", "p_policy_version" "text", "p_lexicon_version" "text", "p_eval_result" "jsonb") RETURNS "void"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+declare
+  v_non_terminal_count int;
+  v_any_failed boolean;
+begin
+  perform public.api_assert(
+    exists (
+      select 1
+      from public.rewrite_jobs j
+      where j.job_id = p_job_id
+        and j.rewrite_request_id = p_rewrite_request_id
+        and j.recipient_user_id = p_recipient_user_id
+        and j.status = 'processing'
+      limit 1
+    ),
+    'JOB_MISMATCH',
+    'Job does not match request/recipient or is not processing.',
+    '22023'
+  );
+
+  perform public.api_assert(
+    public._locale_primary(p_output_language) is not null
+    and public._locale_primary(p_output_language) = public._locale_primary(p_target_locale),
+    'LANG_MISMATCH',
+    'output_language does not match target locale language.',
+    '22023'
+  );
+
+  insert into public.rewrite_outputs(
+    rewrite_request_id, recipient_user_id, rewritten_text, output_language, target_locale,
+    model, provider, prompt_version, policy_version, lexicon_version, eval_result
+  ) values (
+    p_rewrite_request_id, p_recipient_user_id, p_rewritten_text, p_output_language, p_target_locale,
+    p_model, p_provider, p_prompt_version, p_policy_version, p_lexicon_version, p_eval_result
+  )
+  on conflict (rewrite_request_id, recipient_user_id)
+  do update set
+    rewritten_text = excluded.rewritten_text,
+    output_language = excluded.output_language,
+    target_locale = excluded.target_locale,
+    model = excluded.model,
+    provider = excluded.provider,
+    prompt_version = excluded.prompt_version,
+    policy_version = excluded.policy_version,
+    lexicon_version = excluded.lexicon_version,
+    eval_result = excluded.eval_result,
+    created_at = now();
+
+  update public.rewrite_jobs
+     set status = 'completed',
+         updated_at = now(),
+         last_error = null,
+         last_error_at = null
+   where job_id = p_job_id;
+
+  -- Only complete request if ALL jobs are terminal.
+  select count(*) into v_non_terminal_count
+  from public.rewrite_jobs j
+  where j.rewrite_request_id = p_rewrite_request_id
+    and j.status in ('queued','processing','batch_submitted');
+
+  if v_non_terminal_count = 0 then
+    select exists(
+      select 1
+      from public.rewrite_jobs j
+      where j.rewrite_request_id = p_rewrite_request_id
+        and j.status in ('failed','canceled')
+      limit 1
+    ) into v_any_failed;
+
+    update public.rewrite_requests
+       set status = case when v_any_failed then 'failed' else 'completed' end,
+           rewrite_completed_at = coalesce(rewrite_completed_at, now()),
+           updated_at = now()
+     where rewrite_request_id = p_rewrite_request_id;
+  end if;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."complete_complaint_rewrite_job"("p_job_id" "uuid", "p_rewrite_request_id" "uuid", "p_recipient_user_id" "uuid", "p_rewritten_text" "text", "p_output_language" "text", "p_target_locale" "text", "p_model" "text", "p_provider" "text", "p_prompt_version" "text", "p_policy_version" "text", "p_lexicon_version" "text", "p_eval_result" "jsonb") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."expense_plans_generate_due_cycles"() RETURNS "void"
@@ -5973,6 +6691,22 @@ $$;
 
 
 ALTER FUNCTION "public"."expenses_pay_my_due"("p_recipient_user_id" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."fail_complaint_rewrite_job"("p_job_id" "uuid", "p_error" "text") RETURNS "void"
+    LANGUAGE "sql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+  update public.rewrite_jobs
+     set status = 'failed',
+         last_error = left(coalesce(p_error,'unknown'), 512),
+         last_error_at = now(),
+         updated_at = now()
+   where job_id = p_job_id;
+$$;
+
+
+ALTER FUNCTION "public"."fail_complaint_rewrite_job"("p_job_id" "uuid", "p_error" "text") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."get_plan_status"() RETURNS "jsonb"
@@ -8693,6 +9427,98 @@ $$;
 ALTER FUNCTION "public"."locale_base"("p_locale" "text") OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."map_instruction"("p_id" "text", "p_value" "text") RETURNS "text"
+    LANGUAGE "sql" IMMUTABLE
+    SET "search_path" TO ''
+    AS $$
+  select case p_id
+    when 'communication_directness' then case p_value
+      when 'gentle' then 'Prefer softer phrasing and good timing; avoid blunt wording.'
+      when 'balanced' then 'Be clear but not harsh; avoid sharp tone.'
+      when 'direct' then 'Be straightforward without commands; keep concise.'
+      else 'Keep clear and respectful tone.'
+    end
+    when 'conflict_resolution_style' then case p_value
+      when 'cool_off' then 'Offer space first; avoid demanding immediate response.'
+      when 'talk_soon' then 'Invite a short chat when convenient; avoid urgency.'
+      when 'mediate' then 'Suggest a gentle check-in later; no third-party mediation implied.'
+      when 'check_in' then 'Suggest a gentle check-in later; no third-party mediation implied.'
+      else 'Suggest a calm follow-up.'
+    end
+    when 'environment_noise_tolerance' then case p_value
+      when 'low' then 'Frame as a quiet-time request using impact language; avoid blame.'
+      when 'medium' then 'Ask for mindful hours; keep tone neutral.'
+      when 'high' then 'Keep request minimal; avoid overstating impact.'
+      else 'Ask for considerate noise levels.'
+    end
+    when 'schedule_quiet_hours_preference' then case p_value
+      when 'early_evening' then 'Avoid late-night asks; suggest daytime without exact times.'
+      when 'late_evening_or_night' then 'Allow later timing; avoid exact times unless provided.'
+      when 'none' then 'No added timing constraints.'
+      else 'Keep timing reasonable.'
+    end
+    when 'privacy_room_entry' then case p_value
+      when 'always_ask' then 'Ask permission before entering; phrase as a request, not a rule.'
+      else 'Ask before entering shared/private spaces.'
+    end
+    when 'privacy_notifications' then case p_value
+      when 'none' then 'Avoid after-hours notifications; suggest tomorrow without inventing times.'
+      else 'Be mindful of notification timing.'
+    end
+    when 'communication_channel' then case p_value
+      when 'text' then 'Written request is fine; keep concise and calm.'
+      when 'call' then 'Offer a quick call when convenient; avoid urgency.'
+      when 'in_person' then 'Offer a brief in-person check-in; avoid pressure.'
+      else 'Use a considerate communication channel.'
+    end
+    when 'cleanliness_shared_space_tolerance' then case p_value
+      when 'low' then 'Use reset/tidy-up framing; avoid "messy" accusations.'
+      when 'high' then 'Keep request minimal; avoid policing tone.'
+      else 'Ask for shared-space reset.'
+    end
+    when 'social_togetherness' then case p_value
+      when 'mostly_solo' then 'Avoid pushing group talk; keep 1:1 framing.'
+      when 'balanced' then 'Neutral social framing.'
+      when 'mostly_together' then 'Allow gentle invitation; avoid pressure.'
+      else 'Keep social tone balanced.'
+    end
+    when 'social_hosting_frequency' then case p_value
+      when 'rare' then 'Emphasize heads-up and consent for visitors.'
+      when 'sometimes' then 'Use gentle heads-up language for visitors.'
+      when 'often' then 'Avoid judgment; keep request specific and time-bounded.'
+      else 'Ask for visitor heads-up.'
+    end
+    when 'routine_planning_style' then case p_value
+      when 'planner' then 'Provide heads-up and propose planning; avoid last-minute tone.'
+      when 'mixed' then 'No change to timing tone.'
+      when 'spontaneous' then 'Keep request lightweight; avoid heavy planning language.'
+      else 'Keep timing language light.'
+    end
+    else 'Keep tone warm and clear.'
+  end;
+$$;
+
+
+ALTER FUNCTION "public"."map_instruction"("p_id" "text", "p_value" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."mark_rewrite_jobs_batch_submitted_v1"("p_job_ids" "uuid"[], "p_provider_batch_id" "text") RETURNS "void"
+    LANGUAGE "sql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+  update public.rewrite_jobs
+     set status = 'batch_submitted',
+         provider_batch_id = p_provider_batch_id,
+         submitted_at = now(),
+         updated_at = now()
+   where job_id = any(p_job_ids)
+     and status = 'processing';
+$$;
+
+
+ALTER FUNCTION "public"."mark_rewrite_jobs_batch_submitted_v1"("p_job_ids" "uuid"[], "p_provider_batch_id" "text") OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."member_cap_owner_dismiss"("p_home_id" "uuid") RETURNS "void"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO ''
@@ -9185,8 +10011,17 @@ DECLARE
 
   v_publish_requested boolean;
 
-  -- Fix 2: computed snapshot row (optional return use; we just force refresh)
   v_pulse_row public.house_pulse_weekly;
+
+  -- complaint rewrite gate (Option A)
+  v_should_rewrite boolean := false;
+  v_recipient_id uuid;
+  v_has_prefs boolean := false;
+
+  -- cheap quality checks (only for negative mention path)
+  v_is_negative boolean := false;
+  v_meaningful_chars int := 0;
+  v_word_count int := 0;
 BEGIN
   PERFORM public._assert_authenticated();
   v_user_id := auth.uid();
@@ -9197,7 +10032,7 @@ BEGIN
   PERFORM public._assert_home_member(p_home_id);
   PERFORM public._assert_home_active(p_home_id);
 
-  -- Fix 3: canonical UTC ISO week/year
+  -- Canonical UTC ISO week/year
   SELECT w.iso_week_year, w.iso_week
     INTO v_iso_week_year, v_iso_week
     FROM public._iso_week_utc(v_now) w;
@@ -9228,8 +10063,7 @@ BEGIN
       );
   END;
 
-  -- Fix 2: eagerly recompute weekly pulse snapshot after a new entry
-  -- Keeps the UI fresh even if weekly_get hits an existing snapshot.
+  -- Eager recompute weekly pulse snapshot after a new entry
   v_pulse_row := public.house_pulse_compute_week(p_home_id, v_iso_week_year, v_iso_week, 'v1');
 
   v_publish_requested :=
@@ -9241,24 +10075,17 @@ BEGIN
       'entry_id', v_entry_id,
       'public_post_id', NULL,
       'mention_count', 0,
-      -- optional: nice for immediate UI refresh without an extra call
       'pulse', to_jsonb(v_pulse_row)
     );
   END IF;
 
-  IF p_mood NOT IN ('sunny','partially_sunny') THEN
-    PERFORM public.api_assert(
-      FALSE,
-      'NOT_POSITIVE_MOOD',
-      'Publishing gratitude is only available for Sunny or Partially Sunny weeks.',
-      '22023'
-    );
-  END IF;
-
+  /* ---------- message ---------- */
   v_message := NULLIF(btrim(COALESCE(v_comment_trim, '')), '');
   IF v_message IS NOT NULL THEN
     v_message := left(v_message, 500);
   END IF;
+
+  /* ---------- validate mentions (dedupe + count BEFORE using) ---------- */
 
   PERFORM public.api_assert(
     NOT EXISTS (SELECT 1 FROM unnest(v_mentions_raw) m WHERE m IS NULL),
@@ -9288,28 +10115,116 @@ BEGIN
   END IF;
 
   IF v_mention_count > 0 THEN
+    -- comment required whenever mentioning someone
+    PERFORM public.api_assert(
+      v_message IS NOT NULL,
+      'COMMENT_REQUIRED_FOR_MENTION',
+      'A comment is required when mentioning someone.',
+      '22023'
+    );
+
+    -- All mentions must be current members of the home.
+    -- (Clearer EXISTS form; avoids reliance on profiles if you ever change that invariant.)
     PERFORM public.api_assert(
       NOT EXISTS (
         SELECT 1
         FROM unnest(v_mentions_dedup) m
-        LEFT JOIN public.profiles p ON p.id = m
-        LEFT JOIN public.memberships mem
-               ON mem.home_id = p_home_id
-              AND mem.user_id = m
-              AND mem.is_current = TRUE
-        WHERE p.id IS NULL OR mem.user_id IS NULL
+        WHERE NOT EXISTS (
+          SELECT 1
+          FROM public.memberships mem
+          WHERE mem.home_id = p_home_id
+            AND mem.user_id = m
+            AND mem.is_current = TRUE
+        )
       ),
       'MENTION_NOT_HOME_MEMBER',
-      'All mentions must be existing profiles and current members of the home.',
+      'All mentions must be current members of the home.',
       '22023'
     );
   END IF;
 
-  PERFORM pg_advisory_xact_lock(
-    hashtext('mood_submit_v2_publish'),
-    hashtext(v_entry_id::text)
-  );
+  /* ---------- negative-mood hard rule: only 1 mention allowed ---------- */
+  v_is_negative := (p_mood IN ('rainy','thunderstorm')); -- OK to hardcode enum literals
 
+  IF v_is_negative THEN
+    PERFORM public.api_assert(
+      v_mention_count <= 1,
+      'SINGLE_MENTION_REQUIRED',
+      'Only one mention is allowed when triggering complaint rewrite.',
+      '22023'
+    );
+  END IF;
+
+  /* ---------- gratitude wall constraint applies ONLY to public wall ---------- */
+  IF COALESCE(p_public_wall, FALSE) THEN
+    IF p_mood NOT IN ('sunny','partially_sunny') THEN
+      PERFORM public.api_assert(
+        FALSE,
+        'NOT_POSITIVE_MOOD',
+        'Publishing gratitude is only available for Sunny or Partially Sunny weeks.',
+        '22023'
+      );
+    END IF;
+
+    -- Optional: enforce message exists for public posts (recommended if you don’t want empty posts)
+    PERFORM public.api_assert(
+      v_message IS NOT NULL,
+      'COMMENT_REQUIRED_FOR_PUBLIC_WALL',
+      'A comment is required to publish on the public wall.',
+      '22023'
+    );
+  END IF;
+
+  /* ---------- cheap quality floor for negative mention complaints ---------- */
+  IF v_is_negative AND v_mention_count = 1 THEN
+    -- meaningful chars: letters/digits only
+    v_meaningful_chars := length(regexp_replace(v_message, '[^[:alnum:]]', '', 'g'));
+    -- word count
+    v_word_count := array_length(regexp_split_to_array(trim(v_message), '\s+'), 1);
+
+    PERFORM public.api_assert(
+      v_meaningful_chars >= 20,
+      'COMPLAINT_TOO_SHORT',
+      'Please add a bit more detail so your housemate can understand what happened.',
+      '22023',
+      jsonb_build_object('minMeaningfulChars', 20)
+    );
+
+    PERFORM public.api_assert(
+      v_word_count >= 6,
+      'COMPLAINT_TOO_BRIEF',
+      'Please write at least a short sentence (6+ words) so your feedback is actionable.',
+      '22023',
+      jsonb_build_object('minWords', 6)
+    );
+
+    -- require at least one sentence boundary or newline (encourages “discussable” format)
+    PERFORM public.api_assert(
+      v_message ~ '[\.\!\?\n]',
+      'COMPLAINT_NEEDS_SENTENCE',
+      'Please write at least one full sentence (add a period or newline).',
+      '22023'
+    );
+  END IF;
+
+  /* ---------- Option A: rewrite gate (mood-based) ---------- */
+  IF v_mention_count = 1 THEN
+    v_recipient_id := v_mentions_dedup[1];
+
+    v_has_prefs := EXISTS (
+      SELECT 1
+      FROM public.preference_responses pr
+      WHERE pr.user_id = v_recipient_id
+      LIMIT 1
+    );
+
+    v_should_rewrite :=
+      v_is_negative
+      AND (v_message IS NOT NULL)
+      AND v_has_prefs;
+  END IF;
+
+  /* ---------- optional: public wall post ---------- */
   IF COALESCE(p_public_wall, FALSE) THEN
     IF NOT EXISTS (
       SELECT 1 FROM public.gratitude_wall_posts WHERE source_entry_id = v_entry_id
@@ -9327,6 +10242,7 @@ BEGIN
      LIMIT 1;
   END IF;
 
+  /* ---------- mentions + personal items ---------- */
   IF v_post_id IS NOT NULL AND v_mention_count > 0 THEN
     INSERT INTO public.gratitude_wall_mentions (post_id, home_id, mentioned_user_id, created_at)
     SELECT v_post_id, p_home_id, m, v_now
@@ -9348,11 +10264,18 @@ BEGIN
     ON CONFLICT (recipient_user_id, source_entry_id) DO NOTHING;
   END IF;
 
+  /* ---------- trigger rewrite ---------- */
+  IF v_should_rewrite THEN
+    INSERT INTO public.complaint_rewrite_triggers(entry_id, home_id, author_user_id, recipient_user_id)
+    VALUES (v_entry_id, p_home_id, v_user_id, v_recipient_id)
+    ON CONFLICT (entry_id) DO NOTHING;
+  END IF;
+
   RETURN jsonb_build_object(
     'entry_id', v_entry_id,
     'public_post_id', v_post_id,
     'mention_count', v_mention_count,
-    -- optional: return pulse so UI can update instantly
+    'rewrite_recipient_id', v_recipient_id,
     'pulse', to_jsonb(v_pulse_row)
   );
 END;
@@ -9375,20 +10298,28 @@ CREATE OR REPLACE FUNCTION "public"."notifications_daily_candidates"("p_limit" i
       np.user_id,
       np.locale,
       np.timezone,
-      (timezone(np.timezone, now()))::date AS local_date
+      ln.local_now::date AS local_date
     FROM public.notification_preferences np
+    CROSS JOIN LATERAL (
+      SELECT timezone(np.timezone, now()) AS local_now
+    ) ln
     WHERE np.wants_daily = TRUE
       AND np.os_permission = 'allowed'
-      AND np.preferred_hour = date_part('hour', timezone(np.timezone, now()))::int
-      AND np.preferred_minute = date_part('minute', timezone(np.timezone, now()))::int
+      AND ln.local_now >=
+        date_trunc('day', ln.local_now)
+        + make_interval(hours => np.preferred_hour, mins => np.preferred_minute)
+      AND ln.local_now <=
+        date_trunc('day', ln.local_now)
+        + make_interval(hours => np.preferred_hour, mins => np.preferred_minute)
+        + interval '15 minutes'
       AND (
         np.last_sent_local_date IS NULL
-        OR np.last_sent_local_date < (timezone(np.timezone, now()))::date
+        OR np.last_sent_local_date < ln.local_now::date
       )
       AND public.today_has_content(
         np.user_id,
         np.timezone,
-        (timezone(np.timezone, now()))::date
+        ln.local_now::date
       ) = TRUE
   ),
   eligible_tokens AS (
@@ -11453,6 +12384,142 @@ $$;
 ALTER FUNCTION "public"."profiles_request_deactivation"() OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."requeue_jobs_after_submit_failure"("p_job_ids" "uuid"[], "p_error" "text", "p_backoff_seconds" integer DEFAULT 600) RETURNS "void"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+declare
+  v_backoff int := greatest(30, least(coalesce(p_backoff_seconds, 600), 6*3600));
+begin
+  update public.rewrite_jobs
+     set status = 'queued',
+         not_before_at = now() + make_interval(secs => v_backoff),
+         last_error = left(coalesce(p_error,'submit_failed'), 512),
+         last_error_at = now(),
+         updated_at = now()
+   where job_id = any(p_job_ids)
+     and status = 'processing';
+end;
+$$;
+
+
+ALTER FUNCTION "public"."requeue_jobs_after_submit_failure"("p_job_ids" "uuid"[], "p_error" "text", "p_backoff_seconds" integer) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."rewrite_batch_list_pending_v1"("p_limit" integer DEFAULT 20) RETURNS TABLE("provider_batch_id" "text", "status" "text", "input_file_id" "text", "output_file_id" "text", "error_file_id" "text", "endpoint" "text")
+    LANGUAGE "sql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+  select provider_batch_id, status, input_file_id, output_file_id, error_file_id, endpoint
+  from public.rewrite_provider_batches
+  where status in ('submitted','running')
+  order by coalesce(last_checked_at, created_at) asc
+  limit p_limit;
+$$;
+
+
+ALTER FUNCTION "public"."rewrite_batch_list_pending_v1"("p_limit" integer) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."rewrite_batch_register_v1"("p_provider_batch_id" "text", "p_input_file_id" "text", "p_job_count" integer, "p_endpoint" "text" DEFAULT '/v1/responses'::"text") RETURNS "void"
+    LANGUAGE "sql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+  insert into public.rewrite_provider_batches(
+    provider_batch_id, provider, endpoint, status, input_file_id, job_count
+  ) values (
+    p_provider_batch_id, 'openai', p_endpoint, 'submitted', p_input_file_id, coalesce(p_job_count,0)
+  )
+  on conflict (provider_batch_id)
+  do update set
+    input_file_id = excluded.input_file_id,
+    job_count = excluded.job_count,
+    status = case
+      when public.rewrite_provider_batches.status in ('completed','failed','canceled') then public.rewrite_provider_batches.status
+      else excluded.status
+    end,
+    updated_at = now();
+$$;
+
+
+ALTER FUNCTION "public"."rewrite_batch_register_v1"("p_provider_batch_id" "text", "p_input_file_id" "text", "p_job_count" integer, "p_endpoint" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."rewrite_batch_update_v1"("p_provider_batch_id" "text", "p_status" "text", "p_output_file_id" "text" DEFAULT NULL::"text", "p_error_file_id" "text" DEFAULT NULL::"text") RETURNS "void"
+    LANGUAGE "sql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+  update public.rewrite_provider_batches
+     set status = p_status,
+         output_file_id = coalesce(p_output_file_id, output_file_id),
+         error_file_id = coalesce(p_error_file_id, error_file_id),
+         last_checked_at = now(),
+         updated_at = now()
+   where provider_batch_id = p_provider_batch_id;
+$$;
+
+
+ALTER FUNCTION "public"."rewrite_batch_update_v1"("p_provider_batch_id" "text", "p_status" "text", "p_output_file_id" "text", "p_error_file_id" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."rewrite_job_fetch_v1"("p_job_id" "uuid") RETURNS TABLE("job_id" "uuid", "rewrite_request_id" "uuid", "recipient_user_id" "uuid", "status" "text", "provider_batch_id" "text", "routing_decision" "jsonb")
+    LANGUAGE "sql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+  select j.job_id, j.rewrite_request_id, j.recipient_user_id, j.status, j.provider_batch_id, j.routing_decision
+  from public.rewrite_jobs j
+  where j.job_id = p_job_id
+  limit 1;
+$$;
+
+
+ALTER FUNCTION "public"."rewrite_job_fetch_v1"("p_job_id" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."rewrite_jobs_requeue_by_provider_batch_v1"("p_provider_batch_id" "text", "p_reason" "text" DEFAULT 'provider_batch_missing_output_file'::"text", "p_backoff_seconds" integer DEFAULT 1800, "p_limit" integer DEFAULT 500) RETURNS TABLE("job_id" "uuid", "prev_status" "text", "new_status" "text", "not_before_at" timestamp with time zone)
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+declare
+  v_now timestamptz := now();
+  v_not_before timestamptz := v_now + make_interval(secs => greatest(coalesce(p_backoff_seconds, 0), 0));
+begin
+  if p_provider_batch_id is null or btrim(p_provider_batch_id) = '' then
+    raise exception 'p_provider_batch_id required';
+  end if;
+
+  return query
+  with target as (
+    select j.job_id, j.status as prev_status
+    from public.rewrite_jobs j
+    where j.provider_batch_id = p_provider_batch_id
+      and j.status = 'batch_submitted'
+    order by j.job_id
+    limit greatest(p_limit, 0)
+    for update
+  ),
+  upd as (
+    update public.rewrite_jobs j
+    set
+      status = 'queued',
+      not_before_at = v_not_before,
+      last_error = left(coalesce(p_reason, 'requeued') || ': batch=' || p_provider_batch_id, 512),
+      last_error_at = v_now,
+      updated_at = v_now,
+      provider_batch_id = null,
+      submitted_at = null
+    from target t
+    where j.job_id = t.job_id
+    returning j.job_id, t.prev_status, j.status as new_status, j.not_before_at
+  )
+  select * from upd;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."rewrite_jobs_requeue_by_provider_batch_v1"("p_provider_batch_id" "text", "p_reason" "text", "p_backoff_seconds" integer, "p_limit" integer) OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."share_log_event"("p_home_id" "uuid", "p_feature" "text", "p_channel" "text") RETURNS "void"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO ''
@@ -11989,6 +13056,45 @@ COMMENT ON COLUMN "public"."chore_events"."payload" IS 'Structured diff / metada
 
 COMMENT ON COLUMN "public"."chore_events"."occurred_at" IS 'Timestamp of event.';
 
+
+
+CREATE TABLE IF NOT EXISTS "public"."complaint_ai_providers" (
+    "provider" "text" NOT NULL,
+    "adapter_kind" "text" NOT NULL,
+    "base_url" "text",
+    "active" boolean DEFAULT true NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "ck_complaint_ai_adapter_kind" CHECK (("adapter_kind" = ANY (ARRAY['openai_responses'::"text", 'openai_compat_responses'::"text", 'openai_compat_chat_completions'::"text", 'gemini'::"text", 'stub'::"text"])))
+);
+
+
+ALTER TABLE "public"."complaint_ai_providers" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."complaint_rewrite_routes" (
+    "route_id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "surface" "text" NOT NULL,
+    "lane" "text" NOT NULL,
+    "rewrite_strength" "text" NOT NULL,
+    "provider" "text" NOT NULL,
+    "model" "text" NOT NULL,
+    "prompt_version" "text" DEFAULT 'v1'::"text" NOT NULL,
+    "policy_version" "text" DEFAULT 'v1'::"text" NOT NULL,
+    "execution_mode" "text" DEFAULT 'async'::"text" NOT NULL,
+    "cache_eligible" boolean DEFAULT false NOT NULL,
+    "max_retries" integer DEFAULT 2 NOT NULL,
+    "priority" integer DEFAULT 100 NOT NULL,
+    "active" boolean DEFAULT true NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "ck_complaint_route_lane" CHECK (("lane" = ANY (ARRAY['same_language'::"text", 'cross_language'::"text"]))),
+    CONSTRAINT "ck_complaint_route_strength" CHECK (("rewrite_strength" = ANY (ARRAY['light_touch'::"text", 'full_reframe'::"text"]))),
+    CONSTRAINT "ck_complaint_route_surface" CHECK (("surface" = ANY (ARRAY['weekly_harmony'::"text", 'direct_message'::"text", 'other'::"text"])))
+);
+
+
+ALTER TABLE "public"."complaint_rewrite_routes" OWNER TO "postgres";
 
 
 CREATE TABLE IF NOT EXISTS "public"."device_tokens" (
@@ -12895,6 +14001,31 @@ COMMENT ON CONSTRAINT "chk_profiles_username_format" ON "public"."profiles" IS '
 
 
 
+CREATE TABLE IF NOT EXISTS "public"."recipient_preference_snapshots" (
+    "recipient_preference_snapshot_id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "rewrite_request_id" "uuid" NOT NULL,
+    "recipient_user_id" "uuid" NOT NULL,
+    "preference_payload" "jsonb" NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "ck_recipient_preference_payload_obj" CHECK (("jsonb_typeof"("preference_payload") = 'object'::"text"))
+);
+
+
+ALTER TABLE "public"."recipient_preference_snapshots" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."recipient_snapshots" (
+    "recipient_snapshot_id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "rewrite_request_id" "uuid" NOT NULL,
+    "home_id" "uuid" NOT NULL,
+    "recipient_user_ids" "uuid"[] NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL
+);
+
+
+ALTER TABLE "public"."recipient_snapshots" OWNER TO "postgres";
+
+
 CREATE TABLE IF NOT EXISTS "public"."reserved_usernames" (
     "name" "public"."citext" NOT NULL
 );
@@ -12960,6 +14091,126 @@ ALTER TABLE "public"."revenuecat_webhook_events" OWNER TO "postgres";
 
 COMMENT ON TABLE "public"."revenuecat_webhook_events" IS 'Audit log of RevenueCat webhook events used for debugging and analytics.';
 
+
+
+CREATE TABLE IF NOT EXISTS "public"."rewrite_jobs" (
+    "job_id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "rewrite_request_id" "uuid" NOT NULL,
+    "recipient_user_id" "uuid" NOT NULL,
+    "recipient_snapshot_id" "uuid" NOT NULL,
+    "recipient_preference_snapshot_id" "uuid" NOT NULL,
+    "task" "text" NOT NULL,
+    "surface" "text" NOT NULL,
+    "rewrite_strength" "text" NOT NULL,
+    "lane" "text" NOT NULL,
+    "language_pair" "jsonb" NOT NULL,
+    "routing_decision" "jsonb" NOT NULL,
+    "status" "text" DEFAULT 'queued'::"text" NOT NULL,
+    "not_before_at" timestamp with time zone,
+    "claimed_at" timestamp with time zone,
+    "claimed_by" "text",
+    "attempt_count" integer DEFAULT 0 NOT NULL,
+    "max_attempts" integer DEFAULT 2 NOT NULL,
+    "last_error" "text",
+    "last_error_at" timestamp with time zone,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "provider_batch_id" "text",
+    "submitted_at" timestamp with time zone,
+    CONSTRAINT "ck_rewrite_jobs_language_pair_obj" CHECK (("jsonb_typeof"("language_pair") = 'object'::"text")),
+    CONSTRAINT "ck_rewrite_jobs_routing_decision_obj" CHECK (("jsonb_typeof"("routing_decision") = 'object'::"text")),
+    CONSTRAINT "rewrite_jobs_lane_check" CHECK (("lane" = ANY (ARRAY['same_language'::"text", 'cross_language'::"text"]))),
+    CONSTRAINT "rewrite_jobs_rewrite_strength_check" CHECK (("rewrite_strength" = ANY (ARRAY['light_touch'::"text", 'full_reframe'::"text"]))),
+    CONSTRAINT "rewrite_jobs_status_check" CHECK (("status" = ANY (ARRAY['queued'::"text", 'processing'::"text", 'batch_submitted'::"text", 'completed'::"text", 'failed'::"text", 'canceled'::"text"]))),
+    CONSTRAINT "rewrite_jobs_surface_check" CHECK (("surface" = ANY (ARRAY['weekly_harmony'::"text", 'direct_message'::"text", 'other'::"text"]))),
+    CONSTRAINT "rewrite_jobs_task_check" CHECK (("task" = 'complaint_rewrite'::"text"))
+);
+
+
+ALTER TABLE "public"."rewrite_jobs" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."rewrite_outputs" (
+    "rewrite_request_id" "uuid" NOT NULL,
+    "recipient_user_id" "uuid" NOT NULL,
+    "rewritten_text" "text" NOT NULL,
+    "output_language" "text" NOT NULL,
+    "target_locale" "text" NOT NULL,
+    "model" "text" NOT NULL,
+    "provider" "text" NOT NULL,
+    "prompt_version" "text" NOT NULL,
+    "policy_version" "text" NOT NULL,
+    "lexicon_version" "text" NOT NULL,
+    "eval_result" "jsonb" NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "ck_rewrite_outputs_eval_obj" CHECK (("jsonb_typeof"("eval_result") = 'object'::"text")),
+    CONSTRAINT "ck_rewrite_outputs_lang_match" CHECK (("public"."_locale_primary"("output_language") = "public"."_locale_primary"("target_locale")))
+);
+
+
+ALTER TABLE "public"."rewrite_outputs" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."rewrite_provider_batches" (
+    "provider_batch_id" "text" NOT NULL,
+    "provider" "text" NOT NULL,
+    "endpoint" "text" DEFAULT '/v1/responses'::"text" NOT NULL,
+    "status" "text" DEFAULT 'submitted'::"text" NOT NULL,
+    "input_file_id" "text",
+    "output_file_id" "text",
+    "error_file_id" "text",
+    "job_count" integer DEFAULT 0 NOT NULL,
+    "last_checked_at" timestamp with time zone,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "rewrite_provider_batches_provider_check" CHECK (("provider" = 'openai'::"text")),
+    CONSTRAINT "rewrite_provider_batches_status_check" CHECK (("status" = ANY (ARRAY['submitted'::"text", 'running'::"text", 'completed'::"text", 'failed'::"text", 'canceled'::"text"])))
+);
+
+
+ALTER TABLE "public"."rewrite_provider_batches" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."rewrite_requests" (
+    "rewrite_request_id" "uuid" NOT NULL,
+    "home_id" "uuid" NOT NULL,
+    "sender_user_id" "uuid" NOT NULL,
+    "recipient_user_id" "uuid" NOT NULL,
+    "recipient_snapshot_id" "uuid",
+    "recipient_preference_snapshot_id" "uuid",
+    "surface" "text" NOT NULL,
+    "original_text" "text" NOT NULL,
+    "source_locale" "text" NOT NULL,
+    "target_locale" "text" NOT NULL,
+    "lane" "text" NOT NULL,
+    "topics" "jsonb" NOT NULL,
+    "intent" "text" NOT NULL,
+    "rewrite_strength" "text" NOT NULL,
+    "classifier_result" "jsonb" NOT NULL,
+    "context_pack" "jsonb" NOT NULL,
+    "rewrite_request" "jsonb" NOT NULL,
+    "classifier_version" "text" NOT NULL,
+    "context_pack_version" "text" NOT NULL,
+    "policy_version" "text" NOT NULL,
+    "status" "text" DEFAULT 'queued'::"text" NOT NULL,
+    "rewrite_completed_at" timestamp with time zone,
+    "sender_reveal_at" timestamp with time zone,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "ck_rewrite_requests_classifier_result_obj" CHECK (("jsonb_typeof"("classifier_result") = 'object'::"text")),
+    CONSTRAINT "ck_rewrite_requests_context_pack_obj" CHECK (("jsonb_typeof"("context_pack") = 'object'::"text")),
+    CONSTRAINT "ck_rewrite_requests_rewrite_request_obj" CHECK (("jsonb_typeof"("rewrite_request") = 'object'::"text")),
+    CONSTRAINT "ck_rewrite_requests_topics_json" CHECK (("jsonb_typeof"("topics") = 'array'::"text")),
+    CONSTRAINT "ck_rewrite_requests_topics_valid" CHECK ("public"."_complaint_topics_valid"("topics")),
+    CONSTRAINT "rewrite_requests_intent_check" CHECK (("intent" = ANY (ARRAY['request'::"text", 'boundary'::"text", 'concern'::"text", 'clarification'::"text"]))),
+    CONSTRAINT "rewrite_requests_lane_check" CHECK (("lane" = ANY (ARRAY['same_language'::"text", 'cross_language'::"text"]))),
+    CONSTRAINT "rewrite_requests_rewrite_strength_check" CHECK (("rewrite_strength" = ANY (ARRAY['light_touch'::"text", 'full_reframe'::"text"]))),
+    CONSTRAINT "rewrite_requests_status_check" CHECK (("status" = ANY (ARRAY['queued'::"text", 'processing'::"text", 'completed'::"text", 'failed'::"text", 'canceled'::"text"]))),
+    CONSTRAINT "rewrite_requests_surface_check" CHECK (("surface" = ANY (ARRAY['weekly_harmony'::"text", 'direct_message'::"text", 'other'::"text"])))
+);
+
+
+ALTER TABLE "public"."rewrite_requests" OWNER TO "postgres";
 
 
 CREATE TABLE IF NOT EXISTS "public"."share_events" (
@@ -13101,6 +14352,16 @@ ALTER TABLE ONLY "public"."chore_events"
 
 ALTER TABLE ONLY "public"."chores"
     ADD CONSTRAINT "chores_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."complaint_ai_providers"
+    ADD CONSTRAINT "complaint_ai_providers_pkey" PRIMARY KEY ("provider");
+
+
+
+ALTER TABLE ONLY "public"."complaint_rewrite_routes"
+    ADD CONSTRAINT "complaint_rewrite_routes_pkey" PRIMARY KEY ("route_id");
 
 
 
@@ -13353,6 +14614,16 @@ ALTER TABLE ONLY "public"."profiles"
 
 
 
+ALTER TABLE ONLY "public"."recipient_preference_snapshots"
+    ADD CONSTRAINT "recipient_preference_snapshots_pkey" PRIMARY KEY ("recipient_preference_snapshot_id");
+
+
+
+ALTER TABLE ONLY "public"."recipient_snapshots"
+    ADD CONSTRAINT "recipient_snapshots_pkey" PRIMARY KEY ("recipient_snapshot_id");
+
+
+
 ALTER TABLE ONLY "public"."reserved_usernames"
     ADD CONSTRAINT "reserved_usernames_pkey" PRIMARY KEY ("name");
 
@@ -13365,6 +14636,26 @@ ALTER TABLE ONLY "public"."revenuecat_event_processing"
 
 ALTER TABLE ONLY "public"."revenuecat_webhook_events"
     ADD CONSTRAINT "revenuecat_webhook_events_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."rewrite_jobs"
+    ADD CONSTRAINT "rewrite_jobs_pkey" PRIMARY KEY ("job_id");
+
+
+
+ALTER TABLE ONLY "public"."rewrite_outputs"
+    ADD CONSTRAINT "rewrite_outputs_pkey" PRIMARY KEY ("rewrite_request_id", "recipient_user_id");
+
+
+
+ALTER TABLE ONLY "public"."rewrite_provider_batches"
+    ADD CONSTRAINT "rewrite_provider_batches_pkey" PRIMARY KEY ("provider_batch_id");
+
+
+
+ALTER TABLE ONLY "public"."rewrite_requests"
+    ADD CONSTRAINT "rewrite_requests_pkey" PRIMARY KEY ("rewrite_request_id");
 
 
 
@@ -13597,6 +14888,34 @@ CREATE INDEX "idx_preference_taxonomy_defs_domain" ON "public"."preference_taxon
 
 
 
+CREATE INDEX "ix_complaint_routes_lookup" ON "public"."complaint_rewrite_routes" USING "btree" ("surface", "lane", "rewrite_strength", "active", "priority");
+
+
+
+CREATE INDEX "ix_recipient_preference_snapshots_req" ON "public"."recipient_preference_snapshots" USING "btree" ("rewrite_request_id");
+
+
+
+CREATE INDEX "ix_rewrite_jobs_provider_batch" ON "public"."rewrite_jobs" USING "btree" ("provider_batch_id");
+
+
+
+CREATE INDEX "ix_rewrite_jobs_req_status" ON "public"."rewrite_jobs" USING "btree" ("rewrite_request_id", "status");
+
+
+
+CREATE INDEX "ix_rewrite_jobs_status_window" ON "public"."rewrite_jobs" USING "btree" ("status", "not_before_at", "created_at");
+
+
+
+CREATE INDEX "ix_rewrite_requests_home_status" ON "public"."rewrite_requests" USING "btree" ("home_id", "status");
+
+
+
+CREATE INDEX "ix_rewrite_requests_recipient_status" ON "public"."rewrite_requests" USING "btree" ("recipient_user_id", "status");
+
+
+
 CREATE INDEX "leads_created_at_idx" ON "public"."leads" USING "btree" ("created_at" DESC);
 
 
@@ -13685,7 +15004,27 @@ CREATE UNIQUE INDEX "ux_expenses_plan_cycle_unique" ON "public"."expenses" USING
 
 
 
+CREATE UNIQUE INDEX "ux_recipient_preference_snapshots_req_recipient" ON "public"."recipient_preference_snapshots" USING "btree" ("rewrite_request_id", "recipient_user_id");
+
+
+
+CREATE UNIQUE INDEX "ux_recipient_snapshots_req" ON "public"."recipient_snapshots" USING "btree" ("rewrite_request_id");
+
+
+
+CREATE UNIQUE INDEX "ux_rewrite_jobs_execution_unit" ON "public"."rewrite_jobs" USING "btree" ("rewrite_request_id", "recipient_user_id");
+
+
+
 CREATE OR REPLACE TRIGGER "chores_events_trigger" AFTER INSERT OR DELETE OR UPDATE ON "public"."chores" FOR EACH ROW EXECUTE FUNCTION "public"."chores_events_trigger"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_complaint_ai_providers_updated_at" BEFORE UPDATE ON "public"."complaint_ai_providers" FOR EACH ROW EXECUTE FUNCTION "public"."_touch_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_complaint_rewrite_routes_updated_at" BEFORE UPDATE ON "public"."complaint_rewrite_routes" FOR EACH ROW EXECUTE FUNCTION "public"."_touch_updated_at"();
 
 
 
@@ -13734,6 +15073,18 @@ CREATE OR REPLACE TRIGGER "trg_preference_taxonomy_defs_touch" BEFORE UPDATE ON 
 
 
 CREATE OR REPLACE TRIGGER "trg_preference_templates_validate" BEFORE INSERT OR UPDATE ON "public"."preference_report_templates" FOR EACH ROW EXECUTE FUNCTION "public"."_preference_templates_validate"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_rewrite_jobs_updated_at" BEFORE UPDATE ON "public"."rewrite_jobs" FOR EACH ROW EXECUTE FUNCTION "public"."_touch_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_rewrite_provider_batches_updated_at" BEFORE UPDATE ON "public"."rewrite_provider_batches" FOR EACH ROW EXECUTE FUNCTION "public"."_touch_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_rewrite_requests_updated_at" BEFORE UPDATE ON "public"."rewrite_requests" FOR EACH ROW EXECUTE FUNCTION "public"."_touch_updated_at"();
 
 
 
@@ -13836,6 +15187,16 @@ ALTER TABLE ONLY "public"."house_vibes"
 
 
 
+ALTER TABLE ONLY "public"."rewrite_jobs"
+    ADD CONSTRAINT "fk_jobs_pref_snapshot" FOREIGN KEY ("recipient_preference_snapshot_id") REFERENCES "public"."recipient_preference_snapshots"("recipient_preference_snapshot_id");
+
+
+
+ALTER TABLE ONLY "public"."rewrite_jobs"
+    ADD CONSTRAINT "fk_jobs_snapshot" FOREIGN KEY ("recipient_snapshot_id") REFERENCES "public"."recipient_snapshots"("recipient_snapshot_id");
+
+
+
 ALTER TABLE ONLY "public"."notification_sends"
     ADD CONSTRAINT "fk_notification_sends_token_id" FOREIGN KEY ("token_id") REFERENCES "public"."device_tokens"("id") ON DELETE CASCADE;
 
@@ -13843,6 +15204,21 @@ ALTER TABLE ONLY "public"."notification_sends"
 
 ALTER TABLE ONLY "public"."outreach_event_logs"
     ADD CONSTRAINT "fk_outreach_event_logs_source_resolved" FOREIGN KEY ("source_id_resolved") REFERENCES "public"."outreach_sources"("source_id");
+
+
+
+ALTER TABLE ONLY "public"."recipient_preference_snapshots"
+    ADD CONSTRAINT "fk_recipient_preference_snapshots_request" FOREIGN KEY ("rewrite_request_id") REFERENCES "public"."rewrite_requests"("rewrite_request_id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."recipient_snapshots"
+    ADD CONSTRAINT "fk_recipient_snapshots_request" FOREIGN KEY ("rewrite_request_id") REFERENCES "public"."rewrite_requests"("rewrite_request_id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."rewrite_jobs"
+    ADD CONSTRAINT "fk_rewrite_jobs_provider_batch" FOREIGN KEY ("provider_batch_id") REFERENCES "public"."rewrite_provider_batches"("provider_batch_id");
 
 
 
@@ -14116,6 +15492,26 @@ ALTER TABLE ONLY "public"."revenuecat_webhook_events"
 
 
 
+ALTER TABLE ONLY "public"."rewrite_jobs"
+    ADD CONSTRAINT "rewrite_jobs_rewrite_request_id_fkey" FOREIGN KEY ("rewrite_request_id") REFERENCES "public"."rewrite_requests"("rewrite_request_id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."rewrite_outputs"
+    ADD CONSTRAINT "rewrite_outputs_rewrite_request_id_fkey" FOREIGN KEY ("rewrite_request_id") REFERENCES "public"."rewrite_requests"("rewrite_request_id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."rewrite_requests"
+    ADD CONSTRAINT "rewrite_requests_recipient_preference_snapshot_id_fkey" FOREIGN KEY ("recipient_preference_snapshot_id") REFERENCES "public"."recipient_preference_snapshots"("recipient_preference_snapshot_id");
+
+
+
+ALTER TABLE ONLY "public"."rewrite_requests"
+    ADD CONSTRAINT "rewrite_requests_recipient_snapshot_id_fkey" FOREIGN KEY ("recipient_snapshot_id") REFERENCES "public"."recipient_snapshots"("recipient_snapshot_id");
+
+
+
 ALTER TABLE ONLY "public"."share_events"
     ADD CONSTRAINT "share_events_home_id_fkey" FOREIGN KEY ("home_id") REFERENCES "public"."homes"("id");
 
@@ -14158,6 +15554,12 @@ ALTER TABLE "public"."chore_events" ENABLE ROW LEVEL SECURITY;
 
 
 ALTER TABLE "public"."chores" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."complaint_ai_providers" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."complaint_rewrite_routes" ENABLE ROW LEVEL SECURITY;
 
 
 ALTER TABLE "public"."device_tokens" ENABLE ROW LEVEL SECURITY;
@@ -14300,6 +15702,12 @@ COMMENT ON POLICY "profiles_select_authenticated" ON "public"."profiles" IS 'All
 
 
 
+ALTER TABLE "public"."recipient_preference_snapshots" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."recipient_snapshots" ENABLE ROW LEVEL SECURITY;
+
+
 ALTER TABLE "public"."reserved_usernames" ENABLE ROW LEVEL SECURITY;
 
 
@@ -14307,6 +15715,18 @@ ALTER TABLE "public"."revenuecat_event_processing" ENABLE ROW LEVEL SECURITY;
 
 
 ALTER TABLE "public"."revenuecat_webhook_events" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."rewrite_jobs" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."rewrite_outputs" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."rewrite_provider_batches" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."rewrite_requests" ENABLE ROW LEVEL SECURITY;
 
 
 CREATE POLICY "service_role_all_outreach_aliases" ON "public"."outreach_source_aliases" TO "service_role" USING (true) WITH CHECK (true);
@@ -14703,6 +16123,13 @@ GRANT ALL ON FUNCTION "public"."_chores_base_for_home"("p_home_id" "uuid") TO "a
 
 
 
+REVOKE ALL ON FUNCTION "public"."_complaint_topics_valid"("p" "jsonb") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_complaint_topics_valid"("p" "jsonb") TO "anon";
+GRANT ALL ON FUNCTION "public"."_complaint_topics_valid"("p" "jsonb") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."_complaint_topics_valid"("p" "jsonb") TO "service_role";
+
+
+
 REVOKE ALL ON FUNCTION "public"."_current_user_id"() FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."_current_user_id"() TO "service_role";
 
@@ -14823,6 +16250,13 @@ GRANT ALL ON FUNCTION "public"."_iso_week_utc"("p_at" timestamp with time zone) 
 
 
 
+REVOKE ALL ON FUNCTION "public"."_locale_primary"("p" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_locale_primary"("p" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."_locale_primary"("p" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."_locale_primary"("p" "text") TO "service_role";
+
+
+
 GRANT ALL ON TABLE "public"."member_cap_join_requests" TO "service_role";
 
 
@@ -14855,6 +16289,12 @@ GRANT ALL ON FUNCTION "public"."_outreach_sources_protect_unknown"() TO "service
 
 
 
+GRANT ALL ON FUNCTION "public"."_preference_report_to_value_map"("p_report" "jsonb") TO "anon";
+GRANT ALL ON FUNCTION "public"."_preference_report_to_value_map"("p_report" "jsonb") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."_preference_report_to_value_map"("p_report" "jsonb") TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."_preference_reports_mark_out_of_date"() TO "anon";
 GRANT ALL ON FUNCTION "public"."_preference_reports_mark_out_of_date"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."_preference_reports_mark_out_of_date"() TO "service_role";
@@ -14880,6 +16320,7 @@ GRANT ALL ON FUNCTION "public"."_share_log_event_internal"("p_user_id" "uuid", "
 
 
 
+REVOKE ALL ON FUNCTION "public"."_touch_updated_at"() FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."_touch_updated_at"() TO "anon";
 GRANT ALL ON FUNCTION "public"."_touch_updated_at"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."_touch_updated_at"() TO "service_role";
@@ -15096,6 +16537,96 @@ GRANT ALL ON FUNCTION "public"."citext_smaller"("public"."citext", "public"."cit
 
 
 
+REVOKE ALL ON FUNCTION "public"."claim_rewrite_jobs_by_ids_for_collect_v1"("p_job_ids" "uuid"[]) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."claim_rewrite_jobs_by_ids_for_collect_v1"("p_job_ids" "uuid"[]) TO "anon";
+GRANT ALL ON FUNCTION "public"."claim_rewrite_jobs_by_ids_for_collect_v1"("p_job_ids" "uuid"[]) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."claim_rewrite_jobs_by_ids_for_collect_v1"("p_job_ids" "uuid"[]) TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."claim_rewrite_jobs_for_batch_collect_v1"("p_limit" integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."claim_rewrite_jobs_for_batch_collect_v1"("p_limit" integer) TO "anon";
+GRANT ALL ON FUNCTION "public"."claim_rewrite_jobs_for_batch_collect_v1"("p_limit" integer) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."claim_rewrite_jobs_for_batch_collect_v1"("p_limit" integer) TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."claim_rewrite_jobs_for_batch_submit_v1"("p_limit" integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."claim_rewrite_jobs_for_batch_submit_v1"("p_limit" integer) TO "anon";
+GRANT ALL ON FUNCTION "public"."claim_rewrite_jobs_for_batch_submit_v1"("p_limit" integer) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."claim_rewrite_jobs_for_batch_submit_v1"("p_limit" integer) TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."complaint_build_recipient_snapshots"("p_rewrite_request_id" "uuid", "p_home_id" "uuid", "p_recipient_user_id" "uuid", "p_preference_payload" "jsonb") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."complaint_build_recipient_snapshots"("p_rewrite_request_id" "uuid", "p_home_id" "uuid", "p_recipient_user_id" "uuid", "p_preference_payload" "jsonb") TO "anon";
+GRANT ALL ON FUNCTION "public"."complaint_build_recipient_snapshots"("p_rewrite_request_id" "uuid", "p_home_id" "uuid", "p_recipient_user_id" "uuid", "p_preference_payload" "jsonb") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."complaint_build_recipient_snapshots"("p_rewrite_request_id" "uuid", "p_home_id" "uuid", "p_recipient_user_id" "uuid", "p_preference_payload" "jsonb") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."complaint_context_build"("p_recipient_user_id" "uuid", "p_recipient_preference_snapshot_id" "uuid", "p_topics" "text"[], "p_target_language" "text", "p_power_mode" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."complaint_context_build"("p_recipient_user_id" "uuid", "p_recipient_preference_snapshot_id" "uuid", "p_topics" "text"[], "p_target_language" "text", "p_power_mode" "text") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."complaint_fetch_entry_locales"("p_entry_id" "uuid", "p_recipient_user_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."complaint_fetch_entry_locales"("p_entry_id" "uuid", "p_recipient_user_id" "uuid") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."complaint_preference_payload"("p_recipient_user_id" "uuid", "p_recipient_preference_snapshot_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."complaint_preference_payload"("p_recipient_user_id" "uuid", "p_recipient_preference_snapshot_id" "uuid") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."complaint_preference_payload_from_responses"("p_recipient_user_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."complaint_preference_payload_from_responses"("p_recipient_user_id" "uuid") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."complaint_rewrite_enqueue"("p_rewrite_request_id" "uuid", "p_home_id" "uuid", "p_sender_user_id" "uuid", "p_recipient_user_id" "uuid", "p_surface" "text", "p_original_text" "text", "p_rewrite_request" "jsonb", "p_classifier_result" "jsonb", "p_context_pack" "jsonb", "p_source_locale" "text", "p_target_locale" "text", "p_lane" "text", "p_topics" "jsonb", "p_intent" "text", "p_rewrite_strength" "text", "p_classifier_version" "text", "p_context_pack_version" "text", "p_policy_version" "text", "p_routing_decision" "jsonb", "p_language_pair" "jsonb", "p_preference_payload" "jsonb", "p_max_attempts" integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."complaint_rewrite_enqueue"("p_rewrite_request_id" "uuid", "p_home_id" "uuid", "p_sender_user_id" "uuid", "p_recipient_user_id" "uuid", "p_surface" "text", "p_original_text" "text", "p_rewrite_request" "jsonb", "p_classifier_result" "jsonb", "p_context_pack" "jsonb", "p_source_locale" "text", "p_target_locale" "text", "p_lane" "text", "p_topics" "jsonb", "p_intent" "text", "p_rewrite_strength" "text", "p_classifier_version" "text", "p_context_pack_version" "text", "p_policy_version" "text", "p_routing_decision" "jsonb", "p_language_pair" "jsonb", "p_preference_payload" "jsonb", "p_max_attempts" integer) TO "anon";
+GRANT ALL ON FUNCTION "public"."complaint_rewrite_enqueue"("p_rewrite_request_id" "uuid", "p_home_id" "uuid", "p_sender_user_id" "uuid", "p_recipient_user_id" "uuid", "p_surface" "text", "p_original_text" "text", "p_rewrite_request" "jsonb", "p_classifier_result" "jsonb", "p_context_pack" "jsonb", "p_source_locale" "text", "p_target_locale" "text", "p_lane" "text", "p_topics" "jsonb", "p_intent" "text", "p_rewrite_strength" "text", "p_classifier_version" "text", "p_context_pack_version" "text", "p_policy_version" "text", "p_routing_decision" "jsonb", "p_language_pair" "jsonb", "p_preference_payload" "jsonb", "p_max_attempts" integer) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."complaint_rewrite_enqueue"("p_rewrite_request_id" "uuid", "p_home_id" "uuid", "p_sender_user_id" "uuid", "p_recipient_user_id" "uuid", "p_surface" "text", "p_original_text" "text", "p_rewrite_request" "jsonb", "p_classifier_result" "jsonb", "p_context_pack" "jsonb", "p_source_locale" "text", "p_target_locale" "text", "p_lane" "text", "p_topics" "jsonb", "p_intent" "text", "p_rewrite_strength" "text", "p_classifier_version" "text", "p_context_pack_version" "text", "p_policy_version" "text", "p_routing_decision" "jsonb", "p_language_pair" "jsonb", "p_preference_payload" "jsonb", "p_max_attempts" integer) TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."complaint_rewrite_job_fail_or_requeue"("p_job_id" "uuid", "p_error" "text", "p_backoff_seconds" integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."complaint_rewrite_job_fail_or_requeue"("p_job_id" "uuid", "p_error" "text", "p_backoff_seconds" integer) TO "anon";
+GRANT ALL ON FUNCTION "public"."complaint_rewrite_job_fail_or_requeue"("p_job_id" "uuid", "p_error" "text", "p_backoff_seconds" integer) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."complaint_rewrite_job_fail_or_requeue"("p_job_id" "uuid", "p_error" "text", "p_backoff_seconds" integer) TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."complaint_rewrite_request_exists"("p_rewrite_request_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."complaint_rewrite_request_exists"("p_rewrite_request_id" "uuid") TO "anon";
+GRANT ALL ON FUNCTION "public"."complaint_rewrite_request_exists"("p_rewrite_request_id" "uuid") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."complaint_rewrite_request_exists"("p_rewrite_request_id" "uuid") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."complaint_rewrite_request_fetch_v1"("p_rewrite_request_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."complaint_rewrite_request_fetch_v1"("p_rewrite_request_id" "uuid") TO "anon";
+GRANT ALL ON FUNCTION "public"."complaint_rewrite_request_fetch_v1"("p_rewrite_request_id" "uuid") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."complaint_rewrite_request_fetch_v1"("p_rewrite_request_id" "uuid") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."complaint_rewrite_route"("p_surface" "text", "p_lane" "text", "p_rewrite_strength" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."complaint_rewrite_route"("p_surface" "text", "p_lane" "text", "p_rewrite_strength" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."complaint_rewrite_route"("p_surface" "text", "p_lane" "text", "p_rewrite_strength" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."complaint_rewrite_route"("p_surface" "text", "p_lane" "text", "p_rewrite_strength" "text") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."complete_complaint_rewrite_job"("p_job_id" "uuid", "p_rewrite_request_id" "uuid", "p_recipient_user_id" "uuid", "p_rewritten_text" "text", "p_output_language" "text", "p_target_locale" "text", "p_model" "text", "p_provider" "text", "p_prompt_version" "text", "p_policy_version" "text", "p_lexicon_version" "text", "p_eval_result" "jsonb") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."complete_complaint_rewrite_job"("p_job_id" "uuid", "p_rewrite_request_id" "uuid", "p_recipient_user_id" "uuid", "p_rewritten_text" "text", "p_output_language" "text", "p_target_locale" "text", "p_model" "text", "p_provider" "text", "p_prompt_version" "text", "p_policy_version" "text", "p_lexicon_version" "text", "p_eval_result" "jsonb") TO "anon";
+GRANT ALL ON FUNCTION "public"."complete_complaint_rewrite_job"("p_job_id" "uuid", "p_rewrite_request_id" "uuid", "p_recipient_user_id" "uuid", "p_rewritten_text" "text", "p_output_language" "text", "p_target_locale" "text", "p_model" "text", "p_provider" "text", "p_prompt_version" "text", "p_policy_version" "text", "p_lexicon_version" "text", "p_eval_result" "jsonb") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."complete_complaint_rewrite_job"("p_job_id" "uuid", "p_rewrite_request_id" "uuid", "p_recipient_user_id" "uuid", "p_rewritten_text" "text", "p_output_language" "text", "p_target_locale" "text", "p_model" "text", "p_provider" "text", "p_prompt_version" "text", "p_policy_version" "text", "p_lexicon_version" "text", "p_eval_result" "jsonb") TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."date_dist"("date", "date") TO "postgres";
 GRANT ALL ON FUNCTION "public"."date_dist"("date", "date") TO "anon";
 GRANT ALL ON FUNCTION "public"."date_dist"("date", "date") TO "authenticated";
@@ -15200,6 +16731,13 @@ GRANT ALL ON FUNCTION "public"."expenses_mark_paid_received_viewed_for_debtor"("
 REVOKE ALL ON FUNCTION "public"."expenses_pay_my_due"("p_recipient_user_id" "uuid") FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."expenses_pay_my_due"("p_recipient_user_id" "uuid") TO "service_role";
 GRANT ALL ON FUNCTION "public"."expenses_pay_my_due"("p_recipient_user_id" "uuid") TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "public"."fail_complaint_rewrite_job"("p_job_id" "uuid", "p_error" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."fail_complaint_rewrite_job"("p_job_id" "uuid", "p_error" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."fail_complaint_rewrite_job"("p_job_id" "uuid", "p_error" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."fail_complaint_rewrite_job"("p_job_id" "uuid", "p_error" "text") TO "service_role";
 
 
 
@@ -16582,6 +18120,19 @@ GRANT ALL ON FUNCTION "public"."locale_base"("p_locale" "text") TO "service_role
 
 
 
+GRANT ALL ON FUNCTION "public"."map_instruction"("p_id" "text", "p_value" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."map_instruction"("p_id" "text", "p_value" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."map_instruction"("p_id" "text", "p_value" "text") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."mark_rewrite_jobs_batch_submitted_v1"("p_job_ids" "uuid"[], "p_provider_batch_id" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."mark_rewrite_jobs_batch_submitted_v1"("p_job_ids" "uuid"[], "p_provider_batch_id" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."mark_rewrite_jobs_batch_submitted_v1"("p_job_ids" "uuid"[], "p_provider_batch_id" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."mark_rewrite_jobs_batch_submitted_v1"("p_job_ids" "uuid"[], "p_provider_batch_id" "text") TO "service_role";
+
+
+
 REVOKE ALL ON FUNCTION "public"."member_cap_owner_dismiss"("p_home_id" "uuid") FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."member_cap_owner_dismiss"("p_home_id" "uuid") TO "service_role";
 GRANT ALL ON FUNCTION "public"."member_cap_owner_dismiss"("p_home_id" "uuid") TO "authenticated";
@@ -16903,6 +18454,48 @@ GRANT ALL ON FUNCTION "public"."replace"("public"."citext", "public"."citext", "
 
 
 
+REVOKE ALL ON FUNCTION "public"."requeue_jobs_after_submit_failure"("p_job_ids" "uuid"[], "p_error" "text", "p_backoff_seconds" integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."requeue_jobs_after_submit_failure"("p_job_ids" "uuid"[], "p_error" "text", "p_backoff_seconds" integer) TO "anon";
+GRANT ALL ON FUNCTION "public"."requeue_jobs_after_submit_failure"("p_job_ids" "uuid"[], "p_error" "text", "p_backoff_seconds" integer) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."requeue_jobs_after_submit_failure"("p_job_ids" "uuid"[], "p_error" "text", "p_backoff_seconds" integer) TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."rewrite_batch_list_pending_v1"("p_limit" integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."rewrite_batch_list_pending_v1"("p_limit" integer) TO "anon";
+GRANT ALL ON FUNCTION "public"."rewrite_batch_list_pending_v1"("p_limit" integer) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."rewrite_batch_list_pending_v1"("p_limit" integer) TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."rewrite_batch_register_v1"("p_provider_batch_id" "text", "p_input_file_id" "text", "p_job_count" integer, "p_endpoint" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."rewrite_batch_register_v1"("p_provider_batch_id" "text", "p_input_file_id" "text", "p_job_count" integer, "p_endpoint" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."rewrite_batch_register_v1"("p_provider_batch_id" "text", "p_input_file_id" "text", "p_job_count" integer, "p_endpoint" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."rewrite_batch_register_v1"("p_provider_batch_id" "text", "p_input_file_id" "text", "p_job_count" integer, "p_endpoint" "text") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."rewrite_batch_update_v1"("p_provider_batch_id" "text", "p_status" "text", "p_output_file_id" "text", "p_error_file_id" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."rewrite_batch_update_v1"("p_provider_batch_id" "text", "p_status" "text", "p_output_file_id" "text", "p_error_file_id" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."rewrite_batch_update_v1"("p_provider_batch_id" "text", "p_status" "text", "p_output_file_id" "text", "p_error_file_id" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."rewrite_batch_update_v1"("p_provider_batch_id" "text", "p_status" "text", "p_output_file_id" "text", "p_error_file_id" "text") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."rewrite_job_fetch_v1"("p_job_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."rewrite_job_fetch_v1"("p_job_id" "uuid") TO "anon";
+GRANT ALL ON FUNCTION "public"."rewrite_job_fetch_v1"("p_job_id" "uuid") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."rewrite_job_fetch_v1"("p_job_id" "uuid") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."rewrite_jobs_requeue_by_provider_batch_v1"("p_provider_batch_id" "text", "p_reason" "text", "p_backoff_seconds" integer, "p_limit" integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."rewrite_jobs_requeue_by_provider_batch_v1"("p_provider_batch_id" "text", "p_reason" "text", "p_backoff_seconds" integer, "p_limit" integer) TO "anon";
+GRANT ALL ON FUNCTION "public"."rewrite_jobs_requeue_by_provider_batch_v1"("p_provider_batch_id" "text", "p_reason" "text", "p_backoff_seconds" integer, "p_limit" integer) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."rewrite_jobs_requeue_by_provider_batch_v1"("p_provider_batch_id" "text", "p_reason" "text", "p_backoff_seconds" integer, "p_limit" integer) TO "service_role";
+
+
+
 REVOKE ALL ON FUNCTION "public"."share_log_event"("p_home_id" "uuid", "p_feature" "text", "p_channel" "text") FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."share_log_event"("p_home_id" "uuid", "p_feature" "text", "p_channel" "text") TO "anon";
 GRANT ALL ON FUNCTION "public"."share_log_event"("p_home_id" "uuid", "p_feature" "text", "p_channel" "text") TO "authenticated";
@@ -17091,6 +18684,14 @@ GRANT ALL ON TABLE "public"."chore_events" TO "service_role";
 
 
 
+GRANT ALL ON TABLE "public"."complaint_ai_providers" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."complaint_rewrite_routes" TO "service_role";
+
+
+
 GRANT ALL ON TABLE "public"."device_tokens" TO "anon";
 GRANT ALL ON TABLE "public"."device_tokens" TO "authenticated";
 GRANT ALL ON TABLE "public"."device_tokens" TO "service_role";
@@ -17243,6 +18844,14 @@ GRANT ALL ON TABLE "public"."profiles" TO "service_role";
 
 
 
+GRANT ALL ON TABLE "public"."recipient_preference_snapshots" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."recipient_snapshots" TO "service_role";
+
+
+
 GRANT ALL ON TABLE "public"."reserved_usernames" TO "service_role";
 
 
@@ -17254,6 +18863,22 @@ GRANT ALL ON TABLE "public"."revenuecat_event_processing" TO "service_role";
 
 
 GRANT ALL ON TABLE "public"."revenuecat_webhook_events" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."rewrite_jobs" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."rewrite_outputs" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."rewrite_provider_batches" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."rewrite_requests" TO "service_role";
 
 
 

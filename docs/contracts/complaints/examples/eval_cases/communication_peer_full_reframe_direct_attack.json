@@ -1,0 +1,12 @@
+{
+  "case_id": "comm-peer-fr-attack-1",
+  "topic": "communication",
+  "power_mode": "peer",
+  "rewrite_strength": "full_reframe",
+  "source_locale": "en",
+  "target_locale": "en",
+  "original_text": "You never reply because you're selfish and can't be bothered to act like an adult",
+  "expected_intent": "concern",
+  "expected_lexicon_violations": ["personal_attack", "blame"],
+  "notes": "Direct attack, no profanity; should reframe to clear request to respond."
+}

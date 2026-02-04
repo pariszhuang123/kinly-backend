@@ -1,0 +1,14 @@
+{
+  "case_id": "guests_peer_full_reframe_16",
+  "topic": "guests",
+  "power_mode": "peer",
+  "rewrite_strength": "full_reframe",
+  "source_locale": "en",
+  "target_locale": "en",
+  "original_text": "Stop dumping random strangers on the couch, this is not a hostel",
+  "expected_intent": "boundary",
+  "expected_lexicon_violations": [
+    "vulgarity",
+    "personal_attack"
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "case_id": "noise_higher_sender_full_reframe_05",
+  "topic": "noise",
+  "power_mode": "higher_sender",
+  "rewrite_strength": "full_reframe",
+  "source_locale": "en",
+  "target_locale": "en",
+  "original_text": "Your door slams shake the whole house, it is ridiculous",
+  "expected_intent": "concern",
+  "expected_lexicon_violations": [
+    "personal_attack"
+  ]
+}

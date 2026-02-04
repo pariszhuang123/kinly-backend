@@ -1,0 +1,12 @@
+{
+  "case_id": "guests-peer-lt-warn-1",
+  "topic": "guests",
+  "power_mode": "peer",
+  "rewrite_strength": "light_touch",
+  "source_locale": "en",
+  "target_locale": "en",
+  "original_text": "Could you maybe not invite randoms every other night?",
+  "expected_intent": "request",
+  "expected_lexicon_violations": ["hedge_warn"],
+  "notes": "Light touch; check that rewrite keeps clarity and request."
+}

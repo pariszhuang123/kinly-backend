@@ -1,0 +1,68 @@
+{
+  "context_version": "v1",
+  "recipient_user_id": "uuid-recipient",
+  "target_language": "en-US",
+  "power": {
+    "sender_role": "housemate",
+    "recipient_role": "housemate",
+    "power_mode": "peer",
+    "tone_multiplier": "neutral"
+  },
+  "topic_scope": {
+    "topics": ["privacy"],
+    "included_preference_ids": [
+      "privacy_room_entry",
+      "privacy_notifications",
+      "communication_channel",
+      "conflict_resolution_style"
+    ],
+    "excluded_preference_ids": [
+      "environment_noise_tolerance",
+      "cleanliness_shared_space_tolerance"
+    ]
+  },
+  "instructions": {
+    "tone": "warm_clear",
+    "directness": "balanced",
+    "repair_timing": "talk_soon",
+    "framing": [
+      "use_impact_language",
+      "use_optional_requests",
+      "use_specific_but_non_accusatory"
+    ],
+    "avoid": [
+      "authority_language",
+      "rules_language",
+      "enforcement_language",
+      "preference_disclosure",
+      "norms_reference",
+      "medical_or_diagnosis_language"
+    ],
+    "do_not_add": [
+      "new_complaints",
+      "new_facts",
+      "exact_times_if_not_provided"
+    ]
+  },
+  "recipient_signals": [
+    {
+      "preference_id": "privacy_room_entry",
+      "value_key": "always_ask",
+      "instruction": "Ask permission before entering; phrase as a request, not a rule."
+    },
+    {
+      "preference_id": "privacy_notifications",
+      "value_key": "none",
+      "instruction": "Avoid after-hours notifications; suggest tomorrow without inventing times."
+    },
+    {
+      "preference_id": "conflict_resolution_style",
+      "value_key": "talk_soon",
+      "instruction": "Invite a short chat when convenient; avoid urgency."
+    }
+  ],
+  "safety_notes": [
+    "Do not reference house norms or rules.",
+    "Do not mention tailored tone."
+  ]
+}

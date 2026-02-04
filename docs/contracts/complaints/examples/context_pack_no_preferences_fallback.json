@@ -1,0 +1,44 @@
+{
+  "context_version": "v1",
+  "recipient_user_id": "uuid-recipient",
+  "target_language": "en-US",
+  "power": {
+    "sender_role": "housemate",
+    "recipient_role": "housemate",
+    "power_mode": "peer",
+    "tone_multiplier": "neutral"
+  },
+  "topic_scope": {
+    "topics": ["noise"],
+    "included_preference_ids": [],
+    "excluded_preference_ids": []
+  },
+  "instructions": {
+    "tone": "warm_clear",
+    "directness": "soft",
+    "repair_timing": "cool_off",
+    "framing": [
+      "use_impact_language",
+      "use_optional_requests",
+      "use_specific_but_non_accusatory"
+    ],
+    "avoid": [
+      "authority_language",
+      "rules_language",
+      "enforcement_language",
+      "preference_disclosure",
+      "norms_reference",
+      "medical_or_diagnosis_language"
+    ],
+    "do_not_add": [
+      "new_complaints",
+      "new_facts",
+      "exact_times_if_not_provided"
+    ]
+  },
+  "recipient_signals": [],
+  "safety_notes": [
+    "Do not claim knowledge of preferences.",
+    "Do not mention tailored tone."
+  ]
+}

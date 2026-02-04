@@ -262,7 +262,10 @@ async function handleCandidate(
     return { sent: 1, failed: 0, expired: 0 };
   }
 
-  const truncatedReason = truncateReason(result.reason, ERROR_REASON_MAX_LENGTH);
+  const truncatedReason = truncateReason(
+    result.reason,
+    ERROR_REASON_MAX_LENGTH,
+  );
   await updateSendStatus(supabase, sendId, "failed", truncatedReason);
 
   if (result.permanent) {
@@ -383,7 +386,8 @@ async function sendPush(
     },
   };
 
-  const url = `https://fcm.googleapis.com/v1/projects/${auth.projectId}/messages:send`;
+  const url =
+    `https://fcm.googleapis.com/v1/projects/${auth.projectId}/messages:send`;
 
   const response = await fetch(url, {
     method: "POST",
@@ -453,7 +457,8 @@ export function isPermanentTokenError(text: string): boolean {
     };
     const status = parsed.error?.status?.toUpperCase();
     if (
-      status && (status.includes("UNREGISTERED") || status.includes("NOT_FOUND"))
+      status &&
+      (status.includes("UNREGISTERED") || status.includes("NOT_FOUND"))
     ) {
       return true;
     }

@@ -1,0 +1,67 @@
+{
+  "context_version": "v1",
+  "recipient_user_id": "uuid-recipient",
+  "target_language": "en-US",
+  "power": {
+    "sender_role": "owner",
+    "recipient_role": "housemate",
+    "power_mode": "higher_sender",
+    "tone_multiplier": "extra_gentle"
+  },
+  "topic_scope": {
+    "topics": ["noise"],
+    "included_preference_ids": [
+      "environment_noise_tolerance",
+      "schedule_quiet_hours_preference",
+      "conflict_resolution_style",
+      "communication_directness"
+    ],
+    "excluded_preference_ids": []
+  },
+  "instructions": {
+    "tone": "warm_clear",
+    "directness": "soft",
+    "repair_timing": "cool_off",
+    "framing": [
+      "use_impact_language",
+      "use_optional_requests",
+      "use_specific_but_non_accusatory",
+      "use_soft_openers"
+    ],
+    "avoid": [
+      "authority_language",
+      "rules_language",
+      "enforcement_language",
+      "preference_disclosure",
+      "norms_reference",
+      "medical_or_diagnosis_language",
+      "commands"
+    ],
+    "do_not_add": [
+      "new_complaints",
+      "new_facts",
+      "exact_times_if_not_provided"
+    ]
+  },
+  "recipient_signals": [
+    {
+      "preference_id": "communication_directness",
+      "value_key": "gentle",
+      "instruction": "Prefer softer phrasing and good timing; avoid blunt wording."
+    },
+    {
+      "preference_id": "conflict_resolution_style",
+      "value_key": "cool_off",
+      "instruction": "Offer space first; avoid demanding immediate response."
+    },
+    {
+      "preference_id": "environment_noise_tolerance",
+      "value_key": "low",
+      "instruction": "Frame as a quiet-time request using impact language; avoid blame."
+    }
+  ],
+  "safety_notes": [
+    "Do not imply authority or ownership in the message.",
+    "Do not mention that tone is tailored to preferences."
+  ]
+}

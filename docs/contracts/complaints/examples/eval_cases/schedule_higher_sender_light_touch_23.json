@@ -1,0 +1,13 @@
+{
+  "case_id": "schedule_higher_sender_light_touch_23",
+  "topic": "schedule",
+  "power_mode": "higher_sender",
+  "rewrite_strength": "light_touch",
+  "source_locale": "en",
+  "target_locale": "en",
+  "original_text": "Could we keep quiet hours after 11pm?",
+  "expected_intent": "request",
+  "expected_lexicon_violations": [
+    "hedge_warn"
+  ]
+}

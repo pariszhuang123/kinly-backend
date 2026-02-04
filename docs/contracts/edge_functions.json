@@ -1,10 +1,25 @@
 {
   "functions": {
+    "complaint_classifier": {
+      "path": "supabase/functions/complaint_classifier"
+    },
+    "complaint_orchestrator": {
+      "path": "supabase/functions/complaint_orchestrator"
+    },
     "notifications_daily": {
       "path": "supabase/functions/notifications_daily"
     },
     "revenuecat_webhook": {
       "path": "supabase/functions/revenuecat_webhook"
+    },
+    "rewrite_batch": {
+      "path": "supabase/functions/rewrite_batch"
+    },
+    "rewrite_batch_collector": {
+      "path": "supabase/functions/rewrite_batch_collector"
+    },
+    "rewrite_batch_submitter": {
+      "path": "supabase/functions/rewrite_batch_submitter"
     }
   }
 }

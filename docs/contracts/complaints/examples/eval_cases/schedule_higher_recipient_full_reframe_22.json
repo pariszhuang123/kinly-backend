@@ -1,0 +1,13 @@
+{
+  "case_id": "schedule_higher_recipient_full_reframe_22",
+  "topic": "schedule",
+  "power_mode": "higher_recipient",
+  "rewrite_strength": "full_reframe",
+  "source_locale": "en",
+  "target_locale": "en",
+  "original_text": "Please avoid blender use before 6am; people are sleeping",
+  "expected_intent": "request",
+  "expected_lexicon_violations": [
+    "authority"
+  ]
+}

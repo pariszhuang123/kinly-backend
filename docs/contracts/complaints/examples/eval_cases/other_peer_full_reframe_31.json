@@ -1,0 +1,14 @@
+{
+  "case_id": "other_peer_full_reframe_31",
+  "topic": "other",
+  "power_mode": "peer",
+  "rewrite_strength": "full_reframe",
+  "source_locale": "en",
+  "target_locale": "en",
+  "original_text": "Stop being a jerk about everything",
+  "expected_intent": "boundary",
+  "expected_lexicon_violations": [
+    "vulgarity",
+    "personal_attack"
+  ]
+}

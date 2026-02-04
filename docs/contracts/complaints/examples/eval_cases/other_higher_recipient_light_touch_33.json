@@ -1,0 +1,13 @@
+{
+  "case_id": "other_higher_recipient_light_touch_33",
+  "topic": "other",
+  "power_mode": "higher_recipient",
+  "rewrite_strength": "light_touch",
+  "source_locale": "en",
+  "target_locale": "en",
+  "original_text": "Could we check in weekly to keep things smooth?",
+  "expected_intent": "request",
+  "expected_lexicon_violations": [
+    "hedge_warn"
+  ]
+}

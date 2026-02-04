@@ -1,0 +1,14 @@
+{
+  "case_id": "schedule_peer_full_reframe_21",
+  "topic": "schedule",
+  "power_mode": "peer",
+  "rewrite_strength": "full_reframe",
+  "source_locale": "en",
+  "target_locale": "en",
+  "original_text": "Stop showering at 3am like a nocturnal animal",
+  "expected_intent": "boundary",
+  "expected_lexicon_violations": [
+    "vulgarity",
+    "personal_attack"
+  ]
+}

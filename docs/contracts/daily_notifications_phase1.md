@@ -1,24 +1,24 @@
 # Daily Notifications — Phase 1 (Kinly)
 
-Goal: send at most one gentle daily nudge per user when Today has meaningful content, respecting opt-in, OS permission, timezone, and device token availability. Default reminder time is 9am local. Implemented via migration `20251203103000_notifications_daily.sql` and Edge Function `notifications_daily`.
+Goal: send at most one gentle daily nudge per user per local day (per active device token) when Today has meaningful content, respecting opt-in, OS permission, timezone, and device token availability. Default reminder time is 9:00am local. Implemented via migrations `20251203103000_notifications_daily.sql`, `20251227090000_notifications_preferred_minute.sql`, `20260323090000_notifications_daily_window.sql`, and Edge Function `notifications_daily`.
 
 ## 1) Entry point and opt-in
 - Trigger: after the first chore (Flow) creation, app asks “daily reminder when your day is ready?” (yes/no).
-- Data captured on answer: `wants_daily`, `preferred_hour = 9`, `timezone` (IANA), `locale`, `os_permission` (allowed/blocked/unknown), current device `token`.
+- Data captured on answer: `wants_daily`, `preferred_hour = 9`, `preferred_minute = 0`, `timezone` (IANA), `locale`, `os_permission` (allowed/blocked/unknown), current device `token`.
 - If “no”: store tz/locale but `wants_daily = false`.
 
 ## 2) Data model (Supabase)
 - `notification_preferences`
-  - `user_id (pk)`, `wants_daily bool`, `preferred_hour int` (default 9), `timezone text`, `locale text`, `os_permission text`, `last_os_sync_at timestamptz`, `last_sent_local_date date`, `created_at`, `updated_at`.
+  - `user_id (pk)`, `wants_daily bool`, `preferred_hour int` (default 9), `preferred_minute int` (default 0), `timezone text`, `locale text`, `os_permission text`, `last_os_sync_at timestamptz`, `last_sent_local_date date`, `created_at`, `updated_at`.
 - `device_tokens`
   - `id uuid`, `user_id`, `token text`, `provider text` (fcm), `platform text`, `status text` (active/revoked/expired), `last_seen_at timestamptz`, `created_at`, `updated_at`.
   - Multiple active tokens allowed. Mark prior token revoked on logout/uninstall/rotation; mark expired on server if FCM reports unregistered/invalid. Unique token constraint enforced.
 - Helpers
   - `today_has_content(user_id, tz, local_date)` SECURITY DEFINER; impersonates the user (via `request.jwt.claim.sub`) and reuses the existing RPCs to avoid duplicated logic. Uses the caller’s current home membership (enforced by membership uniqueness).
-  - `notifications_daily_candidates(limit, offset)` SECURITY DEFINER; paged eligible rows for the scheduler (service role) using server-side tz/hour and content check.
+  - `notifications_daily_candidates(limit, offset)` SECURITY DEFINER; paged eligible rows for the scheduler (service role) using server-side tz + preferred time window + content check.
 - `notification_sends`
-  - `id uuid`, `user_id`, `local_date date`, `job_run_id text`, `status text` (sent/failed), `error text`, `created_at`.
-  - Partial unique index on (`user_id`, `local_date`) where `status='sent'` to enforce one successful send per local day.
+  - `id uuid`, `user_id`, `token_id`, `local_date date`, `job_run_id text`, `status text` (reserved/sent/failed), `error text`, `created_at`.
+  - Unique index on (`token_id`, `local_date`) to prevent duplicate sends per device per local day.
 
 ## 3) Client responsibilities
 - Opt-in flow: upsert `notification_preferences` + add/activate device token with captured tz/locale/os_permission (direct table writes under RLS; not via RPC).
@@ -41,8 +41,8 @@ Goal: send at most one gentle daily nudge per user when Today has meaningful con
 - `wants_daily = true`.
 - `os_permission = allowed`.
 - Has ≥1 active device token.
-- `local_hour(user.timezone) == preferred_hour` (9) at job run; 15-minute cadence provides delivery window.
-- No `notification_sends` row with `status = sent` and `local_date = today(user.timezone)`.
+- `local_time(user.timezone)` is within `[preferred_time, preferred_time + 15 minutes]` at job run (15-minute cadence provides the delivery window).
+- `last_sent_local_date < today(user.timezone)` (or null) to avoid multiple sends per local day.
 - `today_has_content(user_id, timezone, local_date)` returns true (see Section 6).
 
 ## 6) “Today has content” (server-side signal)
@@ -63,10 +63,10 @@ Goal: send at most one gentle daily nudge per user when Today has meaningful con
 - Payload includes deep-link to Today screen.
 
 ## 8) Idempotency and timing
-- Ledgered via `notification_sends`; retries are safe because eligibility checks `NOT EXISTS sent for today`.
-- `local_date` and `local_hour` computed server-side using stored `timezone`; timezone changes take effect on next client sync.
-- If a run fails at 9:00, later runs (9:15, 9:30, 9:45) can still deliver; after first successful send, later runs skip.
-- Verify uniqueness: add unique constraint on (`user_id`, `local_date`, `status`) with a partial index for `status = 'sent'` to prevent duplicates.
+- Ledgered via `notification_sends`; retries are safe because eligibility checks `last_sent_local_date < today` and reservations are unique per `token_id + local_date`.
+- `local_date` and `local_time` computed server-side using stored `timezone`; timezone changes take effect on next client sync.
+- If a run fails at the preferred time, later runs within the 15-minute window can still deliver; after first successful send, later runs skip.
+- Verify uniqueness: unique index on (`token_id`, `local_date`) to prevent duplicate sends per device per local day.
 
 ## 9) RLS and security
 - App RLS: a user can only upsert/read their own `notification_preferences` and `device_tokens`.
@@ -74,7 +74,6 @@ Goal: send at most one gentle daily nudge per user when Today has meaningful con
 - Secrets: FCM service account stored in Supabase secrets; no client access.
 
 ## 10) Non-goals (Phase 1)
-- No user-configurable reminder time UI (fixed 9am).
 - No manual timezone override.
 - No campaigns/streaks/weekly digests.
 - No per-item personalization in notification text.

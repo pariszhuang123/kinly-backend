@@ -1,0 +1,12 @@
+{
+  "case_id": "noise-hs-fr-vulgar-1",
+  "topic": "noise",
+  "power_mode": "higher_sender",
+  "rewrite_strength": "full_reframe",
+  "source_locale": "en",
+  "target_locale": "en",
+  "original_text": "Stop stomping like an elephant at 2am you inconsiderate slob",
+  "expected_intent": "boundary",
+  "expected_lexicon_violations": ["vulgarity", "personal_attack", "blame"],
+  "notes": "Night-time noise + insult + blame."
+}

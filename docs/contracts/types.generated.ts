@@ -267,6 +267,87 @@ export type Database = {
           },
         ]
       }
+      complaint_ai_providers: {
+        Row: {
+          active: boolean
+          adapter_kind: string
+          base_url: string | null
+          created_at: string
+          provider: string
+          updated_at: string
+        }
+        Insert: {
+          active?: boolean
+          adapter_kind: string
+          base_url?: string | null
+          created_at?: string
+          provider: string
+          updated_at?: string
+        }
+        Update: {
+          active?: boolean
+          adapter_kind?: string
+          base_url?: string | null
+          created_at?: string
+          provider?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      complaint_rewrite_routes: {
+        Row: {
+          active: boolean
+          cache_eligible: boolean
+          created_at: string
+          execution_mode: string
+          lane: string
+          max_retries: number
+          model: string
+          policy_version: string
+          priority: number
+          prompt_version: string
+          provider: string
+          rewrite_strength: string
+          route_id: string
+          surface: string
+          updated_at: string
+        }
+        Insert: {
+          active?: boolean
+          cache_eligible?: boolean
+          created_at?: string
+          execution_mode?: string
+          lane: string
+          max_retries?: number
+          model: string
+          policy_version?: string
+          priority?: number
+          prompt_version?: string
+          provider: string
+          rewrite_strength: string
+          route_id?: string
+          surface: string
+          updated_at?: string
+        }
+        Update: {
+          active?: boolean
+          cache_eligible?: boolean
+          created_at?: string
+          execution_mode?: string
+          lane?: string
+          max_retries?: number
+          model?: string
+          policy_version?: string
+          priority?: number
+          prompt_version?: string
+          provider?: string
+          rewrite_strength?: string
+          route_id?: string
+          surface?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
       device_tokens: {
         Row: {
           created_at: string
@@ -2140,6 +2221,70 @@ export type Database = {
           },
         ]
       }
+      recipient_preference_snapshots: {
+        Row: {
+          created_at: string
+          preference_payload: Json
+          recipient_preference_snapshot_id: string
+          recipient_user_id: string
+          rewrite_request_id: string
+        }
+        Insert: {
+          created_at?: string
+          preference_payload: Json
+          recipient_preference_snapshot_id?: string
+          recipient_user_id: string
+          rewrite_request_id: string
+        }
+        Update: {
+          created_at?: string
+          preference_payload?: Json
+          recipient_preference_snapshot_id?: string
+          recipient_user_id?: string
+          rewrite_request_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "fk_recipient_preference_snapshots_request"
+            columns: ["rewrite_request_id"]
+            isOneToOne: false
+            referencedRelation: "rewrite_requests"
+            referencedColumns: ["rewrite_request_id"]
+          },
+        ]
+      }
+      recipient_snapshots: {
+        Row: {
+          created_at: string
+          home_id: string
+          recipient_snapshot_id: string
+          recipient_user_ids: string[]
+          rewrite_request_id: string
+        }
+        Insert: {
+          created_at?: string
+          home_id: string
+          recipient_snapshot_id?: string
+          recipient_user_ids: string[]
+          rewrite_request_id: string
+        }
+        Update: {
+          created_at?: string
+          home_id?: string
+          recipient_snapshot_id?: string
+          recipient_user_ids?: string[]
+          rewrite_request_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "fk_recipient_snapshots_request"
+            columns: ["rewrite_request_id"]
+            isOneToOne: false
+            referencedRelation: "rewrite_requests"
+            referencedColumns: ["rewrite_request_id"]
+          },
+        ]
+      }
       reserved_usernames: {
         Row: {
           name: string
@@ -2274,6 +2419,307 @@ export type Database = {
             isOneToOne: false
             referencedRelation: "homes"
             referencedColumns: ["id"]
+          },
+        ]
+      }
+      rewrite_jobs: {
+        Row: {
+          attempt_count: number
+          claimed_at: string | null
+          claimed_by: string | null
+          created_at: string
+          job_id: string
+          lane: string
+          language_pair: Json
+          last_error: string | null
+          last_error_at: string | null
+          max_attempts: number
+          not_before_at: string | null
+          provider_batch_id: string | null
+          recipient_preference_snapshot_id: string
+          recipient_snapshot_id: string
+          recipient_user_id: string
+          rewrite_request_id: string
+          rewrite_strength: string
+          routing_decision: Json
+          status: string
+          submitted_at: string | null
+          surface: string
+          task: string
+          updated_at: string
+        }
+        Insert: {
+          attempt_count?: number
+          claimed_at?: string | null
+          claimed_by?: string | null
+          created_at?: string
+          job_id?: string
+          lane: string
+          language_pair: Json
+          last_error?: string | null
+          last_error_at?: string | null
+          max_attempts?: number
+          not_before_at?: string | null
+          provider_batch_id?: string | null
+          recipient_preference_snapshot_id: string
+          recipient_snapshot_id: string
+          recipient_user_id: string
+          rewrite_request_id: string
+          rewrite_strength: string
+          routing_decision: Json
+          status?: string
+          submitted_at?: string | null
+          surface: string
+          task: string
+          updated_at?: string
+        }
+        Update: {
+          attempt_count?: number
+          claimed_at?: string | null
+          claimed_by?: string | null
+          created_at?: string
+          job_id?: string
+          lane?: string
+          language_pair?: Json
+          last_error?: string | null
+          last_error_at?: string | null
+          max_attempts?: number
+          not_before_at?: string | null
+          provider_batch_id?: string | null
+          recipient_preference_snapshot_id?: string
+          recipient_snapshot_id?: string
+          recipient_user_id?: string
+          rewrite_request_id?: string
+          rewrite_strength?: string
+          routing_decision?: Json
+          status?: string
+          submitted_at?: string | null
+          surface?: string
+          task?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "fk_jobs_pref_snapshot"
+            columns: ["recipient_preference_snapshot_id"]
+            isOneToOne: false
+            referencedRelation: "recipient_preference_snapshots"
+            referencedColumns: ["recipient_preference_snapshot_id"]
+          },
+          {
+            foreignKeyName: "fk_jobs_snapshot"
+            columns: ["recipient_snapshot_id"]
+            isOneToOne: false
+            referencedRelation: "recipient_snapshots"
+            referencedColumns: ["recipient_snapshot_id"]
+          },
+          {
+            foreignKeyName: "fk_rewrite_jobs_provider_batch"
+            columns: ["provider_batch_id"]
+            isOneToOne: false
+            referencedRelation: "rewrite_provider_batches"
+            referencedColumns: ["provider_batch_id"]
+          },
+          {
+            foreignKeyName: "rewrite_jobs_rewrite_request_id_fkey"
+            columns: ["rewrite_request_id"]
+            isOneToOne: false
+            referencedRelation: "rewrite_requests"
+            referencedColumns: ["rewrite_request_id"]
+          },
+        ]
+      }
+      rewrite_outputs: {
+        Row: {
+          created_at: string
+          eval_result: Json
+          lexicon_version: string
+          model: string
+          output_language: string
+          policy_version: string
+          prompt_version: string
+          provider: string
+          recipient_user_id: string
+          rewrite_request_id: string
+          rewritten_text: string
+          target_locale: string
+        }
+        Insert: {
+          created_at?: string
+          eval_result: Json
+          lexicon_version: string
+          model: string
+          output_language: string
+          policy_version: string
+          prompt_version: string
+          provider: string
+          recipient_user_id: string
+          rewrite_request_id: string
+          rewritten_text: string
+          target_locale: string
+        }
+        Update: {
+          created_at?: string
+          eval_result?: Json
+          lexicon_version?: string
+          model?: string
+          output_language?: string
+          policy_version?: string
+          prompt_version?: string
+          provider?: string
+          recipient_user_id?: string
+          rewrite_request_id?: string
+          rewritten_text?: string
+          target_locale?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "rewrite_outputs_rewrite_request_id_fkey"
+            columns: ["rewrite_request_id"]
+            isOneToOne: false
+            referencedRelation: "rewrite_requests"
+            referencedColumns: ["rewrite_request_id"]
+          },
+        ]
+      }
+      rewrite_provider_batches: {
+        Row: {
+          created_at: string
+          endpoint: string
+          error_file_id: string | null
+          input_file_id: string | null
+          job_count: number
+          last_checked_at: string | null
+          output_file_id: string | null
+          provider: string
+          provider_batch_id: string
+          status: string
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          endpoint?: string
+          error_file_id?: string | null
+          input_file_id?: string | null
+          job_count?: number
+          last_checked_at?: string | null
+          output_file_id?: string | null
+          provider: string
+          provider_batch_id: string
+          status?: string
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          endpoint?: string
+          error_file_id?: string | null
+          input_file_id?: string | null
+          job_count?: number
+          last_checked_at?: string | null
+          output_file_id?: string | null
+          provider?: string
+          provider_batch_id?: string
+          status?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      rewrite_requests: {
+        Row: {
+          classifier_result: Json
+          classifier_version: string
+          context_pack: Json
+          context_pack_version: string
+          created_at: string
+          home_id: string
+          intent: string
+          lane: string
+          original_text: string
+          policy_version: string
+          recipient_preference_snapshot_id: string | null
+          recipient_snapshot_id: string | null
+          recipient_user_id: string
+          rewrite_completed_at: string | null
+          rewrite_request: Json
+          rewrite_request_id: string
+          rewrite_strength: string
+          sender_reveal_at: string | null
+          sender_user_id: string
+          source_locale: string
+          status: string
+          surface: string
+          target_locale: string
+          topics: Json
+          updated_at: string
+        }
+        Insert: {
+          classifier_result: Json
+          classifier_version: string
+          context_pack: Json
+          context_pack_version: string
+          created_at?: string
+          home_id: string
+          intent: string
+          lane: string
+          original_text: string
+          policy_version: string
+          recipient_preference_snapshot_id?: string | null
+          recipient_snapshot_id?: string | null
+          recipient_user_id: string
+          rewrite_completed_at?: string | null
+          rewrite_request: Json
+          rewrite_request_id: string
+          rewrite_strength: string
+          sender_reveal_at?: string | null
+          sender_user_id: string
+          source_locale: string
+          status?: string
+          surface: string
+          target_locale: string
+          topics: Json
+          updated_at?: string
+        }
+        Update: {
+          classifier_result?: Json
+          classifier_version?: string
+          context_pack?: Json
+          context_pack_version?: string
+          created_at?: string
+          home_id?: string
+          intent?: string
+          lane?: string
+          original_text?: string
+          policy_version?: string
+          recipient_preference_snapshot_id?: string | null
+          recipient_snapshot_id?: string | null
+          recipient_user_id?: string
+          rewrite_completed_at?: string | null
+          rewrite_request?: Json
+          rewrite_request_id?: string
+          rewrite_strength?: string
+          sender_reveal_at?: string | null
+          sender_user_id?: string
+          source_locale?: string
+          status?: string
+          surface?: string
+          target_locale?: string
+          topics?: Json
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "rewrite_requests_recipient_preference_snapshot_id_fkey"
+            columns: ["recipient_preference_snapshot_id"]
+            isOneToOne: false
+            referencedRelation: "recipient_preference_snapshots"
+            referencedColumns: ["recipient_preference_snapshot_id"]
+          },
+          {
+            foreignKeyName: "rewrite_requests_recipient_snapshot_id_fkey"
+            columns: ["recipient_snapshot_id"]
+            isOneToOne: false
+            referencedRelation: "recipient_snapshots"
+            referencedColumns: ["recipient_snapshot_id"]
           },
         ]
       }
@@ -2465,6 +2911,7 @@ export type Database = {
           state: Database["public"]["Enums"]["chore_state"]
         }[]
       }
+      _complaint_topics_valid: { Args: { p: Json }; Returns: boolean }
       _current_user_id: { Args: never; Returns: string }
       _ensure_unique_avatar_for_home: {
         Args: { p_home_id: string; p_user_id: string }
@@ -2576,6 +3023,7 @@ export type Database = {
           iso_week_year: number
         }[]
       }
+      _locale_primary: { Args: { p: string }; Returns: string }
       _member_cap_enqueue_request: {
         Args: { p_home_id: string; p_joiner_user_id: string }
         Returns: {
@@ -2607,6 +3055,10 @@ export type Database = {
       _outreach_rate_limit_bucketed: {
         Args: { p_bucket_start: string; p_key: string; p_limit: number }
         Returns: boolean
+      }
+      _preference_report_to_value_map: {
+        Args: { p_report: Json }
+        Returns: Json
       }
       _sha256_hex: { Args: { p_input: string }; Returns: string }
       _share_log_event_internal: {
@@ -2819,6 +3271,139 @@ export type Database = {
           isOneToOne: true
           isSetofReturn: false
         }
+      }
+      claim_rewrite_jobs_by_ids_for_collect_v1: {
+        Args: { p_job_ids: string[] }
+        Returns: {
+          job_id: string
+          provider_batch_id: string
+          recipient_user_id: string
+          rewrite_request_id: string
+          routing_decision: Json
+        }[]
+      }
+      claim_rewrite_jobs_for_batch_collect_v1: {
+        Args: { p_limit?: number }
+        Returns: {
+          job_id: string
+          provider_batch_id: string
+          recipient_user_id: string
+          rewrite_request_id: string
+          routing_decision: Json
+        }[]
+      }
+      claim_rewrite_jobs_for_batch_submit_v1: {
+        Args: { p_limit?: number }
+        Returns: {
+          job_id: string
+          recipient_user_id: string
+          rewrite_request_id: string
+          routing_decision: Json
+        }[]
+      }
+      complaint_build_recipient_snapshots: {
+        Args: {
+          p_home_id: string
+          p_preference_payload: Json
+          p_recipient_user_id: string
+          p_rewrite_request_id: string
+        }
+        Returns: Json
+      }
+      complaint_context_build: {
+        Args: {
+          p_power_mode?: string
+          p_recipient_preference_snapshot_id: string
+          p_recipient_user_id: string
+          p_target_language: string
+          p_topics: string[]
+        }
+        Returns: Json
+      }
+      complaint_fetch_entry_locales: {
+        Args: { p_entry_id: string; p_recipient_user_id: string }
+        Returns: {
+          author_user_id: string
+          home_id: string
+          original_text: string
+          recipient_locale: string
+          recipient_user_id: string
+        }[]
+      }
+      complaint_preference_payload: {
+        Args: {
+          p_recipient_preference_snapshot_id?: string
+          p_recipient_user_id: string
+        }
+        Returns: Json
+      }
+      complaint_preference_payload_from_responses: {
+        Args: { p_recipient_user_id: string }
+        Returns: Json
+      }
+      complaint_rewrite_enqueue: {
+        Args: {
+          p_classifier_result: Json
+          p_classifier_version: string
+          p_context_pack: Json
+          p_context_pack_version: string
+          p_home_id: string
+          p_intent: string
+          p_lane: string
+          p_language_pair: Json
+          p_max_attempts?: number
+          p_original_text: string
+          p_policy_version: string
+          p_preference_payload: Json
+          p_recipient_user_id: string
+          p_rewrite_request: Json
+          p_rewrite_request_id: string
+          p_rewrite_strength: string
+          p_routing_decision: Json
+          p_sender_user_id: string
+          p_source_locale: string
+          p_surface: string
+          p_target_locale: string
+          p_topics: Json
+        }
+        Returns: Json
+      }
+      complaint_rewrite_job_fail_or_requeue: {
+        Args: { p_backoff_seconds?: number; p_error: string; p_job_id: string }
+        Returns: undefined
+      }
+      complaint_rewrite_request_exists: {
+        Args: { p_rewrite_request_id: string }
+        Returns: boolean
+      }
+      complaint_rewrite_request_fetch_v1: {
+        Args: { p_rewrite_request_id: string }
+        Returns: {
+          policy_version: string
+          rewrite_request: Json
+          target_locale: string
+        }[]
+      }
+      complaint_rewrite_route: {
+        Args: { p_lane: string; p_rewrite_strength: string; p_surface: string }
+        Returns: Json
+      }
+      complete_complaint_rewrite_job: {
+        Args: {
+          p_eval_result: Json
+          p_job_id: string
+          p_lexicon_version: string
+          p_model: string
+          p_output_language: string
+          p_policy_version: string
+          p_prompt_version: string
+          p_provider: string
+          p_recipient_user_id: string
+          p_rewrite_request_id: string
+          p_rewritten_text: string
+          p_target_locale: string
+        }
+        Returns: undefined
       }
       expense_plans_generate_due_cycles: { Args: never; Returns: undefined }
       expense_plans_terminate: {
@@ -3140,6 +3725,10 @@ export type Database = {
         Args: { p_recipient_user_id: string }
         Returns: Json
       }
+      fail_complaint_rewrite_job: {
+        Args: { p_error: string; p_job_id: string }
+        Returns: undefined
+      }
       get_plan_status: { Args: never; Returns: Json }
       gratitude_wall_list: {
         Args: {
@@ -3328,6 +3917,14 @@ export type Database = {
         Returns: Json
       }
       locale_base: { Args: { p_locale: string }; Returns: string }
+      map_instruction: {
+        Args: { p_id: string; p_value: string }
+        Returns: string
+      }
+      mark_rewrite_jobs_batch_submitted_v1: {
+        Args: { p_job_ids: string[]; p_provider_batch_id: string }
+        Returns: undefined
+      }
       member_cap_owner_dismiss: {
         Args: { p_home_id: string }
         Returns: undefined
@@ -3603,6 +4200,68 @@ export type Database = {
         }[]
       }
       profiles_request_deactivation: { Args: never; Returns: Json }
+      requeue_jobs_after_submit_failure: {
+        Args: {
+          p_backoff_seconds?: number
+          p_error: string
+          p_job_ids: string[]
+        }
+        Returns: undefined
+      }
+      rewrite_batch_list_pending_v1: {
+        Args: { p_limit?: number }
+        Returns: {
+          endpoint: string
+          error_file_id: string
+          input_file_id: string
+          output_file_id: string
+          provider_batch_id: string
+          status: string
+        }[]
+      }
+      rewrite_batch_register_v1: {
+        Args: {
+          p_endpoint?: string
+          p_input_file_id: string
+          p_job_count: number
+          p_provider_batch_id: string
+        }
+        Returns: undefined
+      }
+      rewrite_batch_update_v1: {
+        Args: {
+          p_error_file_id?: string
+          p_output_file_id?: string
+          p_provider_batch_id: string
+          p_status: string
+        }
+        Returns: undefined
+      }
+      rewrite_job_fetch_v1: {
+        Args: { p_job_id: string }
+        Returns: {
+          job_id: string
+          provider_batch_id: string
+          recipient_user_id: string
+          rewrite_request_id: string
+          routing_decision: Json
+          status: string
+        }[]
+      }
+      rewrite_jobs_requeue_by_provider_batch_v1: {
+        Args: {
+          p_backoff_seconds?: number
+          p_limit?: number
+          p_provider_batch_id: string
+          p_reason?: string
+        }
+        Returns: {
+          job_id: string
+          new_status: string
+          not_before_at: string
+          prev_status: string
+        }[]
+      }
       share_log_event: {
         Args: { p_channel: string; p_feature: string; p_home_id: string }
         Returns: undefined

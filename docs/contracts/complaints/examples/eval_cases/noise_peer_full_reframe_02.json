@@ -1,0 +1,14 @@
+{
+  "case_id": "noise_peer_full_reframe_02",
+  "topic": "noise",
+  "power_mode": "peer",
+  "rewrite_strength": "full_reframe",
+  "source_locale": "en",
+  "target_locale": "en",
+  "original_text": "Your nightly hammering makes me feel like I live in a workshop, cut it out",
+  "expected_intent": "concern",
+  "expected_lexicon_violations": [
+    "personal_attack",
+    "blame"
+  ]
+}

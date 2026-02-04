@@ -1,8 +1,17 @@
 // supabase/functions/revenue_webhook/parse.ts
 export type RcPayload = Record<string, unknown>;
 
-export type Store = "app_store" | "play_store" | "stripe" | "promotional" | "unknown";
-export type SubscriptionStatus = "active" | "cancelled" | "expired" | "inactive";
+export type Store =
+  | "app_store"
+  | "play_store"
+  | "stripe"
+  | "promotional"
+  | "unknown";
+export type SubscriptionStatus =
+  | "active"
+  | "cancelled"
+  | "expired"
+  | "inactive";
 
 export type ParsedWebhook = {
   payload: RcPayload;
@@ -93,19 +102,37 @@ export const storeFromPayload = (
   const normalized = raw.toLowerCase();
 
   // ✅ Treat RevenueCat sandbox transport as a real store mapping (do NOT add enum value)
-  if (normalized === "test_store") return { store: "play_store", isTestStore: true, normalizedRaw: normalized };
+  if (normalized === "test_store") {
+    return {
+      store: "play_store",
+      isTestStore: true,
+      normalizedRaw: normalized,
+    };
+  }
 
   if (normalized.includes("app_store") || normalized === "apple") {
-    return { store: "app_store", isTestStore: false, normalizedRaw: normalized };
+    return {
+      store: "app_store",
+      isTestStore: false,
+      normalizedRaw: normalized,
+    };
   }
   if (normalized.includes("play_store") || normalized === "google") {
-    return { store: "play_store", isTestStore: false, normalizedRaw: normalized };
+    return {
+      store: "play_store",
+      isTestStore: false,
+      normalizedRaw: normalized,
+    };
   }
   if (normalized.includes("stripe")) {
     return { store: "stripe", isTestStore: false, normalizedRaw: normalized };
   }
   if (normalized.includes("promotional")) {
-    return { store: "promotional", isTestStore: false, normalizedRaw: normalized };
+    return {
+      store: "promotional",
+      isTestStore: false,
+      normalizedRaw: normalized,
+    };
   }
 
   return { store: "unknown", isTestStore: false, normalizedRaw: normalized };
@@ -169,13 +196,21 @@ const normalizeEntitlementIds = (
   const eventEntitlementIds = asStringArray(event?.entitlement_ids as unknown);
   if (eventEntitlementIds.length > 0) candidateLists.push(eventEntitlementIds);
 
-  const payloadEntitlementIds = asStringArray(payload?.entitlement_ids as unknown);
-  if (payloadEntitlementIds.length > 0) candidateLists.push(payloadEntitlementIds);
+  const payloadEntitlementIds = asStringArray(
+    payload?.entitlement_ids as unknown,
+  );
+  if (payloadEntitlementIds.length > 0) {
+    candidateLists.push(payloadEntitlementIds);
+  }
 
-  const eventSingle = typeof event?.entitlement_id === "string" ? [event.entitlement_id] : [];
+  const eventSingle = typeof event?.entitlement_id === "string"
+    ? [event.entitlement_id]
+    : [];
   if (eventSingle.length > 0) candidateLists.push(eventSingle);
 
-  const payloadSingle = typeof payload?.entitlement_id === "string" ? [payload.entitlement_id] : [];
+  const payloadSingle = typeof payload?.entitlement_id === "string"
+    ? [payload.entitlement_id]
+    : [];
   if (payloadSingle.length > 0) candidateLists.push(payloadSingle);
 
   const entitlementIds = uniquePreserveOrder(candidateLists.flat());
@@ -186,7 +221,12 @@ const extractSubscriberAttrValue = (
   subscriberAttributes: Record<string, unknown> | undefined,
   key: string,
 ): unknown => {
-  const raw = subscriberAttributes?.[key] as Record<string, unknown> | string | number | null | undefined;
+  const raw = subscriberAttributes?.[key] as
+    | Record<string, unknown>
+    | string
+    | number
+    | null
+    | undefined;
   if (typeof raw === "object" && raw !== null && "value" in raw) {
     return (raw as { value?: unknown }).value;
   }
@@ -200,26 +240,30 @@ const extractHomeId = (
   const subscriberAttributes = (event?.subscriber_attributes ??
     payload?.subscriber_attributes) as Record<string, unknown> | undefined;
 
-  const homeIdValue = extractSubscriberAttrValue(subscriberAttributes, "home_id");
+  const homeIdValue = extractSubscriberAttrValue(
+    subscriberAttributes,
+    "home_id",
+  );
   return asUuid(homeIdValue);
 };
 
 export const parseWebhookPayload = (payload: RcPayload): ParsedWebhook => {
   const event = payload?.event as Record<string, unknown> | undefined;
-  const transaction = payload?.transaction as Record<string, unknown> | undefined;
+  const transaction = payload?.transaction as
+    | Record<string, unknown>
+    | undefined;
 
   const rcEventId = typeof event?.id === "string" ? event.id : null;
 
-  const eventType =
-    (event?.type as string | undefined) ??
+  const eventType = (event?.type as string | undefined) ??
     (payload?.event_type as string | undefined) ??
     (payload?.type as string | undefined) ??
     "";
 
-  const { status, unknown: unknownEventType, normalized: eventTypeNorm } = statusFromEvent(eventType);
+  const { status, unknown: unknownEventType, normalized: eventTypeNorm } =
+    statusFromEvent(eventType);
 
-  const rcAppUserId =
-    (event?.app_user_id as string | undefined) ??
+  const rcAppUserId = (event?.app_user_id as string | undefined) ??
     (payload?.app_user_id as string | undefined) ??
     null;
 
@@ -227,36 +271,39 @@ export const parseWebhookPayload = (payload: RcPayload): ParsedWebhook => {
     payload?.subscriber_attributes) as Record<string, unknown> | undefined;
 
   // SAFETY: Only accept subscriber_attributes.user_id
-  const userIdValue = extractSubscriberAttrValue(subscriberAttributes, "user_id");
+  const userIdValue = extractSubscriberAttrValue(
+    subscriberAttributes,
+    "user_id",
+  );
   const rcUserId = asUuid(userIdValue);
 
-  const aliases = asStringArray((event?.aliases as unknown) ?? (payload?.aliases as unknown) ?? []);
+  const aliases = asStringArray(
+    (event?.aliases as unknown) ?? (payload?.aliases as unknown) ?? [],
+  );
 
   const { entitlementIds, primary } = normalizeEntitlementIds(payload, event);
 
-  const productId =
-    (event?.product_id as string | undefined) ??
+  const productId = (event?.product_id as string | undefined) ??
     (payload?.product_id as string | undefined) ??
     (transaction?.product_id as string | undefined) ??
     null;
 
-  const storeRaw =
-    (event?.store as string | undefined) ??
+  const storeRaw = (event?.store as string | undefined) ??
     (payload?.store as string | undefined) ??
     (payload?.platform as string | undefined) ??
     null;
 
   const storeParsed = storeFromPayload(storeRaw);
 
-  const environmentRaw =
-    (event?.environment as string | undefined) ??
+  const environmentRaw = (event?.environment as string | undefined) ??
     (payload?.environment as string | undefined) ??
     null;
 
   const environment = (environmentRaw ?? "unknown").toLowerCase().trim();
 
   const currentPeriodEndAt = parseDate(
-    event?.expiration_at_ms ?? payload?.expiration_at_ms ?? event?.expiration_at ?? payload?.expiration_at,
+    event?.expiration_at_ms ?? payload?.expiration_at_ms ??
+      event?.expiration_at ?? payload?.expiration_at,
   );
 
   const originalPurchaseAt = parseDate(
@@ -267,11 +314,11 @@ export const parseWebhookPayload = (payload: RcPayload): ParsedWebhook => {
   );
 
   const lastPurchaseAt = parseDate(
-    event?.purchased_at_ms ?? payload?.purchased_at_ms ?? event?.purchased_at ?? payload?.purchased_at,
+    event?.purchased_at_ms ?? payload?.purchased_at_ms ?? event?.purchased_at ??
+      payload?.purchased_at,
   );
 
-  const latestTransactionId =
-    (event?.transaction_id as string | undefined) ??
+  const latestTransactionId = (event?.transaction_id as string | undefined) ??
     (event?.latest_transaction_id as string | undefined) ??
     (payload?.transaction_id as string | undefined) ??
     (payload?.latest_transaction_id as string | undefined) ??
@@ -280,11 +327,12 @@ export const parseWebhookPayload = (payload: RcPayload): ParsedWebhook => {
 
   const originalTransactionId =
     (event?.original_transaction_id as string | undefined) ??
-    (payload?.original_transaction_id as string | undefined) ??
-    null;
+      (payload?.original_transaction_id as string | undefined) ??
+      null;
 
   const eventTimestamp = parseDate(
-    event?.event_timestamp_ms ?? payload?.event_timestamp_ms ?? event?.sent_at_ms ?? payload?.sent_at_ms,
+    event?.event_timestamp_ms ?? payload?.event_timestamp_ms ??
+      event?.sent_at_ms ?? payload?.sent_at_ms,
   );
 
   const homeId = extractHomeId(payload, event);
@@ -335,7 +383,9 @@ export const parseWebhookPayload = (payload: RcPayload): ParsedWebhook => {
  * 3) original_transaction_id + event_timestamp
  * 4) sha256 fallback over stable subset
  */
-export const computeIdempotencyKey = async (p: ParsedWebhook): Promise<string> => {
+export const computeIdempotencyKey = async (
+  p: ParsedWebhook,
+): Promise<string> => {
   const env = p.environment;
 
   if (p.rcEventId) return `rc_event_id:${p.rcEventId}`;
@@ -359,7 +409,10 @@ export const computeIdempotencyKey = async (p: ParsedWebhook): Promise<string> =
     eventTimestamp: p.eventTimestamp ?? null,
   });
 
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(stable));
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(stable),
+  );
   const b64 = btoa(String.fromCharCode(...new Uint8Array(digest)))
     .replaceAll("+", "-")
     .replaceAll("/", "_")

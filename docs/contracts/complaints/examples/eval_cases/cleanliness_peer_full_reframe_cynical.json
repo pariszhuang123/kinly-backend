@@ -1,0 +1,12 @@
+{
+  "case_id": "clean-peer-fr-cynical-1",
+  "topic": "cleanliness",
+  "power_mode": "peer",
+  "rewrite_strength": "full_reframe",
+  "source_locale": "en",
+  "target_locale": "en",
+  "original_text": "Love how the sink is your personal art project of dirty dishes. Must be modern.",
+  "expected_intent": "concern",
+  "expected_lexicon_violations": ["sarcasm_warn"],
+  "notes": "Cynical sarcasm without profanity; should soften to clear request."
+}
