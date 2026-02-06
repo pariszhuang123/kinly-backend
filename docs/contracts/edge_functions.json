@@ -6,6 +6,9 @@
     "complaint_orchestrator": {
       "path": "supabase/functions/complaint_orchestrator"
     },
+    "complaint_trigger_cron_runner": {
+      "path": "supabase/functions/complaint_trigger_cron_runner"
+    },
     "notifications_daily": {
       "path": "supabase/functions/notifications_daily"
     },

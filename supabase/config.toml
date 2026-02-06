@@ -26,3 +26,9 @@ pool_mode = "transaction"
 
 [functions.notifications_daily]
 verify_jwt = false
+
+[functions.complaint_trigger_cron_runner]
+verify_jwt = false
+
+[functions.complaint_orchestrator]
+verify_jwt = false

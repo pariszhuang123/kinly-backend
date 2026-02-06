@@ -3,7 +3,7 @@ SET search_path = pgtap, public, auth, extensions;
 BEGIN;
 SET ROLE postgres;
 
-SELECT plan(14);
+SELECT plan(17);
 
 CREATE TEMP TABLE tmp_users (
   label   text PRIMARY KEY,
@@ -61,6 +61,7 @@ INSERT INTO tmp_users (label, user_id, email) VALUES
   ('creator',    '30000000-0000-4000-8000-000000000101', 'creator-moodv2@example.com'),
   ('member_one', '30000000-0000-4000-8000-000000000102', 'member1-moodv2@example.com'),
   ('member_two', '30000000-0000-4000-8000-000000000103', 'member2-moodv2@example.com'),
+  ('member_three','30000000-0000-4000-8000-000000000105','member3-moodv2@example.com'),
   ('outsider',   '30000000-0000-4000-8000-000000000104', 'outsider-moodv2@example.com');
 
 INSERT INTO auth.users (id, instance_id, email, raw_user_meta_data, raw_app_meta_data, aud, role, encrypted_password)
@@ -93,6 +94,29 @@ WHERE user_id IN (SELECT user_id FROM tmp_users);
 DELETE FROM public.gratitude_wall_personal_items
 WHERE recipient_user_id IN (SELECT user_id FROM tmp_users)
    OR author_user_id IN (SELECT user_id FROM tmp_users);
+
+DO $$
+BEGIN
+  -- Ensure complaint_rewrite_triggers exists for negative mention path
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.tables
+    WHERE table_schema = 'public'
+      AND table_name = 'complaint_rewrite_triggers'
+  ) THEN
+    CREATE TABLE public.complaint_rewrite_triggers (
+      entry_id uuid PRIMARY KEY,
+      home_id uuid NOT NULL,
+      author_user_id uuid NOT NULL,
+      recipient_user_id uuid NOT NULL,
+      created_at timestamptz NOT NULL DEFAULT now()
+    );
+  END IF;
+
+  DELETE FROM public.complaint_rewrite_triggers
+  WHERE author_user_id IN (SELECT user_id FROM tmp_users)
+     OR recipient_user_id IN (SELECT user_id FROM tmp_users);
+END $$;
 
 DELETE FROM public.gratitude_wall_mentions
 WHERE mentioned_user_id IN (SELECT user_id FROM tmp_users);
@@ -131,6 +155,11 @@ SELECT public.homes_join(current_setting('app.test.invite_code_v2', false)::text
 
 -- member_two joins
 SELECT set_config('request.jwt.claim.sub', (SELECT user_id::text FROM tmp_users WHERE label = 'member_two'), true);
+SELECT set_config('request.jwt.claim.role', 'authenticated', true);
+SELECT public.homes_join(current_setting('app.test.invite_code_v2', false)::text);
+
+-- member_three joins (used for negative mention path)
+SELECT set_config('request.jwt.claim.sub', (SELECT user_id::text FROM tmp_users WHERE label = 'member_three'), true);
 SELECT set_config('request.jwt.claim.role', 'authenticated', true);
 SELECT public.homes_join(current_setting('app.test.invite_code_v2', false)::text);
 
@@ -320,6 +349,73 @@ SELECT ok(
   'Showcase stats report counts for received mentions (exclude self)'
 )
 FROM stats;
+
+-- member_three: negative mood with one mention creates personal item and rewrite trigger
+INSERT INTO public.preference_taxonomy (preference_id, is_active)
+VALUES ('test_pref', TRUE)
+ON CONFLICT (preference_id) DO NOTHING;
+
+INSERT INTO public.preference_responses (user_id, preference_id, option_index)
+VALUES ((SELECT user_id FROM tmp_users WHERE label = 'member_one'), 'test_pref', 0)
+ON CONFLICT (user_id, preference_id) DO NOTHING;
+
+SELECT set_config('request.jwt.claim.sub', (SELECT user_id::text FROM tmp_users WHERE label = 'member_three'), true);
+SELECT set_config('request.jwt.claim.role', 'authenticated', true);
+
+CREATE TEMP TABLE tmp_member_three_negative_submit AS
+SELECT public.mood_submit_v2(
+  (SELECT home_id FROM tmp_homes WHERE label = 'primary'),
+  'thunderstorm',
+  'Really stuck because the dishes piled up. Please help next time.',
+  false,
+  ARRAY[(SELECT user_id FROM tmp_users WHERE label = 'member_one')]::uuid[]
+) AS payload;
+
+WITH res AS (
+  SELECT payload
+  FROM tmp_member_three_negative_submit
+)
+SELECT ok(
+  (payload->>'mention_count')::int = 1
+  AND (payload->>'public_post_id') IS NULL
+  AND (payload->>'rewrite_recipient_id')::uuid = (SELECT user_id FROM tmp_users WHERE label = 'member_one'),
+  'Negative mood with one mention returns mention_count=1 and rewrite recipient'
+)
+FROM res;
+
+WITH res AS (
+  SELECT payload
+  FROM tmp_member_three_negative_submit
+)
+SELECT ok(
+  EXISTS (
+    SELECT 1
+    FROM public.gratitude_wall_personal_items pi
+    WHERE pi.recipient_user_id = (SELECT user_id FROM tmp_users WHERE label = 'member_one')
+      AND pi.source_entry_id = (
+        SELECT (payload->>'entry_id')::uuid FROM res
+      )
+  ),
+  'Negative mention creates personal inbox item'
+)
+FROM res;
+
+WITH res AS (
+  SELECT payload
+  FROM tmp_member_three_negative_submit
+)
+SELECT ok(
+  EXISTS (
+    SELECT 1
+    FROM public.complaint_rewrite_triggers t
+    WHERE t.entry_id = (
+      SELECT (payload->>'entry_id')::uuid FROM res
+    )
+      AND t.recipient_user_id = (SELECT user_id FROM tmp_users WHERE label = 'member_one')
+  ),
+  'Negative mention with prefs enqueues complaint rewrite trigger'
+)
+FROM res;
 
 SELECT * FROM finish();
 

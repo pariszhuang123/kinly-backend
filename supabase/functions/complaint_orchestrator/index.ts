@@ -1,23 +1,19 @@
 // supabase/functions/complaint_orchestrator/index.ts
 // Orchestrator edge (RPC-first writes only)
 //
-// FULL adjusted version (calls complaint_classifier as a service)
+// Adjusted to work with trigger queue Pattern B:
+// - Runner claims jobs via complaint_trigger_pop_pending() which sets status=processing and request_id=CLAIM_ID
+// - Runner calls orchestrator with trigger_request_id = CLAIM_ID
+// - Orchestrator MUST use trigger_request_id for marker RPCs (ownership enforced)
 //
-// Key changes vs your last orchestrator draft:
-// - Uses classifier as a service (no OpenAI code inside orchestrator)
-// - Fixes body-size cap to be real BYTES (TextEncoder), not string length
-// - Fixes rpcSafe to actually observe Supabase RPC errors (supabase.rpc doesn't throw)
-// - Preserves meaningful HTTP statuses (e.g., 504 stays 504); still returns retryable flag
-// - Ensures terminal-state marking is best-effort + safer final net
-//
-// Required secrets/env:
+// Required env:
 // - SUPABASE_URL
 // - SUPABASE_SERVICE_ROLE_KEY
-// - ORCHESTRATOR_SHARED_SECRET           (for callers -> orchestrator)
-// - CLASSIFIER_FUNCTION_URL              (e.g. https://<project>.functions.supabase.co/complaint_classifier)
-// - CLASSIFIER_SHARED_SECRET             (must match complaint_classifier's CLASSIFIER_SHARED_SECRET)
+// - ORCHESTRATOR_SHARED_SECRET
+// - CLASSIFIER_FUNCTION_URL
+// - CLASSIFIER_SHARED_SECRET
 //
-// Optional:
+// Optional env:
 // - CLASSIFIER_TIMEOUT_MS (default 8000)
 
 import {
@@ -70,14 +66,15 @@ type Input = {
   sender_user_id: string; // uuid (validated against entryData)
   recipient_user_id: string; // uuid (validated against entryData if returned)
   surface: Surface;
+  trigger_request_id: string; // uuid (MUST match complaint_rewrite_triggers.request_id from pop_pending)
 };
 
 /* ---------------- Allow-lists + caps ---------------- */
 
 const ALLOWED_SURFACES = new Set<Surface>(SURFACES);
 
-const MAX_BODY_BYTES = 64_000; // protect edge + avoid abuse
-const MAX_ORIGINAL_TEXT_CHARS = 4_000; // protect cost + prompt bombing
+const MAX_BODY_BYTES = 64_000;
+const MAX_ORIGINAL_TEXT_CHARS = 4_000;
 
 const DEFAULT_CLASSIFIER_TIMEOUT_MS = 8_000;
 
@@ -98,53 +95,51 @@ class ApiError extends Error {
 
 if (import.meta.main) {
   Deno.serve(async (req) => {
-    const request_id = crypto.randomUUID();
+    // This is an HTTP request id for logging/response only (NOT used for trigger ownership).
+    const http_request_id = crypto.randomUUID();
+
     const { supabase, errResp } = supabaseClient();
     if (!supabase) return errResp;
 
     let entry_id: string | null = null;
+    let trigger_request_id: string | null = null;
     let terminalMarked = false;
 
     try {
       // 1) Internal guard FIRST
       requireInternalSecret(req);
 
-      // 2) Parse body safely (real byte cap)
+      // 2) Parse body safely (byte cap)
       const body = await safeJson(req, MAX_BODY_BYTES);
 
       // 3) Validate input
       const input = validate(body);
       entry_id = input.entry_id;
+      trigger_request_id = input.trigger_request_id;
 
-      // Mark trigger processing early (best-effort)
-      await rpcSafe(supabase, "complaint_trigger_mark_processing", {
-        p_entry_id: input.entry_id,
-        p_request_id: request_id,
-      });
-
-      const rewrite_request_id = input.entry_id; // Option 1: request_id == entry_id
+      const rewrite_request_id = input.entry_id; // Option: rewrite_request_id == entry_id
 
       // 0) Optional fast short-circuit
       const exists = await rpcBool(
         supabase,
         "complaint_rewrite_request_exists",
-        {
-          p_rewrite_request_id: rewrite_request_id,
-        },
+        { p_rewrite_request_id: rewrite_request_id },
       );
+
       if (exists === true) {
         await rpcSafe(supabase, "complaint_trigger_mark_completed", {
           p_entry_id: input.entry_id,
+          p_request_id: input.trigger_request_id,
           p_processed_at: new Date().toISOString(),
           p_note: "already_enqueued",
-          p_request_id: request_id,
         });
         terminalMarked = true;
+
         return json({
           ok: true,
           already_enqueued: true,
           rewrite_request_id,
-          request_id,
+          http_request_id,
         }, 200);
       }
 
@@ -157,6 +152,7 @@ if (import.meta.main) {
           p_recipient_user_id: input.recipient_user_id,
         },
       );
+
       if (!entryData) {
         throw new ApiError(
           404,
@@ -207,32 +203,38 @@ if (import.meta.main) {
 
       // Original text
       const original_text = String(entryData.original_text ?? "").trim();
+
       if (!original_text) {
         await rpcSafe(supabase, "complaint_trigger_mark_canceled", {
           p_entry_id: input.entry_id,
+          p_request_id: input.trigger_request_id,
           p_reason: "no_text_to_rewrite",
-          p_request_id: request_id,
+          p_processed_at: new Date().toISOString(),
         });
         terminalMarked = true;
+
         return json({
           ok: true,
           skipped: "no_text_to_rewrite",
           rewrite_request_id,
-          request_id,
+          http_request_id,
         }, 200);
       }
+
       if (original_text.length > MAX_ORIGINAL_TEXT_CHARS) {
         await rpcSafe(supabase, "complaint_trigger_mark_canceled", {
           p_entry_id: input.entry_id,
+          p_request_id: input.trigger_request_id,
           p_reason: `text_too_long_${MAX_ORIGINAL_TEXT_CHARS}`,
-          p_request_id: request_id,
+          p_processed_at: new Date().toISOString(),
         });
         terminalMarked = true;
+
         return json({
           ok: true,
           skipped: "text_too_long",
           rewrite_request_id,
-          request_id,
+          http_request_id,
         }, 413);
       }
 
@@ -252,9 +254,7 @@ if (import.meta.main) {
       const normalizedPrefMap = normalizePreferencePayload(prefPayload);
       const snapshotPreferences = buildSnapshotPreferences(normalizedPrefMap);
 
-      const snapshotPayload = {
-        preferences: snapshotPreferences,
-      };
+      const snapshotPayload = { preferences: snapshotPreferences };
 
       const snapData: SnapshotRow | null = await rpcJson<SnapshotRow>(
         supabase,
@@ -273,6 +273,7 @@ if (import.meta.main) {
       const recipient_preference_snapshot_id = String(
         snapData?.recipient_preference_snapshot_id ?? "",
       ).trim();
+
       if (
         !isUuid(recipient_snapshot_id) ||
         !isUuid(recipient_preference_snapshot_id)
@@ -285,7 +286,7 @@ if (import.meta.main) {
         );
       }
 
-      // 4) Classifier (CALL AS A SERVICE)
+      // 4) Classifier service
       const classifier_result = await callClassifierService({
         classifierUrl: env("CLASSIFIER_FUNCTION_URL"),
         classifierSecret: env("CLASSIFIER_SHARED_SECRET"),
@@ -324,11 +325,16 @@ if (import.meta.main) {
       // 7) Routing (RPC)
       const routing_decision: RoutingDecision | null = await rpcJson<
         RoutingDecision
-      >(supabase, "complaint_rewrite_route", {
-        p_surface: input.surface,
-        p_lane: lane,
-        p_rewrite_strength: classifier_result.rewrite_strength,
-      });
+      >(
+        supabase,
+        "complaint_rewrite_route",
+        {
+          p_surface: input.surface,
+          p_lane: lane,
+          p_rewrite_strength: classifier_result.rewrite_strength,
+        },
+      );
+
       if (!routing_decision) {
         throw new ApiError(
           500,
@@ -338,7 +344,7 @@ if (import.meta.main) {
         );
       }
 
-      // 8) Policy pack (simple)
+      // 8) Policy pack
       const policy = {
         tone: classifier_result.rewrite_strength === "full_reframe"
           ? "gentle"
@@ -348,7 +354,7 @@ if (import.meta.main) {
         rewrite_strength: classifier_result.rewrite_strength,
       };
 
-      // 9) Rewrite request blob (for enqueue storage/logging)
+      // 9) Request blob
       const rewrite_request = {
         rewrite_request_id,
         entry_id: input.entry_id,
@@ -371,99 +377,119 @@ if (import.meta.main) {
         classifier_version: classifier_result.classifier_version ?? "v1",
         context_pack_version: "v1.1",
         policy_version: "v1",
-        request_id,
+        http_request_id,
+        trigger_request_id: input.trigger_request_id,
         created_at: new Date().toISOString(),
       };
 
       const maxAttempts = clampInt(routing_decision?.max_retries, 0, 10, 2);
 
-      // 10) Enqueue (RPC; idempotent)
-      const enqueueData = await rpcJson(supabase, "complaint_rewrite_enqueue", {
-        p_rewrite_request_id: rewrite_request_id,
-        p_home_id: input.home_id,
-        p_sender_user_id: input.sender_user_id,
-        p_recipient_user_id: input.recipient_user_id,
-        p_recipient_snapshot_id: recipient_snapshot_id,
-        p_recipient_preference_snapshot_id: recipient_preference_snapshot_id,
-        p_surface: input.surface,
-        p_original_text: original_text,
-        p_rewrite_request: rewrite_request,
-        p_classifier_result: classifier_result,
-        p_context_pack: context_pack,
-        p_source_locale: source_locale,
-        p_target_locale: target_locale,
-        p_lane: lane,
-        p_topics: classifier_result.topics,
-        p_intent: classifier_result.intent,
-        p_rewrite_strength: classifier_result.rewrite_strength,
-        p_classifier_version: classifier_result.classifier_version ?? "v1",
-        p_context_pack_version: "v1.1",
-        p_policy_version: "v1",
-        p_routing_decision: routing_decision,
-        p_language_pair: { from: source_locale, to: target_locale },
-        p_max_attempts: maxAttempts,
-        p_request_id: request_id,
-      });
+      // 10) Enqueue rewrite work (RPC; idempotent)
+      const enqueueData = await rpcJson(
+        supabase,
+        "complaint_rewrite_enqueue",
+        {
+          p_rewrite_request_id: rewrite_request_id,
+          p_home_id: input.home_id,
+          p_sender_user_id: input.sender_user_id,
+          p_recipient_user_id: input.recipient_user_id,
+          p_recipient_snapshot_id: recipient_snapshot_id,
+          p_recipient_preference_snapshot_id: recipient_preference_snapshot_id,
+          p_surface: input.surface,
+          p_original_text: original_text,
+          p_rewrite_request: rewrite_request,
+          p_classifier_result: classifier_result,
+          p_context_pack: context_pack,
+          p_source_locale: source_locale,
+          p_target_locale: target_locale,
+          p_lane: lane,
+          p_topics: classifier_result.topics,
+          p_intent: classifier_result.intent,
+          p_rewrite_strength: classifier_result.rewrite_strength,
+          p_classifier_version: classifier_result.classifier_version ?? "v1",
+          p_context_pack_version: "v1.1",
+          p_policy_version: "v1",
+          p_routing_decision: routing_decision,
+          p_language_pair: { from: source_locale, to: target_locale },
+          p_max_attempts: maxAttempts,
+          p_request_id: http_request_id,
+        },
+      );
 
-      // Mark completed (= queued)
+      // Mark trigger completed (IMPORTANT: use trigger_request_id)
       await rpcSafe(supabase, "complaint_trigger_mark_completed", {
         p_entry_id: input.entry_id,
+        p_request_id: input.trigger_request_id,
         p_processed_at: new Date().toISOString(),
         p_note: "enqueued",
-        p_request_id: request_id,
       });
       terminalMarked = true;
 
-      return json(
-        {
-          ok: true,
-          request_id,
-          rewrite_request_id,
-          recipient_snapshot_id,
-          recipient_preference_snapshot_id,
-          routing_decision,
-          enqueue: enqueueData ?? null,
-        },
-        200,
-      );
+      return json({
+        ok: true,
+        http_request_id,
+        rewrite_request_id,
+        recipient_snapshot_id,
+        recipient_preference_snapshot_id,
+        routing_decision,
+        enqueue: enqueueData ?? null,
+      }, 200);
     } catch (e) {
       const { msg, status, retryable, code } = normalizeCatch(e);
 
-      // Best-effort terminal marking
-      if (entry_id && !terminalMarked) {
+      // Best-effort terminal marking (IMPORTANT: use trigger_request_id)
+      if (entry_id && trigger_request_id && !terminalMarked) {
         if (retryable) {
-          await rpcSafe(supabase, "complaint_trigger_mark_failed", {
+          await rpcSafe(supabase, "complaint_trigger_mark_retry", {
             p_entry_id: entry_id,
+            p_request_id: trigger_request_id,
             p_error: msg.slice(0, 512),
-            p_backoff_seconds: 600,
-            p_request_id: request_id,
+            p_retry_after: "10 minutes",
+            p_note: "orchestrator_retryable_error",
           });
         } else {
-          await rpcSafe(supabase, "complaint_trigger_mark_canceled", {
-            p_entry_id: entry_id,
-            p_reason: msg.slice(0, 256),
-            p_request_id: request_id,
-          });
+          // non-retryable: treat as terminal failure (or cancel if it's clearly "bad input")
+          const cancel = status >= 400 && status < 500;
+          if (cancel) {
+            await rpcSafe(supabase, "complaint_trigger_mark_canceled", {
+              p_entry_id: entry_id,
+              p_request_id: trigger_request_id,
+              p_reason: msg.slice(0, 256),
+              p_processed_at: new Date().toISOString(),
+            });
+          } else {
+            await rpcSafe(supabase, "complaint_trigger_mark_failed_terminal", {
+              p_entry_id: entry_id,
+              p_request_id: trigger_request_id,
+              p_error: msg.slice(0, 512),
+              p_processed_at: new Date().toISOString(),
+              p_note: "orchestrator_terminal_failure",
+            });
+          }
         }
       }
 
-      // Preserve meaningful status where possible; still provide retryable flag.
-      // For retryable upstream-ish issues, prefer 502 unless we already have 504/429 etc.
       const respStatus = retryable ? preferRetryableStatus(status) : status;
 
       return json(
-        { ok: false, request_id, error: msg, code: code ?? null, retryable },
+        {
+          ok: false,
+          http_request_id,
+          error: msg,
+          code: code ?? null,
+          retryable,
+        },
         respStatus,
       );
     } finally {
-      // Final safety net: if we got entry_id and still didn't terminal mark,
-      // mark failed with a generic backoff so the system doesn't hang.
-      if (entry_id && !terminalMarked) {
-        await rpcSafe(supabase, "complaint_trigger_mark_failed", {
+      // Final net: if we started but failed to terminal mark, requeue (so it doesn't stick in processing forever)
+      if (entry_id && trigger_request_id && !terminalMarked) {
+        await rpcSafe(supabase, "complaint_trigger_mark_retry", {
           p_entry_id: entry_id,
+          p_request_id: trigger_request_id,
           p_error: "orchestrator_exit_without_terminal_state",
-          p_backoff_seconds: 600,
-          p_request_id: request_id,
+          p_retry_after: "10 minutes",
+          p_note: "orchestrator_final_safety_net",
         });
       }
     }
@@ -562,6 +588,7 @@ function validate(input: unknown): Input {
     sender_user_id: reqStr("sender_user_id"),
     recipient_user_id: reqStr("recipient_user_id"),
     surface: reqStr("surface"),
+    trigger_request_id: reqStr("trigger_request_id"),
   };
 
   if (!isUuid(out.entry_id)) {
@@ -582,6 +609,14 @@ function validate(input: unknown): Input {
     throw new ApiError(
       400,
       "recipient_user_id_invalid_uuid",
+      false,
+      "invalid_uuid",
+    );
+  }
+  if (!isUuid(out.trigger_request_id)) {
+    throw new ApiError(
+      400,
+      "trigger_request_id_invalid_uuid",
       false,
       "invalid_uuid",
     );
@@ -641,8 +676,7 @@ async function rpcBool(
   return Boolean(data);
 }
 
-// IMPORTANT: supabase.rpc does NOT throw; it returns { data, error }.
-// So we must check error here. We intentionally swallow errors (best-effort).
+// Best-effort
 async function rpcSafe(
   supabase: SupabaseClient,
   fn: string,
@@ -651,8 +685,7 @@ async function rpcSafe(
   try {
     const { error } = await supabase.rpc(fn, args);
     if (error) {
-      // swallow; best-effort only
-      // optionally: console.warn(`${fn} best-effort failed:`, error.message);
+      // swallow
     }
   } catch {
     // swallow
@@ -690,16 +723,14 @@ function normalizePreferencePayload(
 function buildSnapshotPreferences(
   normalizedPrefMap: Record<string, string>,
 ): Record<string, string> {
-  // Always forward communication prefs when present, even if others are absent.
   const communication_core = [
     "communication_directness",
     "communication_channel",
     "conflict_resolution_style",
-  ]
-    .reduce<Record<string, string>>((acc, key) => {
-      if (key in normalizedPrefMap) acc[key] = normalizedPrefMap[key];
-      return acc;
-    }, {});
+  ].reduce<Record<string, string>>((acc, key) => {
+    if (key in normalizedPrefMap) acc[key] = normalizedPrefMap[key];
+    return acc;
+  }, {});
 
   return { ...normalizedPrefMap, ...communication_core };
 }
@@ -710,7 +741,6 @@ function normalizeLocale(v: unknown): string | null {
   if (typeof v !== "string") return null;
   const s = v.trim();
   if (!s) return null;
-  // allow "en", "en-nz", "zh-hant" etc (loose)
   if (!/^[a-zA-Z]{2,3}(-[a-zA-Z0-9]{2,8})*$/.test(s)) return null;
   return s.toLowerCase();
 }
@@ -744,40 +774,35 @@ async function callClassifierService(params: {
     });
 
     const rawText = await resp.text().catch(() => "");
-    type ClassifierResponse =
-      | { ok: true; classifier_result: ClassifierResult }
-      | { ok?: false; retryable?: boolean; code?: string; error?: string };
+
+    type ClassifierResponse = {
+      ok?: boolean;
+      classifier_result?: ClassifierResult;
+      retryable?: boolean;
+      code?: string;
+      error?: string;
+    };
 
     const body = rawText ? safeParseJson<ClassifierResponse>(rawText) : null;
 
-    // Expected success shape
-    if (resp.ok && body?.ok === true && body?.classifier_result) {
-      return body.classifier_result as ClassifierResult;
+    if (resp.ok && body?.ok === true && body.classifier_result) {
+      return body.classifier_result;
     }
 
-    const hasRetryable = body && "retryable" in body &&
-      typeof body.retryable === "boolean";
-    const retryable = (hasRetryable
-      ? Boolean(
-        (body as Extract<ClassifierResponse, { retryable?: boolean }>)
-          .retryable,
-      )
-      : false) ||
-      resp.status === 429 ||
-      resp.status >= 500 ||
-      resp.status === 408;
+    const hasRetryable = typeof body?.retryable === "boolean";
+    const retryable = (hasRetryable ? Boolean(body?.retryable) : false) ||
+      resp.status === 429 || resp.status >= 500 || resp.status === 408;
 
-    const code = body && "code" in body && typeof body.code === "string"
+    const code = typeof body?.code === "string"
       ? body.code
       : "classifier_service_failed";
 
-    const msg = body && "error" in body && typeof body.error === "string"
+    const msg = typeof body?.error === "string"
       ? body.error
       : rawText
       ? truncate(rawText, 240)
       : `classifier_service_status_${resp.status}`;
 
-    // Preserve real status where possible (e.g., 401 from classifier means your internal secret mismatch)
     throw new ApiError(resp.status || 502, `${code}:${msg}`, retryable, code);
   } catch (e) {
     if (String(e).includes("AbortError")) {
@@ -824,9 +849,8 @@ function isRetryableText(msg: string) {
 }
 
 function preferRetryableStatus(status: number) {
-  // Keep high-signal statuses if we already have them; otherwise default to 502.
   if (status === 504) return 504;
-  if (status === 429) return 502; // internal pipeline: treat as upstream error but retryable
+  if (status === 429) return 502;
   if (status >= 500) return 502;
   return 502;
 }

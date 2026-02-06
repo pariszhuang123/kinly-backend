@@ -348,6 +348,92 @@ export type Database = {
         }
         Relationships: []
       }
+      complaint_rewrite_triggers: {
+        Row: {
+          attempts: number
+          author_user_id: string
+          created_at: string
+          entry_id: string
+          error: string | null
+          home_id: string
+          last_attempt_at: string | null
+          last_error_at: string | null
+          note: string | null
+          processed_at: string | null
+          processing_started_at: string | null
+          recipient_user_id: string
+          request_id: string | null
+          retry_after: string | null
+          status: string
+          updated_at: string
+        }
+        Insert: {
+          attempts?: number
+          author_user_id: string
+          created_at?: string
+          entry_id: string
+          error?: string | null
+          home_id: string
+          last_attempt_at?: string | null
+          last_error_at?: string | null
+          note?: string | null
+          processed_at?: string | null
+          processing_started_at?: string | null
+          recipient_user_id: string
+          request_id?: string | null
+          retry_after?: string | null
+          status?: string
+          updated_at?: string
+        }
+        Update: {
+          attempts?: number
+          author_user_id?: string
+          created_at?: string
+          entry_id?: string
+          error?: string | null
+          home_id?: string
+          last_attempt_at?: string | null
+          last_error_at?: string | null
+          note?: string | null
+          processed_at?: string | null
+          processing_started_at?: string | null
+          recipient_user_id?: string
+          request_id?: string | null
+          retry_after?: string | null
+          status?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "complaint_rewrite_triggers_author_user_id_fkey"
+            columns: ["author_user_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "complaint_rewrite_triggers_entry_id_fkey"
+            columns: ["entry_id"]
+            isOneToOne: true
+            referencedRelation: "home_mood_entries"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "complaint_rewrite_triggers_home_id_fkey"
+            columns: ["home_id"]
+            isOneToOne: false
+            referencedRelation: "homes"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "complaint_rewrite_triggers_recipient_user_id_fkey"
+            columns: ["recipient_user_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       device_tokens: {
         Row: {
           created_at: string
@@ -2912,6 +2998,7 @@ export type Database = {
         }[]
       }
       _complaint_topics_valid: { Args: { p: Json }; Returns: boolean }
+      _cron_call_complaint_trigger_runner: { Args: never; Returns: undefined }
       _current_user_id: { Args: never; Returns: string }
       _ensure_unique_avatar_for_home: {
         Args: { p_home_id: string; p_user_id: string }
@@ -3387,6 +3474,70 @@ export type Database = {
       complaint_rewrite_route: {
         Args: { p_lane: string; p_rewrite_strength: string; p_surface: string }
         Returns: Json
+      }
+      complaint_trigger_enqueue: {
+        Args: { p_entry_id: string; p_recipient_user_id: string }
+        Returns: undefined
+      }
+      complaint_trigger_fail_exhausted: {
+        Args: { p_limit?: number; p_max_attempts?: number }
+        Returns: number
+      }
+      complaint_trigger_mark_canceled: {
+        Args: {
+          p_entry_id: string
+          p_processed_at?: string
+          p_reason: string
+          p_request_id: string
+        }
+        Returns: boolean
+      }
+      complaint_trigger_mark_completed: {
+        Args: {
+          p_entry_id: string
+          p_note?: string
+          p_processed_at?: string
+          p_request_id: string
+        }
+        Returns: boolean
+      }
+      complaint_trigger_mark_failed_terminal: {
+        Args: {
+          p_entry_id: string
+          p_error: string
+          p_note?: string
+          p_processed_at?: string
+          p_request_id: string
+        }
+        Returns: boolean
+      }
+      complaint_trigger_mark_retry: {
+        Args: {
+          p_entry_id: string
+          p_error: string
+          p_note?: string
+          p_request_id: string
+          p_retry_after: string
+        }
+        Returns: boolean
+      }
+      complaint_trigger_pop_pending: {
+        Args: { p_limit?: number; p_max_attempts?: number }
+        Returns: {
+          author_user_id: string
+          entry_id: string
+          home_id: string
+          recipient_user_id: string
+          request_id: string
+        }[]
+      }
+      complaint_trigger_requeue_stale_processing: {
+        Args: {
+          p_limit?: number
+          p_retry_delay?: string
+          p_stale_after?: string
+        }
+        Returns: number
       }
       complete_complaint_rewrite_job: {
         Args: {

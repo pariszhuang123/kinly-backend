@@ -479,6 +479,30 @@ $$;
 ALTER FUNCTION "public"."_complaint_topics_valid"("p" "jsonb") OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."_cron_call_complaint_trigger_runner"() RETURNS "void"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+declare
+  v_url text := current_setting('app.settings.supabase_url', true)
+    || '/functions/v1/complaint_trigger_cron_runner';
+  v_secret text := current_setting('app.settings.worker_shared_secret', true);
+begin
+  perform net.http_post(
+    url := v_url,
+    headers := jsonb_strip_nulls(jsonb_build_object(
+      'Content-Type','application/json',
+      'x-internal-secret', v_secret
+    )),
+    body := '{}'::jsonb
+  );
+end;
+$$;
+
+
+ALTER FUNCTION "public"."_cron_call_complaint_trigger_runner"() OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."_current_user_id"() RETURNS "uuid"
     LANGUAGE "sql" STABLE
     SET "search_path" TO ''
@@ -2139,13 +2163,14 @@ COMMENT ON FUNCTION "public"."_share_log_event_internal"("p_user_id" "uuid", "p_
 
 
 CREATE OR REPLACE FUNCTION "public"."_touch_updated_at"() RETURNS "trigger"
-    LANGUAGE "plpgsql" SECURITY DEFINER
+    LANGUAGE "plpgsql"
     SET "search_path" TO ''
     AS $$
 begin
   new.updated_at = now();
   return new;
-end $$;
+end;
+$$;
 
 
 ALTER FUNCTION "public"."_touch_updated_at"() OWNER TO "postgres";
@@ -3973,6 +3998,392 @@ $$;
 
 
 ALTER FUNCTION "public"."complaint_rewrite_route"("p_surface" "text", "p_lane" "text", "p_rewrite_strength" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."complaint_trigger_enqueue"("p_entry_id" "uuid", "p_recipient_user_id" "uuid") RETURNS "void"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+declare
+  v_uid uuid := auth.uid();
+
+  v_home_id uuid;
+  v_author_id uuid;
+  v_entry_created_at timestamptz;
+
+  v_iso_week int;
+  v_iso_year int;
+begin
+  if v_uid is null then
+    raise exception 'not_authenticated';
+  end if;
+
+  select e.home_id, e.user_id, e.created_at
+    into v_home_id, v_author_id, v_entry_created_at
+  from public.home_mood_entries e
+  where e.id = p_entry_id;
+
+  if v_home_id is null then
+    raise exception 'entry_not_found';
+  end if;
+
+  -- Rule: only the author of the entry can enqueue
+  if v_author_id <> v_uid then
+    raise exception 'not_entry_author';
+  end if;
+
+  -- Prevent self-recipient
+  if p_recipient_user_id = v_uid then
+    raise exception 'recipient_cannot_be_self';
+  end if;
+
+  -- Sender must be current member of the home
+  if not exists (
+    select 1
+    from public.memberships m
+    where m.home_id = v_home_id
+      and m.user_id = v_uid
+      and m.is_current = true
+  ) then
+    raise exception 'not_home_member';
+  end if;
+
+  -- Recipient must be current member of the home
+  if not exists (
+    select 1
+    from public.memberships m
+    where m.home_id = v_home_id
+      and m.user_id = p_recipient_user_id
+      and m.is_current = true
+  ) then
+    raise exception 'recipient_not_home_member';
+  end if;
+
+  -- ISO week gate (deterministic: compute on UTC to avoid timezone drift)
+  v_iso_week := extract(week from (v_entry_created_at at time zone 'UTC'))::int;
+  v_iso_year := extract(isoyear from (v_entry_created_at at time zone 'UTC'))::int;
+
+  -- Invariant: author can target only ONE recipient per ISO week.
+  -- Any existing trigger for a different entry in the same iso week counts as "used",
+  -- except canceled (optional carve-out).
+  if exists (
+    select 1
+    from public.complaint_rewrite_triggers t
+    join public.home_mood_entries e2
+      on e2.id = t.entry_id
+    where t.author_user_id = v_uid
+      and t.home_id = v_home_id
+      and t.entry_id <> p_entry_id
+      and t.status <> 'canceled'
+      and extract(week from (e2.created_at at time zone 'UTC'))::int = v_iso_week
+      and extract(isoyear from (e2.created_at at time zone 'UTC'))::int = v_iso_year
+  ) then
+    raise exception 'iso_week_limit_exceeded';
+  end if;
+
+  insert into public.complaint_rewrite_triggers (
+    entry_id, home_id, author_user_id, recipient_user_id,
+    status, request_id, retry_after, processing_started_at, processed_at,
+    error, last_error_at, note
+  )
+  values (
+    p_entry_id, v_home_id, v_author_id, p_recipient_user_id,
+    'queued', null, null, null, null,
+    null, null, null
+  )
+  on conflict (entry_id) do update
+     set home_id = excluded.home_id,
+         author_user_id = excluded.author_user_id,
+         recipient_user_id = excluded.recipient_user_id,
+         status = 'queued',
+         request_id = null,
+         retry_after = null,
+         processing_started_at = null,
+         processed_at = null,
+         -- keep attempts + last_attempt_at (history), but clear error/note for a fresh run
+         error = null,
+         last_error_at = null,
+         note = null,
+         updated_at = now()
+   where public.complaint_rewrite_triggers.status <> 'processing'
+     and (
+       -- allow changing recipient only if previously canceled
+       public.complaint_rewrite_triggers.status = 'canceled'
+       or public.complaint_rewrite_triggers.recipient_user_id = excluded.recipient_user_id
+     );
+  -- prevents resetting in-flight (processing) rows
+  -- prevents recipient changes after "used" unless canceled
+end;
+$$;
+
+
+ALTER FUNCTION "public"."complaint_trigger_enqueue"("p_entry_id" "uuid", "p_recipient_user_id" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."complaint_trigger_fail_exhausted"("p_max_attempts" integer DEFAULT 10, "p_limit" integer DEFAULT 200) RETURNS integer
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+declare
+  v_count integer := 0;
+begin
+  with cte as (
+    select t.entry_id
+    from public.complaint_rewrite_triggers t
+    where t.status = 'queued'
+      and t.attempts >= greatest(coalesce(p_max_attempts, 10), 0)
+    order by coalesce(t.last_attempt_at, t.created_at), t.created_at
+    limit coalesce(p_limit, 200)
+    for update skip locked
+  )
+  update public.complaint_rewrite_triggers t
+     set status = 'failed',
+         processed_at = now(),
+         retry_after = null,
+         request_id = null,
+         processing_started_at = null,
+         error = left(coalesce(t.error, 'max_attempts_exhausted'), 512),
+         last_error_at = coalesce(t.last_error_at, now()),
+         note = case
+                  when t.note is null or t.note = '' then 'failed_exhausted_attempts'
+                  else t.note || ' | failed_exhausted_attempts'
+                end
+    from cte
+   where t.entry_id = cte.entry_id;
+
+  get diagnostics v_count = row_count;
+  return v_count;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."complaint_trigger_fail_exhausted"("p_max_attempts" integer, "p_limit" integer) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."complaint_trigger_mark_canceled"("p_entry_id" "uuid", "p_request_id" "uuid", "p_reason" "text", "p_processed_at" timestamp with time zone DEFAULT "now"()) RETURNS boolean
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+declare
+  v_updated int;
+begin
+  update public.complaint_rewrite_triggers
+     set status = 'canceled',
+         note = p_reason,
+         processed_at = coalesce(p_processed_at, now()),
+         retry_after = null,
+         request_id = null,
+         processing_started_at = null
+   where entry_id = p_entry_id
+     and request_id = p_request_id
+     and status = 'processing';
+
+  get diagnostics v_updated = row_count;
+  if v_updated = 0 then
+    raise exception 'mark_canceled_noop';
+  end if;
+
+  return true;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."complaint_trigger_mark_canceled"("p_entry_id" "uuid", "p_request_id" "uuid", "p_reason" "text", "p_processed_at" timestamp with time zone) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."complaint_trigger_mark_completed"("p_entry_id" "uuid", "p_request_id" "uuid", "p_processed_at" timestamp with time zone DEFAULT "now"(), "p_note" "text" DEFAULT NULL::"text") RETURNS boolean
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+declare
+  v_updated int;
+begin
+  update public.complaint_rewrite_triggers
+     set status = 'completed',
+         processed_at = coalesce(p_processed_at, now()),
+         retry_after = null,
+         note = p_note,
+         request_id = null,
+         processing_started_at = null
+   where entry_id = p_entry_id
+     and request_id = p_request_id
+     and status = 'processing';
+
+  get diagnostics v_updated = row_count;
+  if v_updated = 0 then
+    raise exception 'mark_completed_noop';
+  end if;
+
+  return true;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."complaint_trigger_mark_completed"("p_entry_id" "uuid", "p_request_id" "uuid", "p_processed_at" timestamp with time zone, "p_note" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."complaint_trigger_mark_failed_terminal"("p_entry_id" "uuid", "p_request_id" "uuid", "p_error" "text", "p_processed_at" timestamp with time zone DEFAULT "now"(), "p_note" "text" DEFAULT NULL::"text") RETURNS boolean
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+declare
+  v_updated int;
+begin
+  update public.complaint_rewrite_triggers
+     set status = 'failed',
+         error = p_error,
+         last_error_at = now(),
+         note = p_note,
+         processed_at = coalesce(p_processed_at, now()),
+         retry_after = null,
+         request_id = null,
+         processing_started_at = null
+   where entry_id = p_entry_id
+     and request_id = p_request_id
+     and status = 'processing';
+
+  get diagnostics v_updated = row_count;
+  if v_updated = 0 then
+    raise exception 'mark_failed_terminal_noop';
+  end if;
+
+  return true;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."complaint_trigger_mark_failed_terminal"("p_entry_id" "uuid", "p_request_id" "uuid", "p_error" "text", "p_processed_at" timestamp with time zone, "p_note" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."complaint_trigger_mark_retry"("p_entry_id" "uuid", "p_request_id" "uuid", "p_error" "text", "p_retry_after" interval, "p_note" "text" DEFAULT NULL::"text") RETURNS boolean
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+declare
+  v_updated int;
+begin
+  update public.complaint_rewrite_triggers
+     set status = 'queued',
+         error = p_error,
+         last_error_at = now(),
+         note = p_note,
+         retry_after = now() + greatest(coalesce(p_retry_after, interval '10 seconds'), interval '10 seconds'),
+         request_id = null,
+         processing_started_at = null,
+         processed_at = null
+   where entry_id = p_entry_id
+     and request_id = p_request_id
+     and status = 'processing';
+
+  get diagnostics v_updated = row_count;
+  if v_updated = 0 then
+    raise exception 'mark_retry_noop';
+  end if;
+
+  return true;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."complaint_trigger_mark_retry"("p_entry_id" "uuid", "p_request_id" "uuid", "p_error" "text", "p_retry_after" interval, "p_note" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."complaint_trigger_notify"() RETURNS "trigger"
+    LANGUAGE "plpgsql"
+    SET "search_path" TO ''
+    AS $$
+declare
+  v_payload text;
+begin
+  v_payload :=
+    jsonb_build_object(
+      'entry_id', coalesce(new.entry_id::text, ''),
+      'recipient_user_id', coalesce(new.recipient_user_id::text, ''),
+      'status', coalesce(new.status, '')
+    )::text;
+
+  perform pg_notify('complaint_rewrite_triggers', v_payload);
+  return new;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."complaint_trigger_notify"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."complaint_trigger_pop_pending"("p_limit" integer DEFAULT 20, "p_max_attempts" integer DEFAULT 10) RETURNS TABLE("entry_id" "uuid", "home_id" "uuid", "author_user_id" "uuid", "recipient_user_id" "uuid", "request_id" "uuid")
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+declare
+  v_request_id uuid := gen_random_uuid();
+begin
+  return query
+  with cte as (
+    select t.entry_id
+    from public.complaint_rewrite_triggers t
+    where t.status = 'queued'
+      and t.attempts < coalesce(p_max_attempts, 10)
+      and (t.retry_after is null or t.retry_after <= now())
+    order by coalesce(t.retry_after, t.created_at), t.created_at
+    limit coalesce(p_limit, 20)
+    for update skip locked
+  )
+  update public.complaint_rewrite_triggers t
+     set status = 'processing',
+         request_id = v_request_id,
+         attempts = t.attempts + 1,
+         last_attempt_at = now(),
+         processing_started_at = now(),
+         retry_after = null,
+         processed_at = null
+    from cte
+   where t.entry_id = cte.entry_id
+  returning t.entry_id, t.home_id, t.author_user_id, t.recipient_user_id, t.request_id;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."complaint_trigger_pop_pending"("p_limit" integer, "p_max_attempts" integer) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."complaint_trigger_requeue_stale_processing"("p_stale_after" interval DEFAULT '00:10:00'::interval, "p_limit" integer DEFAULT 200, "p_retry_delay" interval DEFAULT '00:00:30'::interval) RETURNS integer
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+declare
+  v_count integer := 0;
+begin
+  with cte as (
+    select entry_id
+    from public.complaint_rewrite_triggers
+    where status = 'processing'
+      and processing_started_at is not null
+      and processing_started_at <= now() - coalesce(p_stale_after, interval '10 minutes')
+    order by processing_started_at
+    limit coalesce(p_limit, 200)
+    for update skip locked
+  )
+  update public.complaint_rewrite_triggers t
+     set status = 'queued',
+         request_id = null,
+         processing_started_at = null,
+         processed_at = null,
+         retry_after = now() + coalesce(p_retry_delay, interval '30 seconds'),
+         note = case
+                  when t.note is null or t.note = '' then 'requeued_stale_processing'
+                  else t.note || ' | requeued_stale_processing'
+                end
+    from cte
+   where t.entry_id = cte.entry_id;
+
+  get diagnostics v_count = row_count;
+  return v_count;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."complaint_trigger_requeue_stale_processing"("p_stale_after" interval, "p_limit" integer, "p_retry_delay" interval) OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."complete_complaint_rewrite_job"("p_job_id" "uuid", "p_rewrite_request_id" "uuid", "p_recipient_user_id" "uuid", "p_rewritten_text" "text", "p_output_language" "text", "p_target_locale" "text", "p_model" "text", "p_provider" "text", "p_prompt_version" "text", "p_policy_version" "text", "p_lexicon_version" "text", "p_eval_result" "jsonb") RETURNS "void"
@@ -13097,6 +13508,35 @@ CREATE TABLE IF NOT EXISTS "public"."complaint_rewrite_routes" (
 ALTER TABLE "public"."complaint_rewrite_routes" OWNER TO "postgres";
 
 
+CREATE TABLE IF NOT EXISTS "public"."complaint_rewrite_triggers" (
+    "entry_id" "uuid" NOT NULL,
+    "home_id" "uuid" NOT NULL,
+    "author_user_id" "uuid" NOT NULL,
+    "recipient_user_id" "uuid" NOT NULL,
+    "status" "text" DEFAULT 'queued'::"text" NOT NULL,
+    "request_id" "uuid",
+    "note" "text",
+    "error" "text",
+    "attempts" integer DEFAULT 0 NOT NULL,
+    "last_error_at" timestamp with time zone,
+    "last_attempt_at" timestamp with time zone,
+    "retry_after" timestamp with time zone,
+    "processing_started_at" timestamp with time zone,
+    "processed_at" timestamp with time zone,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "complaint_rewrite_triggers_status_check" CHECK (("status" = ANY (ARRAY['queued'::"text", 'processing'::"text", 'completed'::"text", 'failed'::"text", 'canceled'::"text"]))),
+    CONSTRAINT "crt_attempts_nonneg" CHECK (("attempts" >= 0)),
+    CONSTRAINT "crt_processed_at_terminal_only" CHECK (((("status" = ANY (ARRAY['completed'::"text", 'failed'::"text", 'canceled'::"text"])) AND ("processed_at" IS NOT NULL)) OR (("status" = ANY (ARRAY['queued'::"text", 'processing'::"text"])) AND ("processed_at" IS NULL)))),
+    CONSTRAINT "crt_processing_started_at_invariant" CHECK (((("status" = 'processing'::"text") AND ("processing_started_at" IS NOT NULL)) OR (("status" <> 'processing'::"text") AND ("processing_started_at" IS NULL)))),
+    CONSTRAINT "crt_request_id_only_processing" CHECK ((("request_id" IS NULL) OR ("status" = 'processing'::"text"))),
+    CONSTRAINT "crt_retry_after_only_queued" CHECK ((("retry_after" IS NULL) OR ("status" = 'queued'::"text")))
+);
+
+
+ALTER TABLE "public"."complaint_rewrite_triggers" OWNER TO "postgres";
+
+
 CREATE TABLE IF NOT EXISTS "public"."device_tokens" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "user_id" "uuid" NOT NULL,
@@ -14365,6 +14805,11 @@ ALTER TABLE ONLY "public"."complaint_rewrite_routes"
 
 
 
+ALTER TABLE ONLY "public"."complaint_rewrite_triggers"
+    ADD CONSTRAINT "complaint_rewrite_triggers_pkey" PRIMARY KEY ("entry_id");
+
+
+
 ALTER TABLE ONLY "public"."device_tokens"
     ADD CONSTRAINT "device_tokens_pkey" PRIMARY KEY ("id");
 
@@ -14744,6 +15189,22 @@ CREATE INDEX "idx_chores_home_due_cursor" ON "public"."chores" USING "btree" ("h
 
 
 
+CREATE INDEX "idx_complaint_rewrite_triggers_status_created" ON "public"."complaint_rewrite_triggers" USING "btree" ("status", "created_at");
+
+
+
+CREATE INDEX "idx_crt_processing_started_at" ON "public"."complaint_rewrite_triggers" USING "btree" ("processing_started_at") WHERE ("status" = 'processing'::"text");
+
+
+
+CREATE INDEX "idx_crt_queued_no_retry_created" ON "public"."complaint_rewrite_triggers" USING "btree" ("created_at") WHERE (("status" = 'queued'::"text") AND ("retry_after" IS NULL));
+
+
+
+CREATE INDEX "idx_crt_queued_retry_after_created" ON "public"."complaint_rewrite_triggers" USING "btree" ("retry_after", "created_at") WHERE (("status" = 'queued'::"text") AND ("retry_after" IS NOT NULL));
+
+
+
 CREATE INDEX "idx_device_tokens_user_status" ON "public"."device_tokens" USING "btree" ("user_id", "status");
 
 
@@ -15028,6 +15489,18 @@ CREATE OR REPLACE TRIGGER "trg_complaint_rewrite_routes_updated_at" BEFORE UPDAT
 
 
 
+CREATE OR REPLACE TRIGGER "trg_complaint_rewrite_triggers_notify_ins" AFTER INSERT ON "public"."complaint_rewrite_triggers" FOR EACH ROW WHEN (("new"."status" = 'queued'::"text")) EXECUTE FUNCTION "public"."complaint_trigger_notify"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_complaint_rewrite_triggers_notify_requeue" AFTER UPDATE ON "public"."complaint_rewrite_triggers" FOR EACH ROW WHEN ((("new"."status" = 'queued'::"text") AND ("old"."status" IS DISTINCT FROM 'queued'::"text"))) EXECUTE FUNCTION "public"."complaint_trigger_notify"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_complaint_rewrite_triggers_touch" BEFORE UPDATE ON "public"."complaint_rewrite_triggers" FOR EACH ROW EXECUTE FUNCTION "public"."_touch_updated_at"();
+
+
+
 CREATE OR REPLACE TRIGGER "trg_home_mood_feedback_counters_inc" AFTER INSERT ON "public"."home_mood_entries" FOR EACH ROW EXECUTE FUNCTION "public"."home_mood_feedback_counters_inc"();
 
 
@@ -15129,6 +15602,26 @@ ALTER TABLE ONLY "public"."chores"
 
 ALTER TABLE ONLY "public"."chores"
     ADD CONSTRAINT "chores_home_id_fkey" FOREIGN KEY ("home_id") REFERENCES "public"."homes"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."complaint_rewrite_triggers"
+    ADD CONSTRAINT "complaint_rewrite_triggers_author_user_id_fkey" FOREIGN KEY ("author_user_id") REFERENCES "public"."profiles"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."complaint_rewrite_triggers"
+    ADD CONSTRAINT "complaint_rewrite_triggers_entry_id_fkey" FOREIGN KEY ("entry_id") REFERENCES "public"."home_mood_entries"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."complaint_rewrite_triggers"
+    ADD CONSTRAINT "complaint_rewrite_triggers_home_id_fkey" FOREIGN KEY ("home_id") REFERENCES "public"."homes"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."complaint_rewrite_triggers"
+    ADD CONSTRAINT "complaint_rewrite_triggers_recipient_user_id_fkey" FOREIGN KEY ("recipient_user_id") REFERENCES "public"."profiles"("id") ON DELETE CASCADE;
 
 
 
@@ -16130,6 +16623,11 @@ GRANT ALL ON FUNCTION "public"."_complaint_topics_valid"("p" "jsonb") TO "servic
 
 
 
+REVOKE ALL ON FUNCTION "public"."_cron_call_complaint_trigger_runner"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_cron_call_complaint_trigger_runner"() TO "service_role";
+
+
+
 REVOKE ALL ON FUNCTION "public"."_current_user_id"() FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."_current_user_id"() TO "service_role";
 
@@ -16321,8 +16819,6 @@ GRANT ALL ON FUNCTION "public"."_share_log_event_internal"("p_user_id" "uuid", "
 
 
 REVOKE ALL ON FUNCTION "public"."_touch_updated_at"() FROM PUBLIC;
-GRANT ALL ON FUNCTION "public"."_touch_updated_at"() TO "anon";
-GRANT ALL ON FUNCTION "public"."_touch_updated_at"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."_touch_updated_at"() TO "service_role";
 
 
@@ -16617,6 +17113,52 @@ REVOKE ALL ON FUNCTION "public"."complaint_rewrite_route"("p_surface" "text", "p
 GRANT ALL ON FUNCTION "public"."complaint_rewrite_route"("p_surface" "text", "p_lane" "text", "p_rewrite_strength" "text") TO "anon";
 GRANT ALL ON FUNCTION "public"."complaint_rewrite_route"("p_surface" "text", "p_lane" "text", "p_rewrite_strength" "text") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."complaint_rewrite_route"("p_surface" "text", "p_lane" "text", "p_rewrite_strength" "text") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."complaint_trigger_enqueue"("p_entry_id" "uuid", "p_recipient_user_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."complaint_trigger_enqueue"("p_entry_id" "uuid", "p_recipient_user_id" "uuid") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."complaint_trigger_enqueue"("p_entry_id" "uuid", "p_recipient_user_id" "uuid") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."complaint_trigger_fail_exhausted"("p_max_attempts" integer, "p_limit" integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."complaint_trigger_fail_exhausted"("p_max_attempts" integer, "p_limit" integer) TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."complaint_trigger_mark_canceled"("p_entry_id" "uuid", "p_request_id" "uuid", "p_reason" "text", "p_processed_at" timestamp with time zone) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."complaint_trigger_mark_canceled"("p_entry_id" "uuid", "p_request_id" "uuid", "p_reason" "text", "p_processed_at" timestamp with time zone) TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."complaint_trigger_mark_completed"("p_entry_id" "uuid", "p_request_id" "uuid", "p_processed_at" timestamp with time zone, "p_note" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."complaint_trigger_mark_completed"("p_entry_id" "uuid", "p_request_id" "uuid", "p_processed_at" timestamp with time zone, "p_note" "text") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."complaint_trigger_mark_failed_terminal"("p_entry_id" "uuid", "p_request_id" "uuid", "p_error" "text", "p_processed_at" timestamp with time zone, "p_note" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."complaint_trigger_mark_failed_terminal"("p_entry_id" "uuid", "p_request_id" "uuid", "p_error" "text", "p_processed_at" timestamp with time zone, "p_note" "text") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."complaint_trigger_mark_retry"("p_entry_id" "uuid", "p_request_id" "uuid", "p_error" "text", "p_retry_after" interval, "p_note" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."complaint_trigger_mark_retry"("p_entry_id" "uuid", "p_request_id" "uuid", "p_error" "text", "p_retry_after" interval, "p_note" "text") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."complaint_trigger_notify"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."complaint_trigger_notify"() TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."complaint_trigger_pop_pending"("p_limit" integer, "p_max_attempts" integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."complaint_trigger_pop_pending"("p_limit" integer, "p_max_attempts" integer) TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."complaint_trigger_requeue_stale_processing"("p_stale_after" interval, "p_limit" integer, "p_retry_delay" interval) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."complaint_trigger_requeue_stale_processing"("p_stale_after" interval, "p_limit" integer, "p_retry_delay" interval) TO "service_role";
 
 
 
@@ -18689,6 +19231,10 @@ GRANT ALL ON TABLE "public"."complaint_ai_providers" TO "service_role";
 
 
 GRANT ALL ON TABLE "public"."complaint_rewrite_routes" TO "service_role";
+
+
+
+GRANT SELECT ON TABLE "public"."complaint_rewrite_triggers" TO "service_role";
 
 
 

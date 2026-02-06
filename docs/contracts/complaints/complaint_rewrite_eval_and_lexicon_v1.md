@@ -3,7 +3,7 @@ Domain: Product
 Capability: complaint_rewrite
 Scope: backend
 Artifact-Type: contract
-Stability: draft
+Stability: evolving
 Status: draft
 Version: v1.1
 Audience: internal

@@ -152,7 +152,7 @@ jobs:
                 # Internal workers / cron endpoints usually also want no-verify-jwt.
                 # Safe default: no-verify-jwt for anything not explicitly user-authenticated.
                 case "$fn" in
-                  rewrite_worker|complaint_orchestrator|rewrite_batch_submitter|rewrite_batch_collector)
+                  rewrite_worker|complaint_orchestrator|complaint_trigger_cron_runner|rewrite_batch_submitter|rewrite_batch_collector)
                     supabase functions deploy "$fn" --project-ref "$SUPABASE_PROJECT_ID" --no-verify-jwt
                     ;;
                   *)
@@ -183,6 +183,7 @@ jobs:
           supabase functions invoke rewrite_batch_submitter --headers "x-internal-secret: $INTERNAL_SECRET" || true
           supabase functions invoke rewrite_batch_collector --headers "x-internal-secret: $INTERNAL_SECRET" || true
           supabase functions invoke rewrite_worker         --headers "x-internal-secret: $INTERNAL_SECRET" || true
+          supabase functions invoke complaint_trigger_cron_runner --headers "x-internal-secret: $INTERNAL_SECRET" || true
           supabase functions invoke complaint_orchestrator --headers "x-internal-secret: $INTERNAL_SECRET" || true
 
   deploy_prod:
@@ -254,7 +255,7 @@ jobs:
                 supabase functions deploy "$fn" --project-ref "$SUPABASE_PROJECT_ID" --no-verify-jwt
               else
                 case "$fn" in
-                  rewrite_worker|complaint_orchestrator|rewrite_batch_submitter|rewrite_batch_collector)
+                  rewrite_worker|complaint_orchestrator|complaint_trigger_cron_runner|rewrite_batch_submitter|rewrite_batch_collector)
                     supabase functions deploy "$fn" --project-ref "$SUPABASE_PROJECT_ID" --no-verify-jwt
                     ;;
                   *)
@@ -282,6 +283,7 @@ jobs:
           supabase functions invoke rewrite_batch_submitter --headers "x-internal-secret: $INTERNAL_SECRET" || true
           supabase functions invoke rewrite_batch_collector --headers "x-internal-secret: $INTERNAL_SECRET" || true
           supabase functions invoke rewrite_worker         --headers "x-internal-secret: $INTERNAL_SECRET" || true
+          supabase functions invoke complaint_trigger_cron_runner --headers "x-internal-secret: $INTERNAL_SECRET" || true
           supabase functions invoke complaint_orchestrator --headers "x-internal-secret: $INTERNAL_SECRET" || true
 
   publish_contracts:

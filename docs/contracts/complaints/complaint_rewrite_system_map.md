@@ -13,12 +13,13 @@ Last updated: 2026-02-03
 # Complaint Rewrite System Maps (Mermaid)
 v1.2 splits the flow into three focused maps: (1) trigger → orchestrator, (2) batch submission, (3) batch collection/finalization.
 
-## 1) Trigger → Orchestrator (RPC-first)
+## 1) Trigger → Orchestrator (RPC-first, trigger runner)
 ```mermaid
 flowchart TD
-  MOOD["mood_submit_v2"] --> TRIG["complaint_rewrite_triggers"]
-  TRIG --> DRN["trigger_drain (pg_cron)"]
-  DRN --> ORCH["Edge Orchestrator<br/>complaint_orchestrator"]
+  MOOD["mood_submit_v2"] --> TRIG["complaint_rewrite_triggers<br/>(status=queued)"]
+  PGCRON["pg_cron 5m<br/>complaint_trigger_runner_every_5m"] --> RUNNER["complaint_trigger_cron_runner (edge)<br/>complaint_trigger_pop_pending()"]
+  TRIG --> RUNNER
+  RUNNER --> ORCH["Edge Orchestrator<br/>complaint_orchestrator<br/>(trigger_request_id enforced)"]
 
   ORCH -->|internal call| CLF["complaint_classifier (edge)"]
   ORCH -->|prefs RPC| PREF["complaint_preference_payload"]
