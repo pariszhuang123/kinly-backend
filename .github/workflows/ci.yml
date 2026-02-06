@@ -125,6 +125,9 @@ jobs:
           supabase secrets set \
             SUPABASE_URL="${{ secrets.SUPABASE_URL }}" \
             SUPABASE_SERVICE_ROLE_KEY="${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
+            ORCHESTRATOR_FUNCTION_URL="${{ secrets.DEV_ORCHESTRATOR_FUNCTION_URL }}" \
+            ORCHESTRATOR_SHARED_SECRET="${{ secrets.DEV_ORCHESTRATOR_SHARED_SECRET }}" \
+            RUNNER_SHARED_SECRET="${{ secrets.DEV_RUNNER_SHARED_SECRET }}" \
             OPENAI_CLASSIFIER_API_KEY="${{ secrets.OPENAI_CLASSIFIER_API_KEY }}" \
             OPENAI_REWRITE_API_KEY="${{ secrets.OPENAI_REWRITE_API_KEY }}" \
             WORKER_SHARED_SECRET="${{ secrets.DEV_WORKER_SHARED_SECRET }}" \
@@ -231,6 +234,9 @@ jobs:
           supabase secrets set \
             SUPABASE_URL="${{ secrets.SUPABASE_URL }}" \
             SUPABASE_SERVICE_ROLE_KEY="${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
+            ORCHESTRATOR_FUNCTION_URL="${{ secrets.PROD_ORCHESTRATOR_FUNCTION_URL }}" \
+            ORCHESTRATOR_SHARED_SECRET="${{ secrets.PROD_ORCHESTRATOR_SHARED_SECRET }}" \
+            RUNNER_SHARED_SECRET="${{ secrets.PROD_RUNNER_SHARED_SECRET }}" \
             OPENAI_CLASSIFIER_API_KEY="${{ secrets.OPENAI_CLASSIFIER_API_KEY }}" \
             OPENAI_REWRITE_API_KEY="${{ secrets.OPENAI_REWRITE_API_KEY }}" \
             WORKER_SHARED_SECRET="${{ secrets.PROD_WORKER_SHARED_SECRET }}" \

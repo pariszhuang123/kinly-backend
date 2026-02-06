@@ -66,4 +66,6 @@ CREATE POLICY "service_role_all_outreach_sources" ON "public"."outreach_sources"
 CREATE POLICY "service_role_read_outreach_event_logs" ON "public"."outreach_event_logs" FOR SELECT TO "service_role" USING (true);
 ALTER TABLE "public"."share_events" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "public"."shared_preferences" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "public"."shopping_list_items" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "public"."shopping_lists" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "public"."user_subscriptions" ENABLE ROW LEVEL SECURITY;

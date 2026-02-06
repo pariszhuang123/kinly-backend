@@ -1150,6 +1150,7 @@ export type Database = {
           active_members: number
           chore_photos: number
           home_id: string
+          shopping_item_photos: number
           updated_at: string
         }
         Insert: {
@@ -1158,6 +1159,7 @@ export type Database = {
           active_members?: number
           chore_photos?: number
           home_id: string
+          shopping_item_photos?: number
           updated_at?: string
         }
         Update: {
@@ -1166,6 +1168,7 @@ export type Database = {
           active_members?: number
           chore_photos?: number
           home_id?: string
+          shopping_item_photos?: number
           updated_at?: string
         }
         Relationships: [
@@ -2883,6 +2886,158 @@ export type Database = {
           },
         ]
       }
+      shopping_list_items: {
+        Row: {
+          archived_at: string | null
+          archived_by_user_id: string | null
+          completed_at: string | null
+          completed_by_user_id: string | null
+          created_at: string
+          created_by_user_id: string
+          details: string | null
+          home_id: string
+          id: string
+          is_completed: boolean
+          linked_expense_id: string | null
+          name: string
+          quantity: string | null
+          reference_added_by_user_id: string | null
+          reference_photo_path: string | null
+          shopping_list_id: string
+          updated_at: string
+        }
+        Insert: {
+          archived_at?: string | null
+          archived_by_user_id?: string | null
+          completed_at?: string | null
+          completed_by_user_id?: string | null
+          created_at?: string
+          created_by_user_id: string
+          details?: string | null
+          home_id: string
+          id?: string
+          is_completed?: boolean
+          linked_expense_id?: string | null
+          name: string
+          quantity?: string | null
+          reference_added_by_user_id?: string | null
+          reference_photo_path?: string | null
+          shopping_list_id: string
+          updated_at?: string
+        }
+        Update: {
+          archived_at?: string | null
+          archived_by_user_id?: string | null
+          completed_at?: string | null
+          completed_by_user_id?: string | null
+          created_at?: string
+          created_by_user_id?: string
+          details?: string | null
+          home_id?: string
+          id?: string
+          is_completed?: boolean
+          linked_expense_id?: string | null
+          name?: string
+          quantity?: string | null
+          reference_added_by_user_id?: string | null
+          reference_photo_path?: string | null
+          shopping_list_id?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "fk_shopping_list_items_list_home"
+            columns: ["shopping_list_id", "home_id"]
+            isOneToOne: false
+            referencedRelation: "shopping_lists"
+            referencedColumns: ["id", "home_id"]
+          },
+          {
+            foreignKeyName: "shopping_list_items_archived_by_user_id_fkey"
+            columns: ["archived_by_user_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "shopping_list_items_completed_by_user_id_fkey"
+            columns: ["completed_by_user_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "shopping_list_items_created_by_user_id_fkey"
+            columns: ["created_by_user_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "shopping_list_items_home_id_fkey"
+            columns: ["home_id"]
+            isOneToOne: false
+            referencedRelation: "homes"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "shopping_list_items_linked_expense_id_fkey"
+            columns: ["linked_expense_id"]
+            isOneToOne: false
+            referencedRelation: "expenses"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "shopping_list_items_reference_added_by_user_id_fkey"
+            columns: ["reference_added_by_user_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      shopping_lists: {
+        Row: {
+          created_at: string
+          created_by_user_id: string
+          home_id: string
+          id: string
+          is_active: boolean
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          created_by_user_id: string
+          home_id: string
+          id?: string
+          is_active?: boolean
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          created_by_user_id?: string
+          home_id?: string
+          id?: string
+          is_active?: boolean
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "shopping_lists_created_by_user_id_fkey"
+            columns: ["created_by_user_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "shopping_lists_home_id_fkey"
+            columns: ["home_id"]
+            isOneToOne: false
+            referencedRelation: "homes"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       user_subscriptions: {
         Row: {
           created_at: string
@@ -3086,6 +3241,7 @@ export type Database = {
           active_members: number
           chore_photos: number
           home_id: string
+          shopping_item_photos: number
           updated_at: string
         }
         SetofOptions: {
@@ -3156,6 +3312,23 @@ export type Database = {
           p_user_id: string
         }
         Returns: undefined
+      }
+      _shopping_list_get_or_create_active: {
+        Args: { p_home_id: string }
+        Returns: {
+          created_at: string
+          created_by_user_id: string
+          home_id: string
+          id: string
+          is_active: boolean
+          updated_at: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "shopping_lists"
+          isOneToOne: true
+          isSetofReturn: false
+        }
       }
       api_assert: {
         Args: {
@@ -4417,6 +4590,94 @@ export type Database = {
         Args: { p_channel: string; p_feature: string; p_home_id: string }
         Returns: undefined
       }
+      shopping_list_add_item: {
+        Args: {
+          p_details?: string
+          p_home_id: string
+          p_name: string
+          p_quantity?: string
+          p_reference_photo_path?: string
+        }
+        Returns: {
+          archived_at: string | null
+          archived_by_user_id: string | null
+          completed_at: string | null
+          completed_by_user_id: string | null
+          created_at: string
+          created_by_user_id: string
+          details: string | null
+          home_id: string
+          id: string
+          is_completed: boolean
+          linked_expense_id: string | null
+          name: string
+          quantity: string | null
+          reference_added_by_user_id: string | null
+          reference_photo_path: string | null
+          shopping_list_id: string
+          updated_at: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "shopping_list_items"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
+      shopping_list_archive_items_for_user: {
+        Args: { p_home_id: string; p_item_ids: string[] }
+        Returns: number
+      }
+      shopping_list_get_for_home: { Args: { p_home_id: string }; Returns: Json }
+      shopping_list_link_items_to_expense_for_user: {
+        Args: { p_expense_id: string; p_home_id: string; p_item_ids: string[] }
+        Returns: number
+      }
+      shopping_list_prepare_expense_for_user: {
+        Args: { p_home_id: string }
+        Returns: {
+          default_description: string
+          default_notes: string
+          item_count: number
+          item_ids: string[]
+        }[]
+      }
+      shopping_list_update_item: {
+        Args: {
+          p_details?: string
+          p_is_completed?: boolean
+          p_item_id: string
+          p_name?: string
+          p_quantity?: string
+          p_reference_photo_path?: string
+          p_replace_photo?: boolean
+        }
+        Returns: {
+          archived_at: string | null
+          archived_by_user_id: string | null
+          completed_at: string | null
+          completed_by_user_id: string | null
+          created_at: string
+          created_by_user_id: string
+          details: string | null
+          home_id: string
+          id: string
+          is_completed: boolean
+          linked_expense_id: string | null
+          name: string
+          quantity: string | null
+          reference_added_by_user_id: string | null
+          reference_photo_path: string | null
+          shopping_list_id: string
+          updated_at: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "shopping_list_items"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
       today_flow_list: {
         Args: {
           p_home_id: string
@@ -4460,6 +4721,7 @@ export type Database = {
         | "chore_photos"
         | "active_members"
         | "active_expenses"
+        | "shopping_item_photos"
       house_pulse_state:
         | "forming"
         | "sunny_calm"
@@ -4628,6 +4890,7 @@ export const Constants = {
         "chore_photos",
         "active_members",
         "active_expenses",
+        "shopping_item_photos",
       ],
       house_pulse_state: [
         "forming",

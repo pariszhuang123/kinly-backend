@@ -158,7 +158,8 @@ CREATE TYPE "public"."home_usage_metric" AS ENUM (
     'active_chores',
     'chore_photos',
     'active_members',
-    'active_expenses'
+    'active_expenses',
+    'shopping_item_photos'
 );
 
 
@@ -1236,48 +1237,19 @@ CREATE OR REPLACE FUNCTION "public"."_home_assert_quota"("p_home_id" "uuid", "p_
     SET "search_path" TO ''
     AS $$
 DECLARE
-  v_plan          text;
-  v_is_premium    boolean;
+  v_plan       text;
+  v_is_premium boolean;
+  v_counters   public.home_usage_counters%ROWTYPE;
 
-  v_home_active   boolean;
-  v_counters      public.home_usage_counters%ROWTYPE;
-
-  v_metric_key    text;
-  v_metric_enum   public.home_usage_metric;
-  v_raw_value     jsonb;
-  v_delta         integer;
-  v_current       integer;
-  v_new           integer;
-  v_max           integer;
+  v_metric_key   text;
+  v_metric_enum  public.home_usage_metric;
+  v_raw_value    jsonb;
+  v_delta        integer;
+  v_current      integer;
+  v_new          integer;
+  v_max          integer;
 BEGIN
-  IF p_home_id IS NULL THEN
-    PERFORM public.api_error('INVALID_HOME', 'Home id is required.', '22023');
-  END IF;
-
-  -- Lock home FIRST (global order: homes -> ...)
-  SELECT h.is_active
-    INTO v_home_active
-    FROM public.homes h
-   WHERE h.id = p_home_id
-   FOR UPDATE;
-
-  IF NOT FOUND THEN
-    PERFORM public.api_error(
-      'NOT_FOUND',
-      'Home not found.',
-      'P0002',
-      jsonb_build_object('homeId', p_home_id)
-    );
-  END IF;
-
-  IF v_home_active IS DISTINCT FROM TRUE THEN
-    PERFORM public.api_error(
-      'HOME_INACTIVE',
-      'This home is no longer active.',
-      'P0004',
-      jsonb_build_object('homeId', p_home_id)
-    );
-  END IF;
+  v_plan := public._home_effective_plan(p_home_id);
 
   v_is_premium := public._home_is_premium(p_home_id);
   IF v_is_premium THEN
@@ -1288,17 +1260,18 @@ BEGIN
     RETURN;
   END IF;
 
-  v_plan := public._home_effective_plan(p_home_id);
-
-  INSERT INTO public.home_usage_counters (home_id)
-  VALUES (p_home_id)
-  ON CONFLICT (home_id) DO NOTHING;
-
   SELECT *
-    INTO v_counters
-    FROM public.home_usage_counters
-   WHERE home_id = p_home_id
-   FOR UPDATE;
+  INTO v_counters
+  FROM public.home_usage_counters
+  WHERE home_id = p_home_id;
+
+  IF NOT FOUND THEN
+    v_counters.active_chores        := 0;
+    v_counters.chore_photos         := 0;
+    v_counters.active_members       := 0;
+    v_counters.active_expenses      := 0;
+    v_counters.shopping_item_photos := 0;
+  END IF;
 
   FOR v_metric_key, v_raw_value IN
     SELECT key, value FROM jsonb_each(p_deltas)
@@ -1324,20 +1297,21 @@ BEGIN
     END IF;
 
     SELECT max_value
-      INTO v_max
-      FROM public.home_plan_limits
-     WHERE plan = v_plan
-       AND metric = v_metric_enum;
+    INTO v_max
+    FROM public.home_plan_limits
+    WHERE plan = v_plan
+      AND metric = v_metric_enum;
 
     IF v_max IS NULL THEN
       CONTINUE;
     END IF;
 
     v_current := CASE v_metric_enum
-      WHEN 'active_chores'    THEN COALESCE(v_counters.active_chores, 0)
-      WHEN 'chore_photos'     THEN COALESCE(v_counters.chore_photos, 0)
-      WHEN 'active_members'   THEN COALESCE(v_counters.active_members, 0)
-      WHEN 'active_expenses'  THEN COALESCE(v_counters.active_expenses, 0)
+      WHEN 'active_chores'        THEN COALESCE(v_counters.active_chores, 0)
+      WHEN 'chore_photos'         THEN COALESCE(v_counters.chore_photos, 0)
+      WHEN 'active_members'       THEN COALESCE(v_counters.active_members, 0)
+      WHEN 'active_expenses'      THEN COALESCE(v_counters.active_expenses, 0)
+      WHEN 'shopping_item_photos' THEN COALESCE(v_counters.shopping_item_photos, 0)
     END;
 
     v_new := GREATEST(0, v_current + v_delta);
@@ -1456,10 +1430,12 @@ CREATE TABLE IF NOT EXISTS "public"."home_usage_counters" (
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "active_members" integer DEFAULT 0 NOT NULL,
     "active_expenses" integer DEFAULT 0 NOT NULL,
+    "shopping_item_photos" integer DEFAULT 0 NOT NULL,
     CONSTRAINT "home_usage_counters_active_chores_check" CHECK (("active_chores" >= 0)),
     CONSTRAINT "home_usage_counters_active_expenses_check" CHECK (("active_expenses" >= 0)),
     CONSTRAINT "home_usage_counters_active_members_check" CHECK (("active_members" >= 0)),
-    CONSTRAINT "home_usage_counters_chore_photos_check" CHECK (("chore_photos" >= 0))
+    CONSTRAINT "home_usage_counters_chore_photos_check" CHECK (("chore_photos" >= 0)),
+    CONSTRAINT "home_usage_counters_shopping_item_photos_check" CHECK (("shopping_item_photos" >= 0))
 );
 
 
@@ -1491,13 +1467,14 @@ CREATE OR REPLACE FUNCTION "public"."_home_usage_apply_delta"("p_home_id" "uuid"
     SET "search_path" TO ''
     AS $$
 DECLARE
-  v_row                    public.home_usage_counters;
-  v_home_active            boolean;
+  v_row                         public.home_usage_counters;
+  v_home_active                 boolean;
 
-  v_active_chores_delta    integer := 0;
-  v_chore_photos_delta     integer := 0;
-  v_active_members_delta   integer := 0;
-  v_active_expenses_delta  integer := 0;
+  v_active_chores_delta         integer := 0;
+  v_chore_photos_delta          integer := 0;
+  v_active_members_delta        integer := 0;
+  v_active_expenses_delta       integer := 0;
+  v_shopping_item_photos_delta  integer := 0;
 BEGIN
   IF p_home_id IS NULL THEN
     PERFORM public.api_error('INVALID_HOME', 'Home id is required.', '22023');
@@ -1539,14 +1516,19 @@ BEGIN
     IF jsonb_typeof(p_deltas->'active_expenses') = 'number' THEN
       v_active_expenses_delta := (p_deltas->>'active_expenses')::integer;
     END IF;
+
+    IF jsonb_typeof(p_deltas->'shopping_item_photos') = 'number' THEN
+      v_shopping_item_photos_delta := (p_deltas->>'shopping_item_photos')::integer;
+    END IF;
   END IF;
 
   UPDATE public.home_usage_counters h
-     SET active_chores   = GREATEST(0, COALESCE(h.active_chores, 0) + v_active_chores_delta),
-         chore_photos    = GREATEST(0, COALESCE(h.chore_photos, 0) + v_chore_photos_delta),
-         active_members  = GREATEST(0, COALESCE(h.active_members, 0) + v_active_members_delta),
-         active_expenses = GREATEST(0, COALESCE(h.active_expenses, 0) + v_active_expenses_delta),
-         updated_at      = now()
+     SET active_chores        = GREATEST(0, COALESCE(h.active_chores, 0) + v_active_chores_delta),
+         chore_photos         = GREATEST(0, COALESCE(h.chore_photos, 0) + v_chore_photos_delta),
+         active_members       = GREATEST(0, COALESCE(h.active_members, 0) + v_active_members_delta),
+         active_expenses      = GREATEST(0, COALESCE(h.active_expenses, 0) + v_active_expenses_delta),
+         shopping_item_photos = GREATEST(0, COALESCE(h.shopping_item_photos, 0) + v_shopping_item_photos_delta),
+         updated_at           = now()
    WHERE h.home_id = p_home_id
    RETURNING * INTO v_row;
 
@@ -2162,14 +2144,69 @@ COMMENT ON FUNCTION "public"."_share_log_event_internal"("p_user_id" "uuid", "p_
 
 
 
-CREATE OR REPLACE FUNCTION "public"."_touch_updated_at"() RETURNS "trigger"
-    LANGUAGE "plpgsql"
+CREATE TABLE IF NOT EXISTS "public"."shopping_lists" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "home_id" "uuid" NOT NULL,
+    "created_by_user_id" "uuid" NOT NULL,
+    "is_active" boolean DEFAULT true NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL
+);
+
+
+ALTER TABLE "public"."shopping_lists" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."shopping_lists" IS 'One active shared shopping list per home.';
+
+
+
+CREATE OR REPLACE FUNCTION "public"."_shopping_list_get_or_create_active"("p_home_id" "uuid") RETURNS "public"."shopping_lists"
+    LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO ''
     AS $$
-begin
-  new.updated_at = now();
-  return new;
-end;
+DECLARE
+  v_user uuid := auth.uid();
+  v_list public.shopping_lists;
+BEGIN
+  PERFORM public._assert_authenticated();
+  PERFORM public._assert_home_member(p_home_id);
+
+  INSERT INTO public.shopping_lists (
+    home_id,
+    created_by_user_id,
+    is_active,
+    created_at,
+    updated_at
+  )
+  VALUES (
+    p_home_id,
+    v_user,
+    TRUE,
+    now(),
+    now()
+  )
+  ON CONFLICT (home_id) WHERE is_active = TRUE
+  DO UPDATE
+    SET updated_at = EXCLUDED.updated_at
+  RETURNING * INTO v_list;
+
+  RETURN v_list;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."_shopping_list_get_or_create_active"("p_home_id" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_touch_updated_at"() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+BEGIN
+  NEW.updated_at := now();
+  RETURN NEW;
+END;
 $$;
 
 
@@ -12962,6 +12999,503 @@ COMMENT ON FUNCTION "public"."share_log_event"("p_home_id" "uuid", "p_feature" "
 
 
 
+CREATE TABLE IF NOT EXISTS "public"."shopping_list_items" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "shopping_list_id" "uuid" NOT NULL,
+    "home_id" "uuid" NOT NULL,
+    "created_by_user_id" "uuid" NOT NULL,
+    "name" "text" NOT NULL,
+    "quantity" "text",
+    "details" "text",
+    "is_completed" boolean DEFAULT false NOT NULL,
+    "completed_by_user_id" "uuid",
+    "completed_at" timestamp with time zone,
+    "reference_photo_path" "text",
+    "reference_added_by_user_id" "uuid",
+    "linked_expense_id" "uuid",
+    "archived_at" timestamp with time zone,
+    "archived_by_user_id" "uuid",
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "chk_shopping_list_items_archive_alignment" CHECK (((("archived_at" IS NULL) AND ("archived_by_user_id" IS NULL)) OR (("archived_at" IS NOT NULL) AND ("archived_by_user_id" IS NOT NULL)))),
+    CONSTRAINT "chk_shopping_list_items_completion_alignment" CHECK (((("is_completed" = true) AND ("completed_by_user_id" IS NOT NULL) AND ("completed_at" IS NOT NULL)) OR (("is_completed" = false) AND ("completed_by_user_id" IS NULL) AND ("completed_at" IS NULL)))),
+    CONSTRAINT "chk_shopping_list_items_details_length" CHECK ((("details" IS NULL) OR ("char_length"("details") <= 2000))),
+    CONSTRAINT "chk_shopping_list_items_name" CHECK ((("char_length"("btrim"("name")) >= 1) AND ("char_length"("btrim"("name")) <= 140))),
+    CONSTRAINT "chk_shopping_list_items_quantity_length" CHECK ((("quantity" IS NULL) OR ("char_length"("quantity") <= 80))),
+    CONSTRAINT "chk_shopping_list_items_reference_alignment" CHECK (((("reference_photo_path" IS NULL) AND ("reference_added_by_user_id" IS NULL)) OR (("reference_photo_path" IS NOT NULL) AND ("reference_added_by_user_id" IS NOT NULL)))),
+    CONSTRAINT "chk_shopping_list_items_reference_path" CHECK ((("reference_photo_path" IS NULL) OR ("reference_photo_path" ~~ 'households/%'::"text")))
+);
+
+
+ALTER TABLE "public"."shopping_list_items" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."shopping_list_items" IS 'Items in a home shopping list; completed items can be linked to an expense and archived.';
+
+
+
+CREATE OR REPLACE FUNCTION "public"."shopping_list_add_item"("p_home_id" "uuid", "p_name" "text", "p_quantity" "text" DEFAULT NULL::"text", "p_details" "text" DEFAULT NULL::"text", "p_reference_photo_path" "text" DEFAULT NULL::"text") RETURNS "public"."shopping_list_items"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+DECLARE
+  v_user uuid := auth.uid();
+  v_list public.shopping_lists;
+  v_item public.shopping_list_items;
+BEGIN
+  PERFORM public._assert_authenticated();
+  PERFORM public._assert_home_member(p_home_id);
+
+  IF COALESCE(btrim(p_name), '') = '' THEN
+    PERFORM public.api_error(
+      'invalid_name',
+      'Item name is required.',
+      '22023',
+      jsonb_build_object('field', 'name')
+    );
+  END IF;
+
+  IF p_reference_photo_path IS NOT NULL
+     AND p_reference_photo_path NOT LIKE 'households/%' THEN
+    PERFORM public.api_error(
+      'invalid_reference_photo_path',
+      'Reference photo path must start with households/.',
+      '22023',
+      jsonb_build_object('field', 'reference_photo_path')
+    );
+  END IF;
+
+  IF p_reference_photo_path IS NOT NULL THEN
+    PERFORM public._home_assert_quota(
+      p_home_id,
+      jsonb_build_object('shopping_item_photos', 1)
+    );
+
+    PERFORM public._home_usage_apply_delta(
+      p_home_id,
+      jsonb_build_object('shopping_item_photos', 1)
+    );
+  END IF;
+
+  v_list := public._shopping_list_get_or_create_active(p_home_id);
+
+  INSERT INTO public.shopping_list_items (
+    shopping_list_id,
+    home_id,
+    created_by_user_id,
+    name,
+    quantity,
+    details,
+    reference_photo_path,
+    reference_added_by_user_id
+  )
+  VALUES (
+    v_list.id,
+    p_home_id,
+    v_user,
+    btrim(p_name),
+    p_quantity,
+    p_details,
+    p_reference_photo_path,
+    CASE WHEN p_reference_photo_path IS NULL THEN NULL ELSE v_user END
+  )
+  RETURNING * INTO v_item;
+
+  RETURN v_item;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."shopping_list_add_item"("p_home_id" "uuid", "p_name" "text", "p_quantity" "text", "p_details" "text", "p_reference_photo_path" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."shopping_list_archive_items_for_user"("p_home_id" "uuid", "p_item_ids" "uuid"[]) RETURNS integer
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+DECLARE
+  v_user uuid := auth.uid();
+  v_updated integer := 0;
+BEGIN
+  PERFORM public._assert_authenticated();
+  PERFORM public._assert_home_member(p_home_id);
+
+  IF p_item_ids IS NULL OR cardinality(p_item_ids) = 0 THEN
+    RETURN 0;
+  END IF;
+
+  WITH ids AS (
+    SELECT DISTINCT unnest(p_item_ids) AS id
+  ),
+  updated AS (
+    UPDATE public.shopping_list_items i
+    SET
+      archived_at = now(),
+      archived_by_user_id = v_user
+    FROM ids
+    WHERE i.id = ids.id
+      AND i.home_id = p_home_id
+      AND i.archived_at IS NULL
+      AND i.completed_by_user_id = v_user
+    RETURNING 1
+  )
+  SELECT count(*)::int INTO v_updated
+  FROM updated;
+
+  RETURN v_updated;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."shopping_list_archive_items_for_user"("p_home_id" "uuid", "p_item_ids" "uuid"[]) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."shopping_list_get_for_home"("p_home_id" "uuid") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+DECLARE
+  v_list public.shopping_lists;
+  v_items jsonb;
+
+  v_unarchived_count int := 0;
+  v_uncompleted_count int := 0;
+
+  v_list_json jsonb;
+BEGIN
+  PERFORM public._assert_authenticated();
+  PERFORM public._assert_home_member(p_home_id);
+
+  SELECT *
+  INTO v_list
+  FROM public.shopping_lists sl
+  WHERE sl.home_id = p_home_id
+    AND sl.is_active = TRUE
+  LIMIT 1;
+
+  IF v_list.id IS NULL THEN
+    v_list_json := jsonb_build_object(
+      'id', NULL,
+      'home_id', p_home_id,
+      'created_by_user_id', NULL,
+      'is_active', TRUE,
+      'created_at', NULL,
+      'updated_at', NULL,
+      'items_unarchived_count', 0,
+      'items_uncompleted_count', 0
+    );
+
+    RETURN jsonb_build_object(
+      'list', v_list_json,
+      'items', '[]'::jsonb
+    );
+  END IF;
+
+  SELECT
+    COALESCE(
+      jsonb_agg(
+        jsonb_build_object(
+          'id', i.id,
+          'shopping_list_id', i.shopping_list_id,
+          'home_id', i.home_id,
+          'created_by_user_id', i.created_by_user_id,
+          'name', i.name,
+          'quantity', i.quantity,
+          'details', i.details,
+          'is_completed', i.is_completed,
+          'completed_by_user_id', i.completed_by_user_id,
+          'completed_by_avatar_id', p.avatar_id,
+          'completed_at', i.completed_at,
+          'reference_photo_path', i.reference_photo_path,
+          'reference_added_by_user_id', i.reference_added_by_user_id,
+          'linked_expense_id', i.linked_expense_id,
+          'archived_at', i.archived_at,
+          'archived_by_user_id', i.archived_by_user_id,
+          'created_at', i.created_at,
+          'updated_at', i.updated_at
+        )
+        ORDER BY i.is_completed ASC, i.completed_at DESC NULLS LAST, i.created_at DESC
+      ),
+      '[]'::jsonb
+    ) AS items_json,
+    COUNT(*)::int AS unarchived_count
+  INTO v_items, v_unarchived_count
+  FROM public.shopping_list_items i
+  LEFT JOIN public.profiles p
+    ON p.id = i.completed_by_user_id
+  WHERE i.shopping_list_id = v_list.id
+    AND i.archived_at IS NULL;
+
+  SELECT COUNT(*)::int
+  INTO v_uncompleted_count
+  FROM public.shopping_list_items i
+  WHERE i.shopping_list_id = v_list.id
+    AND i.archived_at IS NULL
+    AND i.is_completed = FALSE;
+
+  v_list_json :=
+    to_jsonb(v_list)
+    || jsonb_build_object(
+      'items_unarchived_count', v_unarchived_count,
+      'items_uncompleted_count', v_uncompleted_count
+    );
+
+  RETURN jsonb_build_object(
+    'list', v_list_json,
+    'items', v_items
+  );
+END;
+$$;
+
+
+ALTER FUNCTION "public"."shopping_list_get_for_home"("p_home_id" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."shopping_list_link_items_to_expense_for_user"("p_home_id" "uuid", "p_expense_id" "uuid", "p_item_ids" "uuid"[]) RETURNS integer
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+DECLARE
+  v_user uuid := auth.uid();
+  v_updated integer := 0;
+  v_had_any_linked boolean := false;
+BEGIN
+  PERFORM public._assert_authenticated();
+  PERFORM public._assert_home_member(p_home_id);
+
+  IF p_item_ids IS NULL OR cardinality(p_item_ids) = 0 THEN
+    RETURN 0;
+  END IF;
+
+  -- ✅ Lock the expense row to serialize "first link?" logic per expense.
+  PERFORM 1
+  FROM public.expenses e
+  WHERE e.id = p_expense_id
+    AND e.home_id = p_home_id
+    AND e.created_by_user_id = v_user
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    PERFORM public.api_error(
+      'invalid_expense',
+      'Expense does not belong to caller in this home.',
+      '22023',
+      jsonb_build_object('home_id', p_home_id, 'expense_id', p_expense_id)
+    );
+  END IF;
+
+  -- With expense locked, this check is now concurrency-safe.
+  SELECT EXISTS (
+    SELECT 1
+    FROM public.shopping_list_items i
+    WHERE i.home_id = p_home_id
+      AND i.linked_expense_id = p_expense_id
+  )
+  INTO v_had_any_linked;
+
+  WITH ids AS (
+    SELECT DISTINCT unnest(p_item_ids) AS id
+  ),
+  updated AS (
+    UPDATE public.shopping_list_items i
+    SET
+      linked_expense_id = p_expense_id,
+      archived_at = now(),
+      archived_by_user_id = v_user
+    FROM ids
+    WHERE i.id = ids.id
+      AND i.home_id = p_home_id
+      AND i.archived_at IS NULL
+      AND i.is_completed = TRUE
+      AND i.completed_by_user_id = v_user
+      AND i.linked_expense_id IS NULL
+    RETURNING 1
+  )
+  SELECT count(*)::int INTO v_updated
+  FROM updated;
+
+  -- If we created the first link for this expense, bump active_expenses (+1).
+  -- No quota assertion here: exceeding limit must NOT block.
+  IF v_updated > 0 AND NOT v_had_any_linked THEN
+    PERFORM public._home_usage_apply_delta(
+      p_home_id,
+      jsonb_build_object('active_expenses', 1)
+    );
+  END IF;
+
+  RETURN v_updated;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."shopping_list_link_items_to_expense_for_user"("p_home_id" "uuid", "p_expense_id" "uuid", "p_item_ids" "uuid"[]) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."shopping_list_prepare_expense_for_user"("p_home_id" "uuid") RETURNS TABLE("default_description" "text", "default_notes" "text", "item_ids" "uuid"[], "item_count" integer)
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+DECLARE
+  v_user uuid := auth.uid();
+BEGIN
+  PERFORM public._assert_authenticated();
+  PERFORM public._assert_home_member(p_home_id);
+
+  RETURN QUERY
+  WITH candidate AS (
+    SELECT i.id, i.name, i.completed_at, i.created_at
+    FROM public.shopping_list_items i
+    WHERE i.home_id = p_home_id
+      AND i.archived_at IS NULL
+      AND i.is_completed = TRUE
+      AND i.completed_by_user_id = v_user
+      AND i.linked_expense_id IS NULL
+  )
+  SELECT
+    format('Groceries (%s items)', count(*)::int) AS default_description,
+    left(string_agg(c.name, E'\n' ORDER BY c.completed_at DESC NULLS LAST, c.created_at DESC), 2000) AS default_notes,
+    array_agg(c.id ORDER BY c.completed_at DESC NULLS LAST, c.created_at DESC) AS item_ids,
+    count(*)::int AS item_count
+  FROM candidate c
+  HAVING count(*) > 0;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."shopping_list_prepare_expense_for_user"("p_home_id" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."shopping_list_update_item"("p_item_id" "uuid", "p_name" "text" DEFAULT NULL::"text", "p_quantity" "text" DEFAULT NULL::"text", "p_details" "text" DEFAULT NULL::"text", "p_is_completed" boolean DEFAULT NULL::boolean, "p_reference_photo_path" "text" DEFAULT NULL::"text", "p_replace_photo" boolean DEFAULT false) RETURNS "public"."shopping_list_items"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+DECLARE
+  v_user uuid := auth.uid();
+  v_existing public.shopping_list_items;
+  v_next_name text;
+  v_next_quantity text;
+  v_next_details text;
+  v_next_is_completed boolean;
+  v_next_completed_by uuid;
+  v_next_completed_at timestamptz;
+  v_next_reference_path text;
+  v_next_reference_added_by uuid;
+  v_updated public.shopping_list_items;
+BEGIN
+  PERFORM public._assert_authenticated();
+
+  SELECT i.*
+  INTO v_existing
+  FROM public.shopping_list_items i
+  JOIN public.memberships m
+    ON m.home_id = i.home_id
+   AND m.user_id = v_user
+   AND m.is_current = TRUE
+  WHERE i.id = p_item_id
+    AND i.archived_at IS NULL
+  FOR UPDATE;
+
+  IF v_existing.id IS NULL THEN
+    PERFORM public.api_error(
+      'item_not_found',
+      'Shopping list item not found.',
+      'P0002',
+      jsonb_build_object('item_id', p_item_id)
+    );
+  END IF;
+
+  IF p_name IS NOT NULL AND COALESCE(btrim(p_name), '') = '' THEN
+    PERFORM public.api_error(
+      'invalid_name',
+      'Item name is required.',
+      '22023',
+      jsonb_build_object('field', 'name')
+    );
+  END IF;
+
+  IF p_reference_photo_path IS NOT NULL
+     AND p_reference_photo_path NOT LIKE 'households/%' THEN
+    PERFORM public.api_error(
+      'invalid_reference_photo_path',
+      'Reference photo path must start with households/.',
+      '22023',
+      jsonb_build_object('field', 'reference_photo_path')
+    );
+  END IF;
+
+  IF v_existing.reference_photo_path IS NULL
+     AND p_reference_photo_path IS NOT NULL THEN
+    PERFORM public._home_assert_quota(
+      v_existing.home_id,
+      jsonb_build_object('shopping_item_photos', 1)
+    );
+
+    PERFORM public._home_usage_apply_delta(
+      v_existing.home_id,
+      jsonb_build_object('shopping_item_photos', 1)
+    );
+  END IF;
+
+  v_next_name := COALESCE(NULLIF(btrim(p_name), ''), v_existing.name);
+  v_next_quantity := COALESCE(p_quantity, v_existing.quantity);
+  v_next_details := COALESCE(p_details, v_existing.details);
+
+  IF p_is_completed IS NULL THEN
+    v_next_is_completed := v_existing.is_completed;
+    v_next_completed_by := v_existing.completed_by_user_id;
+    v_next_completed_at := v_existing.completed_at;
+  ELSIF p_is_completed THEN
+    v_next_is_completed := TRUE;
+    v_next_completed_by := v_user;
+    v_next_completed_at := now();
+  ELSE
+    v_next_is_completed := FALSE;
+    v_next_completed_by := NULL;
+    v_next_completed_at := NULL;
+  END IF;
+
+  v_next_reference_path := v_existing.reference_photo_path;
+  v_next_reference_added_by := v_existing.reference_added_by_user_id;
+
+  IF p_replace_photo THEN
+    IF p_reference_photo_path IS NULL THEN
+      PERFORM public.api_error(
+        'photo_delete_not_allowed',
+        'Removing a reference photo is not allowed.',
+        '22023',
+        jsonb_build_object('item_id', p_item_id)
+      );
+    END IF;
+
+    v_next_reference_path := p_reference_photo_path;
+    v_next_reference_added_by := v_user;
+
+  ELSIF v_existing.reference_photo_path IS NULL AND p_reference_photo_path IS NOT NULL THEN
+    v_next_reference_path := p_reference_photo_path;
+    v_next_reference_added_by := v_user;
+  END IF;
+
+  UPDATE public.shopping_list_items
+  SET
+    name = v_next_name,
+    quantity = v_next_quantity,
+    details = v_next_details,
+    is_completed = v_next_is_completed,
+    completed_by_user_id = v_next_completed_by,
+    completed_at = v_next_completed_at,
+    reference_photo_path = v_next_reference_path,
+    reference_added_by_user_id = v_next_reference_added_by
+  WHERE id = p_item_id
+  RETURNING * INTO v_updated;
+
+  RETURN v_updated;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."shopping_list_update_item"("p_item_id" "uuid", "p_name" "text", "p_quantity" "text", "p_details" "text", "p_is_completed" boolean, "p_reference_photo_path" "text", "p_replace_photo" boolean) OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."today_flow_list"("p_home_id" "uuid", "p_state" "public"."chore_state", "p_local_date" "date" DEFAULT CURRENT_DATE) RETURNS TABLE("id" "uuid", "home_id" "uuid", "name" "text", "start_date" "date", "state" "public"."chore_state")
     LANGUAGE "sql" SECURITY DEFINER
     SET "search_path" TO ''
@@ -15109,6 +15643,16 @@ ALTER TABLE ONLY "public"."share_events"
 
 
 
+ALTER TABLE ONLY "public"."shopping_list_items"
+    ADD CONSTRAINT "shopping_list_items_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."shopping_lists"
+    ADD CONSTRAINT "shopping_lists_pkey" PRIMARY KEY ("id");
+
+
+
 ALTER TABLE ONLY "public"."app_version"
     ADD CONSTRAINT "uq_app_version" UNIQUE ("version_number");
 
@@ -15349,6 +15893,22 @@ CREATE INDEX "idx_preference_taxonomy_defs_domain" ON "public"."preference_taxon
 
 
 
+CREATE INDEX "idx_shopping_list_items_expense" ON "public"."shopping_list_items" USING "btree" ("linked_expense_id") WHERE ("linked_expense_id" IS NOT NULL);
+
+
+
+CREATE INDEX "idx_shopping_list_items_home_active" ON "public"."shopping_list_items" USING "btree" ("home_id", "archived_at", "is_completed", "completed_at" DESC, "created_at" DESC);
+
+
+
+CREATE INDEX "idx_shopping_list_items_list_active" ON "public"."shopping_list_items" USING "btree" ("shopping_list_id", "archived_at", "created_at" DESC);
+
+
+
+CREATE INDEX "idx_shopping_lists_home_active" ON "public"."shopping_lists" USING "btree" ("home_id", "is_active");
+
+
+
 CREATE INDEX "ix_complaint_routes_lookup" ON "public"."complaint_rewrite_routes" USING "btree" ("surface", "lane", "rewrite_strength", "active", "priority");
 
 
@@ -15450,6 +16010,14 @@ CREATE UNIQUE INDEX "uq_profiles_username" ON "public"."profiles" USING "btree" 
 
 
 COMMENT ON INDEX "public"."uq_profiles_username" IS 'Ensures each username is globally unique (case-insensitive).';
+
+
+
+CREATE UNIQUE INDEX "uq_shopping_lists_id_home" ON "public"."shopping_lists" USING "btree" ("id", "home_id");
+
+
+
+CREATE UNIQUE INDEX "uq_shopping_lists_one_active_per_home" ON "public"."shopping_lists" USING "btree" ("home_id") WHERE ("is_active" = true);
 
 
 
@@ -15558,6 +16126,14 @@ CREATE OR REPLACE TRIGGER "trg_rewrite_provider_batches_updated_at" BEFORE UPDAT
 
 
 CREATE OR REPLACE TRIGGER "trg_rewrite_requests_updated_at" BEFORE UPDATE ON "public"."rewrite_requests" FOR EACH ROW EXECUTE FUNCTION "public"."_touch_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_shopping_list_items_updated_at" BEFORE UPDATE ON "public"."shopping_list_items" FOR EACH ROW EXECUTE FUNCTION "public"."_touch_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_shopping_lists_updated_at" BEFORE UPDATE ON "public"."shopping_lists" FOR EACH ROW EXECUTE FUNCTION "public"."_touch_updated_at"();
 
 
 
@@ -15712,6 +16288,11 @@ ALTER TABLE ONLY "public"."recipient_snapshots"
 
 ALTER TABLE ONLY "public"."rewrite_jobs"
     ADD CONSTRAINT "fk_rewrite_jobs_provider_batch" FOREIGN KEY ("provider_batch_id") REFERENCES "public"."rewrite_provider_batches"("provider_batch_id");
+
+
+
+ALTER TABLE ONLY "public"."shopping_list_items"
+    ADD CONSTRAINT "fk_shopping_list_items_list_home" FOREIGN KEY ("shopping_list_id", "home_id") REFERENCES "public"."shopping_lists"("id", "home_id") ON DELETE CASCADE;
 
 
 
@@ -16020,6 +16601,46 @@ ALTER TABLE ONLY "public"."shared_preferences"
 
 
 
+ALTER TABLE ONLY "public"."shopping_list_items"
+    ADD CONSTRAINT "shopping_list_items_archived_by_user_id_fkey" FOREIGN KEY ("archived_by_user_id") REFERENCES "public"."profiles"("id") ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "public"."shopping_list_items"
+    ADD CONSTRAINT "shopping_list_items_completed_by_user_id_fkey" FOREIGN KEY ("completed_by_user_id") REFERENCES "public"."profiles"("id") ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "public"."shopping_list_items"
+    ADD CONSTRAINT "shopping_list_items_created_by_user_id_fkey" FOREIGN KEY ("created_by_user_id") REFERENCES "public"."profiles"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."shopping_list_items"
+    ADD CONSTRAINT "shopping_list_items_home_id_fkey" FOREIGN KEY ("home_id") REFERENCES "public"."homes"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."shopping_list_items"
+    ADD CONSTRAINT "shopping_list_items_linked_expense_id_fkey" FOREIGN KEY ("linked_expense_id") REFERENCES "public"."expenses"("id") ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "public"."shopping_list_items"
+    ADD CONSTRAINT "shopping_list_items_reference_added_by_user_id_fkey" FOREIGN KEY ("reference_added_by_user_id") REFERENCES "public"."profiles"("id") ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "public"."shopping_lists"
+    ADD CONSTRAINT "shopping_lists_created_by_user_id_fkey" FOREIGN KEY ("created_by_user_id") REFERENCES "public"."profiles"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."shopping_lists"
+    ADD CONSTRAINT "shopping_lists_home_id_fkey" FOREIGN KEY ("home_id") REFERENCES "public"."homes"("id") ON DELETE CASCADE;
+
+
+
 ALTER TABLE ONLY "public"."user_subscriptions"
     ADD CONSTRAINT "user_subscriptions_home_id_fkey" FOREIGN KEY ("home_id") REFERENCES "public"."homes"("id") ON DELETE CASCADE;
 
@@ -16242,6 +16863,12 @@ ALTER TABLE "public"."share_events" ENABLE ROW LEVEL SECURITY;
 
 
 ALTER TABLE "public"."shared_preferences" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."shopping_list_items" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."shopping_lists" ENABLE ROW LEVEL SECURITY;
 
 
 ALTER TABLE "public"."user_subscriptions" ENABLE ROW LEVEL SECURITY;
@@ -16815,6 +17442,16 @@ GRANT ALL ON FUNCTION "public"."_sha256_hex"("p_input" "text") TO "service_role"
 GRANT ALL ON FUNCTION "public"."_share_log_event_internal"("p_user_id" "uuid", "p_home_id" "uuid", "p_feature" "text", "p_channel" "text") TO "anon";
 GRANT ALL ON FUNCTION "public"."_share_log_event_internal"("p_user_id" "uuid", "p_home_id" "uuid", "p_feature" "text", "p_channel" "text") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."_share_log_event_internal"("p_user_id" "uuid", "p_home_id" "uuid", "p_feature" "text", "p_channel" "text") TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."shopping_lists" TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."_shopping_list_get_or_create_active"("p_home_id" "uuid") TO "anon";
+GRANT ALL ON FUNCTION "public"."_shopping_list_get_or_create_active"("p_home_id" "uuid") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."_shopping_list_get_or_create_active"("p_home_id" "uuid") TO "service_role";
 
 
 
@@ -19042,6 +19679,46 @@ REVOKE ALL ON FUNCTION "public"."share_log_event"("p_home_id" "uuid", "p_feature
 GRANT ALL ON FUNCTION "public"."share_log_event"("p_home_id" "uuid", "p_feature" "text", "p_channel" "text") TO "anon";
 GRANT ALL ON FUNCTION "public"."share_log_event"("p_home_id" "uuid", "p_feature" "text", "p_channel" "text") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."share_log_event"("p_home_id" "uuid", "p_feature" "text", "p_channel" "text") TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."shopping_list_items" TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."shopping_list_add_item"("p_home_id" "uuid", "p_name" "text", "p_quantity" "text", "p_details" "text", "p_reference_photo_path" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."shopping_list_add_item"("p_home_id" "uuid", "p_name" "text", "p_quantity" "text", "p_details" "text", "p_reference_photo_path" "text") TO "service_role";
+GRANT ALL ON FUNCTION "public"."shopping_list_add_item"("p_home_id" "uuid", "p_name" "text", "p_quantity" "text", "p_details" "text", "p_reference_photo_path" "text") TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "public"."shopping_list_archive_items_for_user"("p_home_id" "uuid", "p_item_ids" "uuid"[]) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."shopping_list_archive_items_for_user"("p_home_id" "uuid", "p_item_ids" "uuid"[]) TO "service_role";
+GRANT ALL ON FUNCTION "public"."shopping_list_archive_items_for_user"("p_home_id" "uuid", "p_item_ids" "uuid"[]) TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "public"."shopping_list_get_for_home"("p_home_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."shopping_list_get_for_home"("p_home_id" "uuid") TO "service_role";
+GRANT ALL ON FUNCTION "public"."shopping_list_get_for_home"("p_home_id" "uuid") TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "public"."shopping_list_link_items_to_expense_for_user"("p_home_id" "uuid", "p_expense_id" "uuid", "p_item_ids" "uuid"[]) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."shopping_list_link_items_to_expense_for_user"("p_home_id" "uuid", "p_expense_id" "uuid", "p_item_ids" "uuid"[]) TO "service_role";
+GRANT ALL ON FUNCTION "public"."shopping_list_link_items_to_expense_for_user"("p_home_id" "uuid", "p_expense_id" "uuid", "p_item_ids" "uuid"[]) TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "public"."shopping_list_prepare_expense_for_user"("p_home_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."shopping_list_prepare_expense_for_user"("p_home_id" "uuid") TO "service_role";
+GRANT ALL ON FUNCTION "public"."shopping_list_prepare_expense_for_user"("p_home_id" "uuid") TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "public"."shopping_list_update_item"("p_item_id" "uuid", "p_name" "text", "p_quantity" "text", "p_details" "text", "p_is_completed" boolean, "p_reference_photo_path" "text", "p_replace_photo" boolean) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."shopping_list_update_item"("p_item_id" "uuid", "p_name" "text", "p_quantity" "text", "p_details" "text", "p_is_completed" boolean, "p_reference_photo_path" "text", "p_replace_photo" boolean) TO "service_role";
+GRANT ALL ON FUNCTION "public"."shopping_list_update_item"("p_item_id" "uuid", "p_name" "text", "p_quantity" "text", "p_details" "text", "p_is_completed" boolean, "p_reference_photo_path" "text", "p_replace_photo" boolean) TO "authenticated";
 
 
 
