@@ -17,7 +17,7 @@ v1.2 splits the flow into three focused maps: (1) trigger → orchestrator, (2) 
 ```mermaid
 flowchart TD
   MOOD["mood_submit_v2"] --> TRIG["complaint_rewrite_triggers<br/>(status=queued)"]
-  PGCRON["pg_cron 5m<br/>complaint_trigger_runner_every_5m"] --> RUNNER["complaint_trigger_cron_runner (edge)<br/>complaint_trigger_pop_pending()"]
+  SCHED1["Scheduled Edge Function (5m)<br/>complaint_trigger_cron_runner"] --> RUNNER["complaint_trigger_cron_runner (edge)<br/>complaint_trigger_pop_pending()"]
   TRIG --> RUNNER
   RUNNER --> ORCH["Edge Orchestrator<br/>complaint_orchestrator<br/>(trigger_request_id enforced)"]
 
@@ -36,7 +36,7 @@ flowchart TD
 ## 2) Batch Submission (OpenAI Responses only — Step 1)
 ```mermaid
 flowchart TD
-  CRON["pg_cron 15m<br/>complaint_rewrite_batch_submitter_15m"] --> SUB["rewrite_batch_submitter (edge)"]
+  SCHED2["Scheduled Edge Function (15m)<br/>rewrite_batch_submitter"] --> SUB["rewrite_batch_submitter (edge)"]
   SUB --> CLAIM["claim_rewrite_jobs_for_batch_submit_v1<br/>(status = queued)"]
   SUB --> FETCH["complaint_rewrite_request_fetch_v1<br/>(per job)"]
   SUB --> JSONL["build JSONL lines<br/>providers.ts (custom_id = job_id)"]
@@ -55,7 +55,7 @@ flowchart TD
 ## 3) Batch Collection & Finalization
 ```mermaid
 flowchart TD
-  CRONC["pg_cron 30m<br/>complaint_rewrite_batch_collector_30m"] --> COL["rewrite_batch_collector (edge)"]
+  SCHED3["Scheduled Edge Function (30m)<br/>rewrite_batch_collector"] --> COL["rewrite_batch_collector (edge)"]
   COL --> LIST["rewrite_batch_list_pending_v1"]
   COL -->|poll| OAI["OpenAI Batch status + output file"]
   COL --> PARSE["parse JSONL lines<br/>extractRewrittenText..."]

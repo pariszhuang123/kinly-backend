@@ -18,14 +18,14 @@ Define how Kinly processes queued complaint rewrite jobs safely and predictably 
 Goals:
 - Prevent cost spikes and retry storms.
 - Ensure deterministic throughput (jobs either process or wait).
-- Make “waiting for next cron run” an explicit, documented behavior.
+- Make “waiting for next scheduled run” an explicit, documented behavior.
 - Keep frontend unaware of provider mechanics and queue limits.
 
 Scope: queue semantics, per-run limits, deferral, claiming/locking, retry/failure, audit signals. This complements `complaint_rewrite_async_jobs_v1` (execution rules) by specifying how jobs are picked up.
 
 ## 2) Key definitions
 - Job: one rewrite task stored in DB.
-- Worker run: one Edge Function invocation (cron or admin trigger).
+- Worker run: one Edge Function invocation (scheduled or admin trigger).
 - Backpressure: when queued jobs exceed per-run capacity; excess remain queued.
 
 ## 3) Job lifecycle states (canonical vocabulary)
@@ -84,8 +84,8 @@ Jobs MUST NOT skip directly from `queued` to `completed` without `processing` un
 Notes: `(rewrite_request_id, recipient_user_id)` MUST be unique (idempotent execution unit). Raw message text MUST NOT be stored in `routing_decision`. `not_before_at` enables deliberate deferral/batching windows. Timestamps are UTC.
 
 ## 5) Worker trigger
-- Recommended: DB scheduler (e.g., pg_cron) on fixed cadence for cost control.
-- Batch lane uses two schedulers: `complaint_rewrite_batch_submitter_15m` and `complaint_rewrite_batch_collector_30m`.
+- Recommended: scheduled Edge Functions on fixed cadence for cost control.
+- Batch lane uses two scheduled functions: `rewrite_batch_submitter` (15m) and `rewrite_batch_collector` (30m).
 - Optional: admin-only manual trigger for recovery.
 - Frontend MUST NOT trigger workers.
 
@@ -138,12 +138,12 @@ Frontend assumes rewrites complete asynchronously; timing not guaranteed. Job st
 - Router MUST NOT receive raw message content (per routing contract).
 
 ## 13) Versioning rules
-Changing defaults (e.g., `max_jobs_per_run`, cron cadence) → config change only.  
+Changing defaults (e.g., `max_jobs_per_run`, schedule cadence) → config change only.  
 Changing state machine semantics or claiming rules → MAJOR bump.
 
 ## 14) Suggested environment defaults (config, not contract)
-- **Dev**: cron every 2h; `max_jobs_per_run = 5`; `max_runtime_seconds = 120`; backoff `[120, 600]`; `claim_timeout_seconds = 300`.
-- **Stage**: cron every 30m; `max_jobs_per_run = 30`; `max_runtime_seconds = 180`; backoff `[300, 1800]`; `claim_timeout_seconds = 900`.
-- **Prod**: cron every 60–120m; `max_jobs_per_run = 200` (scale to hourly arrival rate); `max_runtime_seconds = 240`; backoff `[3600, 21600]`; `claim_timeout_seconds = 3600`.
+- **Dev**: schedule every 2h; `max_jobs_per_run = 5`; `max_runtime_seconds = 120`; backoff `[120, 600]`; `claim_timeout_seconds = 300`.
+- **Stage**: schedule every 30m; `max_jobs_per_run = 30`; `max_runtime_seconds = 180`; backoff `[300, 1800]`; `claim_timeout_seconds = 900`.
+- **Prod**: schedule every 60–120m; `max_jobs_per_run = 200` (scale to hourly arrival rate); `max_runtime_seconds = 240`; backoff `[3600, 21600]`; `claim_timeout_seconds = 3600`.
 
-Rationale: longer cadence reduces scheduler cost; per-run cap sized to drain hourly arrivals; long backoff prevents retry storms between long cron intervals.
+Rationale: longer cadence reduces scheduler cost; per-run cap sized to drain hourly arrivals; long backoff prevents retry storms between long schedule intervals.

@@ -480,30 +480,6 @@ $$;
 ALTER FUNCTION "public"."_complaint_topics_valid"("p" "jsonb") OWNER TO "postgres";
 
 
-CREATE OR REPLACE FUNCTION "public"."_cron_call_complaint_trigger_runner"() RETURNS "void"
-    LANGUAGE "plpgsql" SECURITY DEFINER
-    SET "search_path" TO ''
-    AS $$
-declare
-  v_url text := current_setting('app.settings.supabase_url', true)
-    || '/functions/v1/complaint_trigger_cron_runner';
-  v_secret text := current_setting('app.settings.worker_shared_secret', true);
-begin
-  perform net.http_post(
-    url := v_url,
-    headers := jsonb_strip_nulls(jsonb_build_object(
-      'Content-Type','application/json',
-      'x-internal-secret', v_secret
-    )),
-    body := '{}'::jsonb
-  );
-end;
-$$;
-
-
-ALTER FUNCTION "public"."_cron_call_complaint_trigger_runner"() OWNER TO "postgres";
-
-
 CREATE OR REPLACE FUNCTION "public"."_current_user_id"() RETURNS "uuid"
     LANGUAGE "sql" STABLE
     SET "search_path" TO ''
@@ -7462,6 +7438,41 @@ $$;
 ALTER FUNCTION "public"."home_assignees_list"("p_home_id" "uuid") OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."home_assignees_list_v2"("p_home_id" "uuid") RETURNS TABLE("user_id" "uuid", "username" "text", "full_name" "text", "email" "text", "avatar_storage_path" "text")
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+BEGIN
+  -- Require auth
+  PERFORM public._assert_authenticated();
+
+  -- Ensure caller belongs to this home
+  PERFORM public._assert_home_member(p_home_id);
+
+  -- Return all active members as potential assignees
+  RETURN QUERY
+  SELECT
+    m.user_id,
+    p.username,
+    p.full_name,
+    p.email,
+    a.storage_path
+  FROM public.memberships m
+  JOIN public.profiles p
+    ON p.id = m.user_id
+  LEFT JOIN public.avatars a
+    ON a.id = p.avatar_id
+  WHERE m.home_id = p_home_id
+    AND m.is_current = TRUE
+  ORDER BY
+    COALESCE(NULLIF(p.full_name, ''), NULLIF(p.username, ''), p.email);
+END;
+$$;
+
+
+ALTER FUNCTION "public"."home_assignees_list_v2"("p_home_id" "uuid") OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."home_entitlements_refresh"("_home_id" "uuid") RETURNS "void"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO ''
@@ -11616,9 +11627,10 @@ BEGIN
   FROM public.gratitude_wall_personal_items i
   JOIN public.profiles p
     ON p.id = i.author_user_id
-  JOIN public.avatars a
+  LEFT JOIN public.avatars a
     ON a.id = p.avatar_id
   WHERE i.recipient_user_id = v_user_id
+    AND i.mood NOT IN ('rainy', 'thunderstorm')
     AND (
       p_before_at IS NULL
       OR i.created_at < p_before_at
@@ -11633,7 +11645,7 @@ $$;
 ALTER FUNCTION "public"."personal_gratitude_inbox_list_v1"("p_limit" integer, "p_before_at" timestamp with time zone, "p_before_id" "uuid") OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "public"."personal_gratitude_inbox_list_v1"("p_limit" integer, "p_before_at" timestamp with time zone, "p_before_id" "uuid") IS 'Recipient personal gratitude inbox list (paged). Resolves author username + avatar storage_path at read time. Cursor requires both before_at and before_id.';
+COMMENT ON FUNCTION "public"."personal_gratitude_inbox_list_v1"("p_limit" integer, "p_before_at" timestamp with time zone, "p_before_id" "uuid") IS 'Recipient personal gratitude inbox list (paged). Resolves author username + avatar storage_path at read time. Cursor requires both before_at and before_id. Excludes rainy/thunderstorm moods.';
 
 
 
@@ -11656,12 +11668,13 @@ BEGIN
   INTO v_total, v_authors, v_homes
   FROM public.gratitude_wall_personal_items i
   WHERE i.recipient_user_id = v_user_id
+    AND i.mood NOT IN ('rainy', 'thunderstorm')
     AND (NOT p_exclude_self OR i.author_user_id <> v_user_id);
 
   RETURN jsonb_build_object(
-    'total_received',     COALESCE(v_total, 0),
-    'unique_individuals', COALESCE(v_authors, 0),
-    'unique_homes',       COALESCE(v_homes, 0)
+    'total_received',     v_total,
+    'unique_individuals', v_authors,
+    'unique_homes',       v_homes
   );
 END;
 $$;
@@ -11670,7 +11683,7 @@ $$;
 ALTER FUNCTION "public"."personal_gratitude_showcase_stats_v1"("p_exclude_self" boolean) OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "public"."personal_gratitude_showcase_stats_v1"("p_exclude_self" boolean) IS 'Showcase stats for auth.uid() from personal gratitude inbox: total received items, unique authors, unique homes.';
+COMMENT ON FUNCTION "public"."personal_gratitude_showcase_stats_v1"("p_exclude_self" boolean) IS 'Showcase stats for auth.uid() from personal gratitude inbox: total received items, unique authors, unique homes. Excludes rainy/thunderstorm moods.';
 
 
 
@@ -11696,6 +11709,10 @@ $$;
 ALTER FUNCTION "public"."personal_gratitude_wall_mark_read_v1"() OWNER TO "postgres";
 
 
+COMMENT ON FUNCTION "public"."personal_gratitude_wall_mark_read_v1"() IS 'Self-only marker to record last_read_at for personal gratitude wall.';
+
+
+
 CREATE OR REPLACE FUNCTION "public"."personal_gratitude_wall_status_v1"() RETURNS TABLE("has_unread" boolean, "last_read_at" timestamp with time zone)
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO ''
@@ -11717,6 +11734,7 @@ BEGIN
   FROM public.gratitude_wall_personal_items i
   WHERE i.recipient_user_id = v_user_id
     AND i.author_user_id <> v_user_id
+    AND i.mood NOT IN ('rainy', 'thunderstorm')
   ORDER BY i.created_at DESC, i.id DESC
   LIMIT 1;
 
@@ -11733,6 +11751,10 @@ $$;
 
 
 ALTER FUNCTION "public"."personal_gratitude_wall_status_v1"() OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."personal_gratitude_wall_status_v1"() IS 'Self-only unread status for personal gratitude wall. Ignores moods rainy/thunderstorm (not counted as unread).';
+
 
 
 CREATE OR REPLACE FUNCTION "public"."preference_reports_acknowledge"("p_report_id" "uuid") RETURNS "jsonb"
@@ -17250,11 +17272,6 @@ GRANT ALL ON FUNCTION "public"."_complaint_topics_valid"("p" "jsonb") TO "servic
 
 
 
-REVOKE ALL ON FUNCTION "public"."_cron_call_complaint_trigger_runner"() FROM PUBLIC;
-GRANT ALL ON FUNCTION "public"."_cron_call_complaint_trigger_runner"() TO "service_role";
-
-
-
 REVOKE ALL ON FUNCTION "public"."_current_user_id"() FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."_current_user_id"() TO "service_role";
 
@@ -19125,6 +19142,13 @@ GRANT ALL ON FUNCTION "public"."handle_new_user"() TO "service_role";
 REVOKE ALL ON FUNCTION "public"."home_assignees_list"("p_home_id" "uuid") FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."home_assignees_list"("p_home_id" "uuid") TO "service_role";
 GRANT ALL ON FUNCTION "public"."home_assignees_list"("p_home_id" "uuid") TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "public"."home_assignees_list_v2"("p_home_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."home_assignees_list_v2"("p_home_id" "uuid") TO "anon";
+GRANT ALL ON FUNCTION "public"."home_assignees_list_v2"("p_home_id" "uuid") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."home_assignees_list_v2"("p_home_id" "uuid") TO "service_role";
 
 
 

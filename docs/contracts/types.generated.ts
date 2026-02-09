@@ -3153,7 +3153,6 @@ export type Database = {
         }[]
       }
       _complaint_topics_valid: { Args: { p: Json }; Returns: boolean }
-      _cron_call_complaint_trigger_runner: { Args: never; Returns: undefined }
       _current_user_id: { Args: never; Returns: string }
       _ensure_unique_avatar_for_home: {
         Args: { p_home_id: string; p_user_id: string }
@@ -4097,6 +4096,16 @@ export type Database = {
           email: string
           full_name: string
           user_id: string
+        }[]
+      }
+      home_assignees_list_v2: {
+        Args: { p_home_id: string }
+        Returns: {
+          avatar_storage_path: string
+          email: string
+          full_name: string
+          user_id: string
+          username: string
         }[]
       }
       home_entitlements_refresh: {
