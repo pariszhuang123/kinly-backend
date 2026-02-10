@@ -364,6 +364,68 @@ SELECT public.shopping_list_update_item(
   FALSE
 );
 
+-- Owner should not see member completion state/details.
+SELECT set_config(
+  'request.jwt.claim.sub',
+  (SELECT user_id::text FROM tmp_users WHERE label = 'owner'),
+  true
+);
+SELECT set_config('request.jwt.claim.role', 'authenticated', true);
+
+SELECT is(
+  (
+    SELECT (item->>'is_completed')::boolean
+    FROM jsonb_array_elements(public.shopping_list_get_for_home((SELECT home_id FROM tmp_homes WHERE label = 'primary'))->'items') item
+    WHERE item->>'id' = (SELECT item_id::text FROM tmp_items WHERE label = 'milk')
+    LIMIT 1
+  ),
+  FALSE,
+  'owner does not see member-completed milk item as completed'
+);
+
+SELECT ok(
+  (
+    SELECT
+      item->>'completed_by_user_id' IS NULL
+      AND item->>'completed_by_avatar_id' IS NULL
+      AND item->>'completed_at' IS NULL
+    FROM jsonb_array_elements(public.shopping_list_get_for_home((SELECT home_id FROM tmp_homes WHERE label = 'primary'))->'items') item
+    WHERE item->>'id' = (SELECT item_id::text FROM tmp_items WHERE label = 'milk')
+    LIMIT 1
+  ),
+  'owner does not see completion identity/timestamp for member-completed item'
+);
+
+SELECT is(
+  (
+    SELECT (public.shopping_list_get_for_home((SELECT home_id FROM tmp_homes WHERE label = 'primary'))->'list'->>'items_uncompleted_count')::int
+  ),
+  2,
+  'owner sees both member-completed items counted as uncompleted'
+);
+
+SELECT pg_temp.expect_api_error(
+  $$ SELECT public.shopping_list_update_item(
+      (SELECT item_id FROM tmp_items WHERE label = 'milk'),
+      NULL,
+      NULL,
+      NULL,
+      TRUE,
+      NULL,
+      FALSE
+    ); $$,
+  'item_already_completed_by_other',
+  'owner cannot take over completion from member'
+);
+
+-- Back to member for caller-owned completion flows.
+SELECT set_config(
+  'request.jwt.claim.sub',
+  (SELECT user_id::text FROM tmp_users WHERE label = 'member'),
+  true
+);
+SELECT set_config('request.jwt.claim.role', 'authenticated', true);
+
 SELECT is(
   (
     SELECT item_count

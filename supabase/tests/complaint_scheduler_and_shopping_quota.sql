@@ -51,27 +51,63 @@ VALUES
 ON CONFLICT (id) DO NOTHING;
 
 -- -------------------------------------------------------------------
--- 1) Scheduler refactor checks (migration 20260322090010)
+-- 1) Scheduler final-state checks (cleanup + restore migrations)
 -- -------------------------------------------------------------------
 SELECT ok(
-  NOT EXISTS (
+  EXISTS (
     SELECT 1 FROM cron.job WHERE jobname = 'complaint_trigger_runner_every_5m'
   ),
-  'runner DB->HTTP cron job is unscheduled'
+  'runner cron job is scheduled'
 );
 
 SELECT ok(
-  NOT EXISTS (
+  EXISTS (
     SELECT 1 FROM cron.job WHERE jobname = 'complaint_rewrite_batch_submitter_15m'
   ),
-  'batch submitter DB->HTTP cron job is unscheduled'
+  'batch submitter cron job is scheduled'
 );
 
 SELECT ok(
-  NOT EXISTS (
+  EXISTS (
     SELECT 1 FROM cron.job WHERE jobname = 'complaint_rewrite_batch_collector_30m'
   ),
-  'batch collector DB->HTTP cron job is unscheduled'
+  'batch collector cron job is scheduled'
+);
+
+SELECT ok(
+  EXISTS (
+    SELECT 1
+    FROM cron.job
+    WHERE jobname = 'complaint_trigger_runner_every_5m'
+      AND command LIKE '%vault.decrypted_secrets%'
+      AND command LIKE '%RUNNER_SHARED_SECRET%'
+      AND command LIKE '%SUPABASE_URL%'
+  ),
+  'runner cron command reads URL/secret from Vault'
+);
+
+SELECT ok(
+  EXISTS (
+    SELECT 1
+    FROM cron.job
+    WHERE jobname = 'complaint_rewrite_batch_submitter_15m'
+      AND command LIKE '%vault.decrypted_secrets%'
+      AND command LIKE '%WORKER_SHARED_SECRET%'
+      AND command LIKE '%SUPABASE_URL%'
+  ),
+  'batch submitter cron command reads URL/secret from Vault'
+);
+
+SELECT ok(
+  EXISTS (
+    SELECT 1
+    FROM cron.job
+    WHERE jobname = 'complaint_rewrite_batch_collector_30m'
+      AND command LIKE '%vault.decrypted_secrets%'
+      AND command LIKE '%WORKER_SHARED_SECRET%'
+      AND command LIKE '%SUPABASE_URL%'
+  ),
+  'batch collector cron command reads URL/secret from Vault'
 );
 
 SELECT ok(

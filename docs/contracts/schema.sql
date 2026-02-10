@@ -7460,7 +7460,7 @@ BEGIN
   FROM public.memberships m
   JOIN public.profiles p
     ON p.id = m.user_id
-  LEFT JOIN public.avatars a
+  JOIN public.avatars a
     ON a.id = p.avatar_id
   WHERE m.home_id = p_home_id
     AND m.is_current = TRUE
@@ -10922,6 +10922,9 @@ DECLARE
   v_effective_preferred_minute integer;
   v_should_upsert boolean;
   v_max_active_per_platform integer := 2;
+
+  v_prev_os_permission text := 'unknown';
+  v_permission_became_allowed boolean := FALSE;
 BEGIN
   PERFORM public._assert_authenticated();
   IF v_user_id IS NULL THEN
@@ -10933,16 +10936,24 @@ BEGIN
   FROM public.notification_preferences
   WHERE user_id = v_user_id;
 
-  v_effective_wants_daily :=
-    COALESCE(
-      p_wants_daily,
-      v_current.wants_daily,
-      (p_os_permission = 'allowed')
-    );
+  v_prev_os_permission := COALESCE(v_current.os_permission, 'unknown');
+  v_permission_became_allowed :=
+    p_os_permission = 'allowed'
+    AND v_prev_os_permission IS DISTINCT FROM 'allowed';
 
-  -- Force off when OS is blocked/unknown so UI toggle mirrors system status
-  IF p_os_permission IS DISTINCT FROM 'allowed' THEN
+  -- wants_daily resolution:
+  -- 1) explicit client value wins
+  -- 2) blocked/unknown always forced false
+  -- 3) first allowed (new row) or transition to allowed auto-enables true
+  -- 4) otherwise preserve existing choice while allowed
+  IF p_wants_daily IS NOT NULL THEN
+    v_effective_wants_daily := p_wants_daily;
+  ELSIF p_os_permission IS DISTINCT FROM 'allowed' THEN
     v_effective_wants_daily := FALSE;
+  ELSIF v_current.user_id IS NULL OR v_permission_became_allowed THEN
+    v_effective_wants_daily := TRUE;
+  ELSE
+    v_effective_wants_daily := COALESCE(v_current.wants_daily, TRUE);
   END IF;
 
   v_effective_preferred_hour :=
@@ -13177,6 +13188,7 @@ CREATE OR REPLACE FUNCTION "public"."shopping_list_get_for_home"("p_home_id" "uu
     SET "search_path" TO ''
     AS $$
 DECLARE
+  v_user uuid := auth.uid();
   v_list public.shopping_lists;
   v_items jsonb;
 
@@ -13224,10 +13236,10 @@ BEGIN
           'name', i.name,
           'quantity', i.quantity,
           'details', i.details,
-          'is_completed', i.is_completed,
-          'completed_by_user_id', i.completed_by_user_id,
-          'completed_by_avatar_id', p.avatar_id,
-          'completed_at', i.completed_at,
+          'is_completed', (i.is_completed = TRUE AND i.completed_by_user_id = v_user),
+          'completed_by_user_id', CASE WHEN i.completed_by_user_id = v_user THEN i.completed_by_user_id ELSE NULL END,
+          'completed_by_avatar_id', CASE WHEN i.completed_by_user_id = v_user THEN p.avatar_id ELSE NULL END,
+          'completed_at', CASE WHEN i.completed_by_user_id = v_user THEN i.completed_at ELSE NULL END,
           'reference_photo_path', i.reference_photo_path,
           'reference_added_by_user_id', i.reference_added_by_user_id,
           'linked_expense_id', i.linked_expense_id,
@@ -13236,7 +13248,10 @@ BEGIN
           'created_at', i.created_at,
           'updated_at', i.updated_at
         )
-        ORDER BY i.is_completed ASC, i.completed_at DESC NULLS LAST, i.created_at DESC
+        ORDER BY
+          (i.is_completed = TRUE AND i.completed_by_user_id = v_user) ASC,
+          CASE WHEN i.completed_by_user_id = v_user THEN i.completed_at ELSE NULL END DESC NULLS LAST,
+          i.created_at DESC
       ),
       '[]'::jsonb
     ) AS items_json,
@@ -13253,7 +13268,7 @@ BEGIN
   FROM public.shopping_list_items i
   WHERE i.shopping_list_id = v_list.id
     AND i.archived_at IS NULL
-    AND i.is_completed = FALSE;
+    AND NOT (i.is_completed = TRUE AND i.completed_by_user_id = v_user);
 
   v_list_json :=
     to_jsonb(v_list)
@@ -13467,10 +13482,42 @@ BEGIN
     v_next_completed_by := v_existing.completed_by_user_id;
     v_next_completed_at := v_existing.completed_at;
   ELSIF p_is_completed THEN
-    v_next_is_completed := TRUE;
-    v_next_completed_by := v_user;
-    v_next_completed_at := now();
+    IF v_existing.is_completed = TRUE
+       AND v_existing.completed_by_user_id IS DISTINCT FROM v_user THEN
+      PERFORM public.api_error(
+        'item_already_completed_by_other',
+        'Item was already completed by another member.',
+        'P0001',
+        jsonb_build_object(
+          'item_id', p_item_id,
+          'completed_by_user_id', v_existing.completed_by_user_id
+        )
+      );
+    ELSIF v_existing.is_completed = TRUE
+       AND v_existing.completed_by_user_id = v_user THEN
+      -- Idempotent re-complete by same user: keep original completion metadata.
+      v_next_is_completed := TRUE;
+      v_next_completed_by := v_existing.completed_by_user_id;
+      v_next_completed_at := v_existing.completed_at;
+    ELSE
+      v_next_is_completed := TRUE;
+      v_next_completed_by := v_user;
+      v_next_completed_at := now();
+    END IF;
   ELSE
+    IF v_existing.is_completed = TRUE
+       AND v_existing.completed_by_user_id IS DISTINCT FROM v_user THEN
+      PERFORM public.api_error(
+        'item_already_completed_by_other',
+        'Item was already completed by another member.',
+        'P0001',
+        jsonb_build_object(
+          'item_id', p_item_id,
+          'completed_by_user_id', v_existing.completed_by_user_id
+        )
+      );
+    END IF;
+
     v_next_is_completed := FALSE;
     v_next_completed_by := NULL;
     v_next_completed_at := NULL;

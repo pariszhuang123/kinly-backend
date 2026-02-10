@@ -7,7 +7,7 @@ Stability: evolving
 Status: draft
 Version: v1.0
 Audience: internal
-Last updated: 2026-02-07
+Last updated: 2026-02-10
 ---
 
 # Shopping List API Contract v1
@@ -39,7 +39,10 @@ Returns the active list and all unarchived items for the home.
 - Filters: `home_id = p_home_id` AND `archived_at IS NULL`.
 - If no active list exists, returns an empty active-list object (with `id = null`) and `items = []`.
 - `list` includes counters: `items_unarchived_count`, `items_uncompleted_count`.
-- Response fields include `completed_by_user_id` and `completed_by_avatar_id` (join to `public.profiles.avatar_id`).
+- Completion visibility is caller-scoped:
+  - Caller sees `is_completed = true` only for items they completed.
+  - For items completed by other members, response masks completion (`is_completed = false`, `completed_by_user_id = null`, `completed_by_avatar_id = null`, `completed_at = null`).
+  - `items_uncompleted_count` is also caller-scoped using the same visibility rule.
 - Ordering: uncompleted first, then completed by `completed_at DESC` (server MAY implement; client can reorder).
 
 ### 2.2 `shopping_list_add_item(p_home_id uuid, p_name text, p_quantity text default NULL, p_details text default NULL, p_reference_photo_path text default NULL)`
@@ -53,8 +56,11 @@ Returns the active list and all unarchived items for the home.
 ### 2.3 `shopping_list_update_item(p_item_id uuid, p_name text default NULL, p_quantity text default NULL, p_details text default NULL, p_is_completed boolean default NULL, p_reference_photo_path text default NULL, p_replace_photo boolean default false)`
 Supports rename, quantity/details edit, tick/untick, and photo replace.
 - `NULL` input for `p_name`, `p_quantity`, or `p_details` means "no change" in v1.
-- Tick: when `p_is_completed = true` ⇒ set `is_completed = true`, `completed_by_user_id = auth.uid()`, `completed_at = now()`.
-- Untick: when `p_is_completed = false` ⇒ clear completion fields and set `is_completed = false`.
+- Completion is first-completer-wins:
+  - Tick: when `p_is_completed = true` on an uncompleted item ⇒ set `is_completed = true`, `completed_by_user_id = auth.uid()`, `completed_at = now()`.
+  - Tick by the same completer again is idempotent (keeps prior completion metadata).
+  - Tick/untick by a different member when item is already completed MUST raise `item_already_completed_by_other`.
+  - Untick by the same completer is allowed and clears completion fields.
 - Photo rules:
   - If `p_replace_photo = true` AND `p_reference_photo_path` provided ⇒ set `reference_photo_path = p_reference_photo_path`, `reference_added_by_user_id = auth.uid()`.
   - If no prior photo exists, providing `p_reference_photo_path` sets it (same fields as above).
@@ -105,6 +111,7 @@ Archives caller-completed items without expense linkage.
 - `photo_delete_not_allowed` — attempt to clear existing `reference_photo_path` to NULL.
 - `NOT_HOME_MEMBER` — caller not in the home.
 - `item_not_found` — item missing or archived when updating.
+- `item_already_completed_by_other` — caller attempted to complete/untick an item already completed by another member.
 - `invalid_expense` — provided expense is not owned by caller in the same home.
 - `PAYWALL_LIMIT_SHOPPING_ITEM_PHOTOS` — adding a new shopping item photo would exceed plan quota.
 
