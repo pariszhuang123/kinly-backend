@@ -244,9 +244,11 @@ Scope: Updates expense recurrence from legacy enum to flexible `recurrenceEvery`
       },
       "returns": "Expense",
       "notes": [
-        "Only allowed for drafts; always activates",
+        "Drafts: allowed and always activates",
+        "Active one-off expenses: creator may edit description/notes only",
+        "For active one-off expenses, amount/splits/recurrence/startDate are immutable",
         "Recurrence set creates plan, marks draft converted, and generates first cycle",
-        "Existing active expenses are immutable"
+        "Recurring cycles and converted rows remain immutable"
       ]
     },
     "expenses.payMyDue": {

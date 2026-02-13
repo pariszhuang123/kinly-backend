@@ -75,7 +75,9 @@ Scope: Weekly mood capture, gratitude wall, and NPS gating for the Home-only MVP
   - Validations: trimmed comment <= 500; enforces one mood per ISO week across all homes (errors with `MOOD_ALREADY_SUBMITTED` and isoWeek/isoYear payload).
   - Side-effects: inserts `home_mood_entries`; optionally creates `gratitude_wall_posts` when mood in `sunny|partially_sunny` and `addToWall=true`; trigger updates counters.
 - `mood_get_current_weekly(homeId) -> boolean`
-  - Guards membership/active home; returns true if the user has already submitted a mood for the current ISO week (any home).
+  - Guards membership/active home.
+  - Returns `true` while the home is in onboarding (`home.createdAt` is less than 7 days old).
+  - After onboarding, returns `true` only if the user has already submitted a mood for the current ISO week (any home).
 - `gratitude_wall_list(homeId, limit=20, cursorCreatedAt?, cursorId?) -> [post]`
   - Newest-first pagination on `(created_at desc, id desc)`; `limit` capped at 100.
 - `gratitude_wall_mark_read(homeId) -> boolean`

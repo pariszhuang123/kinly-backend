@@ -2,7 +2,7 @@ SET search_path = pgtap, public, auth, extensions;
 
 BEGIN;
 
-SELECT plan(25);
+SELECT plan(30);
 
 CREATE TEMP TABLE tmp_users (
   label   text PRIMARY KEY,
@@ -111,6 +111,65 @@ SELECT ok(
        AND is_current
   ),
   'owner membership stint is created as current'
+);
+
+SELECT is(
+  (
+    SELECT COUNT(*)::integer
+    FROM public.chores c
+    WHERE c.home_id = (SELECT home_id FROM tmp_homes WHERE label = 'primary')
+  ),
+  4::integer,
+  'home creation seeds 4 starter chores'
+);
+
+SELECT is(
+  (
+    SELECT COUNT(*)::integer
+    FROM public.chores c
+    WHERE c.home_id = (SELECT home_id FROM tmp_homes WHERE label = 'primary')
+      AND c.state = 'draft'
+      AND c.recurrence_every = 1
+      AND c.recurrence_unit = 'week'
+      AND c.assignee_user_id IS NULL
+  ),
+  4::integer,
+  'seeded chores are draft, unassigned, and weekly recurring'
+);
+
+SELECT is(
+  (
+    SELECT string_agg(c.name, ', ' ORDER BY c.name)
+    FROM public.chores c
+    WHERE c.home_id = (SELECT home_id FROM tmp_homes WHERE label = 'primary')
+  ),
+  'Clean bathroom, Clean kitchen, Take out trash, Vacuum common area',
+  'seeded chore names match expected set'
+);
+
+SELECT is(
+  (
+    SELECT COUNT(*)::integer
+    FROM public.expenses e
+    WHERE e.home_id = (SELECT home_id FROM tmp_homes WHERE label = 'primary')
+  ),
+  4::integer,
+  'home creation seeds 4 starter bill templates'
+);
+
+SELECT is(
+  (
+    SELECT COUNT(*)::integer
+    FROM public.expenses e
+    WHERE e.home_id = (SELECT home_id FROM tmp_homes WHERE label = 'primary')
+      AND e.status = 'draft'
+      AND e.recurrence_every IS NULL
+      AND e.recurrence_unit IS NULL
+      AND e.split_type IS NULL
+      AND e.amount_cents IS NULL
+  ),
+  4::integer,
+  'seeded bill templates are one-off drafts without amount or splits'
 );
 
 -- Capture initial invite code

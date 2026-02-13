@@ -86,7 +86,7 @@ Invite
       "args": {},
       "returns": "jsonb",
       "errors": ["UNAUTHORIZED"],
-      "notes": "Creates a home, owner membership, and initial invite; returns { home: { id } }."
+      "notes": "Creates a home, owner membership, and initial invite; seeds 4 starter draft chores with weekly recurrence (`Clean kitchen`, `Clean bathroom`, `Vacuum common area`, `Take out trash`) plus 4 starter draft bill templates (`Internet bills`, `Electric bills`, `Water bills`, `Rent`); returns { home: { id } }."
     },
     "homes.join": {
       "type": "rpc",

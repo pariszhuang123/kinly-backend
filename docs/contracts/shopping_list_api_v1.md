@@ -35,15 +35,16 @@ Backend RPC shapes and invariants for the shared shopping list (one active list 
 All RPCs enforce membership with `public._assert_home_member(p_home_id)` (or equivalent membership join on item-scoped calls).
 
 ### 2.1 `shopping_list_get_for_home(p_home_id uuid)`
-Returns the active list and all unarchived items for the home.
-- Filters: `home_id = p_home_id` AND `archived_at IS NULL`.
+Returns the active list and caller-visible unarchived items for the home.
+- Filters: `home_id = p_home_id` AND `archived_at IS NULL` AND (`is_completed = false` OR `completed_by_user_id = auth.uid()`).
 - If no active list exists, returns an empty active-list object (with `id = null`) and `items = []`.
 - `list` includes counters: `items_unarchived_count`, `items_uncompleted_count`.
 - Completion visibility is caller-scoped:
-  - Caller sees `is_completed = true` only for items they completed.
-  - For items completed by other members, response masks completion (`is_completed = false`, `completed_by_user_id = null`, `completed_by_avatar_id = null`, `completed_at = null`).
-  - `items_uncompleted_count` is also caller-scoped using the same visibility rule.
-- Ordering: uncompleted first, then completed by `completed_at DESC` (server MAY implement; client can reorder).
+  - Caller sees their own completed items (`is_completed = true` with completion metadata).
+  - Items completed by other members are excluded from `items`.
+  - `items_unarchived_count` equals caller-visible items (`remaining + caller-completed`).
+  - `items_uncompleted_count` counts only remaining items (`is_completed = false`).
+- Ordering: ascending by normalized `name` where normalization is `lower(regexp_replace(btrim(name), '\s+', ' ', 'g'))` with ICU collation `public.kinly_und_ai` (`locale = und-u-ks-level1`, language-neutral, accent-insensitive); ties break by raw `name` under the same collation, then `created_at DESC`.
 
 ### 2.2 `shopping_list_add_item(p_home_id uuid, p_name text, p_quantity text default NULL, p_details text default NULL, p_reference_photo_path text default NULL)`
 - Lazily creates an active list if missing for the home.

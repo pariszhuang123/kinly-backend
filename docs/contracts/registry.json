@@ -456,9 +456,11 @@
           },
           "returns": "Expense",
           "notes": [
-            "Only allowed for drafts; always activates",
+            "Drafts: allowed and always activates",
+            "Active one-off expenses: creator may edit description/notes only",
+            "For active one-off expenses, amount/splits/recurrence/startDate are immutable",
             "Recurrence set creates plan, marks draft converted, and generates first cycle",
-            "Existing active expenses are immutable"
+            "Recurring cycles and converted rows remain immutable"
           ]
         },
         "expenses.payMyDue": {
@@ -619,7 +621,7 @@
           "errors": [
             "UNAUTHORIZED"
           ],
-          "notes": "Creates a home, owner membership, and initial invite; returns { home: { id } }."
+          "notes": "Creates a home, owner membership, and initial invite; seeds 4 starter draft chores with weekly recurrence (`Clean kitchen`, `Clean bathroom`, `Vacuum common area`, `Take out trash`) plus 4 starter draft bill templates (`Internet bills`, `Electric bills`, `Water bills`, `Rent`); returns { home: { id } }."
         },
         "homes.join": {
           "type": "rpc",

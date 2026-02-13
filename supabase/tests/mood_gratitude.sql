@@ -3,7 +3,7 @@ SET search_path = pgtap, public, auth, extensions;
 BEGIN;
 SET ROLE postgres;
 
-SELECT plan(13);
+SELECT plan(15);
 
 CREATE TEMP TABLE tmp_users (
   label   text PRIMARY KEY,
@@ -235,7 +235,41 @@ SELECT is(
   'mood_get_current_weekly returns true when a mood exists for this ISO week'
 );
 
--- 6. Outsider blocked from submitting
+-- 6–7. Home age gate: <7 days returns true; >=7 days falls back to weekly entry
+SELECT set_config(
+  'request.jwt.claim.sub',
+  (SELECT user_id::text FROM tmp_users WHERE label = 'member_two'),
+  true
+);
+SELECT set_config('request.jwt.claim.role', 'authenticated', true);
+
+WITH payload AS (
+  SELECT public.mood_get_current_weekly(
+    (SELECT home_id FROM tmp_homes WHERE label = 'primary')
+  ) AS submitted
+)
+SELECT is(
+  (SELECT submitted FROM payload),
+  true,
+  'mood_get_current_weekly returns true while home is younger than 7 days'
+);
+
+UPDATE public.homes
+SET created_at = timezone('UTC', now()) - interval '8 days'
+WHERE id = (SELECT home_id FROM tmp_homes WHERE label = 'primary');
+
+WITH payload AS (
+  SELECT public.mood_get_current_weekly(
+    (SELECT home_id FROM tmp_homes WHERE label = 'primary')
+  ) AS submitted
+)
+SELECT is(
+  (SELECT submitted FROM payload),
+  false,
+  'mood_get_current_weekly returns false after 7 days when no weekly mood exists'
+);
+
+-- 8. Outsider blocked from submitting
 SELECT set_config(
   'request.jwt.claim.sub',
   (SELECT user_id::text FROM tmp_users WHERE label = 'outsider'),
@@ -258,7 +292,7 @@ SELECT pg_temp.expect_api_error(
   'Non-members cannot submit moods'
 );
 
--- 7–9. member_two posts another positive entry to drive pagination
+-- 9–11. member_two posts another positive entry to drive pagination
 SELECT set_config(
   'request.jwt.claim.sub',
   (SELECT user_id::text FROM tmp_users WHERE label = 'member_two'),
@@ -340,7 +374,7 @@ SELECT is(
   'Second page returns older creator post'
 );
 
--- 10–13. Read tracking upsert + timestamp bump
+-- 12–15. Read tracking upsert + timestamp bump
 SELECT public.gratitude_wall_mark_read(
   (SELECT home_id FROM tmp_homes WHERE label = 'primary')
 );
