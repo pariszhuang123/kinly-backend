@@ -5,9 +5,9 @@ Scope: backend
 Artifact-Type: contract
 Stability: stable
 Status: active
-Version: v1.2
+Version: v1.3
 Audience: internal
-Last updated: 2026-02-03
+Last updated: 2026-02-14
 ---
 
 # Complaint Rewrite Queue Processing & Backpressure (complaint_rewrite_queue_processing_v1)
@@ -88,6 +88,7 @@ Notes: `(rewrite_request_id, recipient_user_id)` MUST be unique (idempotent exec
 - Batch lane uses two scheduled functions: `rewrite_batch_submitter` (15m) and `rewrite_batch_collector` (30m).
 - Optional: admin-only manual trigger for recovery.
 - Frontend MUST NOT trigger workers.
+- Scheduler dispatchers SHOULD check pending work before invoking Edge functions. If pending count is zero, skip invocation and record a skip event.
 
 ## 6) Worker run configuration (backpressure)
 Example config:
@@ -127,6 +128,7 @@ If `attempt_count >= max_attempts`: set `status = failed`, populate `last_error`
 Each worker run logs: `run_id`, started_at, finished_at, `max_jobs_per_run`, claimed_count, succeeded_count, failed_count, requeued_count, per-provider/model counts, rate-limit/capacity errors.  
 Each job records: final status, attempt_count, routing_decision, timestamps.
 Logging MUST NOT include raw sender text or rewritten text; use opaque IDs only.
+- If no work is pending, dispatcher logs a deterministic no-op event (for example `rewrite_batch_* skipped: no pending items`) instead of surfacing errors.
 
 ## 11) Frontend contract (behavioral guarantee)
 Frontend assumes rewrites complete asynchronously; timing not guaranteed. Job states come from DB (or Realtime), not edge “check status” endpoints.

@@ -2,6 +2,7 @@ import { assert, assertEquals, assertRejects } from "jsr:@std/assert@0.224.0";
 
 import {
   ApiError,
+  firstPresentEnv,
   postJsonWithTimeout,
   processClaimedJob,
   rpcJson,
@@ -143,5 +144,32 @@ Deno.test("postJsonWithTimeout aborts long request", async () => {
     );
   } finally {
     globalThis.fetch = originalFetch;
+  }
+});
+
+Deno.test("firstPresentEnv resolves first configured secret", () => {
+  Deno.env.set("RUNNER_SHARED_SECRET", "runner-secret");
+  Deno.env.set("WORKER_SHARED_SECRET", "worker-secret");
+  try {
+    assertEquals(
+      firstPresentEnv(["RUNNER_SHARED_SECRET", "WORKER_SHARED_SECRET"]),
+      "runner-secret",
+    );
+  } finally {
+    Deno.env.delete("RUNNER_SHARED_SECRET");
+    Deno.env.delete("WORKER_SHARED_SECRET");
+  }
+});
+
+Deno.test("firstPresentEnv falls back when primary secret missing", () => {
+  Deno.env.delete("RUNNER_SHARED_SECRET");
+  Deno.env.set("WORKER_SHARED_SECRET", "worker-secret");
+  try {
+    assertEquals(
+      firstPresentEnv(["RUNNER_SHARED_SECRET", "WORKER_SHARED_SECRET"]),
+      "worker-secret",
+    );
+  } finally {
+    Deno.env.delete("WORKER_SHARED_SECRET");
   }
 });

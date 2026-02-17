@@ -58,6 +58,24 @@ if (import.meta.main) {
     try {
       requireInternalSecret(req);
       rejectHugeBodies(req);
+      const parsed = await parseInvocationPayload(req);
+      if (!parsed.ok) {
+        return json(
+          { ok: false, request_id, error: parsed.error },
+          parsed.status,
+        );
+      }
+      if (parsed.payload.pending_count === 0) {
+        console.log(
+          "rewrite_batch_collector no-op: pending_count=0 (skipped_no_pending=true)",
+        );
+        return json({
+          ok: true,
+          request_id,
+          checked: 0,
+          skipped: "no_pending_items",
+        }, 200);
+      }
 
       const supabase = supabaseClient();
       // Single rewrite key shared with submitter
@@ -357,7 +375,7 @@ if (import.meta.main) {
         results,
       }, 200);
     } catch (e) {
-      return json({ ok: false, request_id, error: toErrorMessage(e) }, 500);
+      return errorResponse(e, request_id);
     }
   });
 }
@@ -369,6 +387,17 @@ function json(body: unknown, status = 200) {
     status,
     headers: { "Content-Type": "application/json; charset=utf-8" },
   });
+}
+
+function errorResponse(e: unknown, requestId: string): Response {
+  const msg = toErrorMessage(e);
+  if (msg === "unauthorized") {
+    return json({ ok: false, request_id: requestId, error: msg }, 401);
+  }
+  if (msg === "payload_too_large") {
+    return json({ ok: false, request_id: requestId, error: msg }, 413);
+  }
+  return json({ ok: false, request_id: requestId, error: msg }, 500);
 }
 
 /* ---------------- auth + env ---------------- */
@@ -417,6 +446,68 @@ function safeShort(x: unknown): string {
   }
 }
 
+type InvocationPayload = {
+  pending_count: number | null;
+  batch_id: string | null;
+};
+
+async function parseInvocationPayload(
+  req: Request,
+): Promise<
+  | { ok: true; payload: InvocationPayload }
+  | { ok: false; status: number; error: string }
+> {
+  let text = "";
+  try {
+    text = (await req.clone().text()).trim();
+  } catch {
+    return { ok: false, status: 400, error: "invalid_request_body" };
+  }
+
+  if (!text) {
+    return { ok: true, payload: { pending_count: null, batch_id: null } };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { ok: false, status: 400, error: "malformed_json" };
+  }
+
+  if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") {
+    return { ok: false, status: 400, error: "json_body_must_be_object" };
+  }
+
+  const body = parsed as Record<string, unknown>;
+  const pending = parsePendingCount(body.pending_count);
+  if (body.pending_count !== undefined && pending === null) {
+    return { ok: false, status: 400, error: "pending_count_invalid" };
+  }
+
+  const rawBatchId = body.batch_id;
+  const batchId = typeof rawBatchId === "string" && rawBatchId.trim().length > 0
+    ? rawBatchId.trim()
+    : null;
+
+  return {
+    ok: true,
+    payload: {
+      pending_count: pending,
+      batch_id: batchId,
+    },
+  };
+}
+
+function parsePendingCount(value: unknown): number | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "number") return null;
+  if (!Number.isFinite(value)) return null;
+  if (!Number.isInteger(value)) return null;
+  if (value < 0) return null;
+  return value;
+}
+
 function isUuid(s: string): boolean {
   // strict-ish UUID v4/v1/v5 shape
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
@@ -457,7 +548,14 @@ function mapOpenAIStatus(
 }
 
 // Test-only exports
-export { env, getPowerMode, mapOpenAIStatus, rejectHugeBodies, safeShort };
+export {
+  env,
+  getPowerMode,
+  mapOpenAIStatus,
+  parseInvocationPayload,
+  rejectHugeBodies,
+  safeShort,
+};
 
 /* ---------------- RPC helpers ---------------- */
 

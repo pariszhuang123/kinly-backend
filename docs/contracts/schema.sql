@@ -1522,6 +1522,644 @@ $$;
 ALTER FUNCTION "public"."_home_usage_apply_delta"("p_home_id" "uuid", "p_deltas" "jsonb") OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."_house_norm_templates_validate"() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+DECLARE
+  v_section_keys constant text[] := ARRAY[
+    'norms_rhythm_quiet',
+    'norms_shared_spaces',
+    'norms_guests_social',
+    'norms_responsibility_flow',
+    'norms_repair_style',
+    'norms_home_identity'
+  ];
+  v_section_key text;
+  v_option_key text;
+BEGIN
+  PERFORM public.api_assert(
+    jsonb_typeof(NEW.body) = 'object',
+    'HOUSE_NORMS_INVALID_TEMPLATE_SCHEMA',
+    'Template body must be a JSON object.',
+    '22023'
+  );
+
+  PERFORM public.api_assert(
+    jsonb_typeof(NEW.body->'summary') = 'object',
+    'HOUSE_NORMS_INVALID_TEMPLATE_SCHEMA',
+    'Template body.summary must be an object.',
+    '22023'
+  );
+
+  PERFORM public.api_assert(
+    nullif(btrim(NEW.body->'summary'->>'title_key'), '') IS NOT NULL,
+    'HOUSE_NORMS_INVALID_TEMPLATE_SCHEMA',
+    'Template body.summary.title_key is required.',
+    '22023'
+  );
+
+  PERFORM public.api_assert(
+    nullif(btrim(NEW.body->'summary'->>'subtitle_key'), '') IS NOT NULL,
+    'HOUSE_NORMS_INVALID_TEMPLATE_SCHEMA',
+    'Template body.summary.subtitle_key is required.',
+    '22023'
+  );
+
+  PERFORM public.api_assert(
+    nullif(btrim(NEW.body->'summary'->>'framing_default'), '') IS NOT NULL,
+    'HOUSE_NORMS_INVALID_TEMPLATE_SCHEMA',
+    'Template body.summary.framing_default is required.',
+    '22023'
+  );
+
+  PERFORM public.api_assert(
+    jsonb_typeof(NEW.body->'context') = 'object',
+    'HOUSE_NORMS_INVALID_TEMPLATE_SCHEMA',
+    'Template body.context must be an object.',
+    '22023'
+  );
+
+  PERFORM public.api_assert(
+    nullif(btrim(NEW.body->'context'->>'line_template'), '') IS NOT NULL,
+    'HOUSE_NORMS_INVALID_TEMPLATE_SCHEMA',
+    'Template body.context.line_template is required.',
+    '22023'
+  );
+
+  PERFORM public.api_assert(
+    jsonb_typeof(NEW.body->'context'->'property_context') = 'object',
+    'HOUSE_NORMS_INVALID_TEMPLATE_SCHEMA',
+    'Template body.context.property_context must be an object.',
+    '22023'
+  );
+
+  PERFORM public.api_assert(
+    jsonb_typeof(NEW.body->'context'->'relationship_model') = 'object',
+    'HOUSE_NORMS_INVALID_TEMPLATE_SCHEMA',
+    'Template body.context.relationship_model must be an object.',
+    '22023'
+  );
+
+  FOREACH v_option_key IN ARRAY ARRAY['0', '1', '2'] LOOP
+    PERFORM public.api_assert(
+      nullif(btrim(NEW.body->'context'->'property_context'->>v_option_key), '') IS NOT NULL,
+      'HOUSE_NORMS_INVALID_TEMPLATE_SCHEMA',
+      'Template context.property_context must include options 0,1,2.',
+      '22023',
+      jsonb_build_object('option_key', v_option_key)
+    );
+
+    PERFORM public.api_assert(
+      nullif(btrim(NEW.body->'context'->'relationship_model'->>v_option_key), '') IS NOT NULL,
+      'HOUSE_NORMS_INVALID_TEMPLATE_SCHEMA',
+      'Template context.relationship_model must include options 0,1,2.',
+      '22023',
+      jsonb_build_object('option_key', v_option_key)
+    );
+  END LOOP;
+
+  PERFORM public.api_assert(
+    jsonb_typeof(NEW.body->'sections') = 'object',
+    'HOUSE_NORMS_INVALID_TEMPLATE_SCHEMA',
+    'Template body.sections must be an object.',
+    '22023'
+  );
+
+  PERFORM public.api_assert(
+    NOT EXISTS (
+      SELECT 1
+      FROM jsonb_object_keys(NEW.body->'sections') AS k
+      WHERE NOT (k = ANY(v_section_keys))
+    ),
+    'HOUSE_NORMS_INVALID_TEMPLATE_SCHEMA',
+    'Template body.sections contains unknown section keys.',
+    '22023'
+  );
+
+  FOREACH v_section_key IN ARRAY v_section_keys LOOP
+    PERFORM public.api_assert(
+      jsonb_typeof(NEW.body->'sections'->v_section_key) = 'object',
+      'HOUSE_NORMS_INVALID_TEMPLATE_SCHEMA',
+      'Template section must be an object.',
+      '22023',
+      jsonb_build_object('section_key', v_section_key)
+    );
+
+    PERFORM public.api_assert(
+      nullif(btrim(NEW.body->'sections'->v_section_key->>'title_key'), '') IS NOT NULL,
+      'HOUSE_NORMS_INVALID_TEMPLATE_SCHEMA',
+      'Template section title_key is required.',
+      '22023',
+      jsonb_build_object('section_key', v_section_key)
+    );
+
+    PERFORM public.api_assert(
+      jsonb_typeof(NEW.body->'sections'->v_section_key->'options') = 'object',
+      'HOUSE_NORMS_INVALID_TEMPLATE_SCHEMA',
+      'Template section options must be an object.',
+      '22023',
+      jsonb_build_object('section_key', v_section_key)
+    );
+
+    FOREACH v_option_key IN ARRAY ARRAY['0', '1', '2'] LOOP
+      PERFORM public.api_assert(
+        nullif(btrim(NEW.body->'sections'->v_section_key->'options'->>v_option_key), '') IS NOT NULL,
+        'HOUSE_NORMS_INVALID_TEMPLATE_SCHEMA',
+        'Template section options must include 0,1,2.',
+        '22023',
+        jsonb_build_object('section_key', v_section_key, 'option_key', v_option_key)
+      );
+    END LOOP;
+  END LOOP;
+
+  RETURN NEW;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."_house_norm_templates_validate"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_house_norms_assert_owner"("p_home_id" "uuid") RETURNS "void"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+BEGIN
+  PERFORM public._assert_authenticated();
+
+  IF NOT public.is_home_owner(p_home_id, auth.uid()) THEN
+    PERFORM public.api_error(
+      'FORBIDDEN_OWNER_ONLY',
+      'Only the home owner can perform this action.',
+      '42501',
+      jsonb_build_object('home_id', p_home_id)
+    );
+  END IF;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."_house_norms_assert_owner"("p_home_id" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_house_norms_build_public_url"("p_home_public_id" "text") RETURNS "text"
+    LANGUAGE "sql" IMMUTABLE
+    SET "search_path" TO ''
+    AS $$
+  SELECT 'https://go.makinglifeeasie.com/kinly/norms/' || p_home_public_id;
+$$;
+
+
+ALTER FUNCTION "public"."_house_norms_build_public_url"("p_home_public_id" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_house_norms_enforce_public_id_immutable"() RETURNS "trigger"
+    LANGUAGE "plpgsql"
+    SET "search_path" TO ''
+    AS $$
+BEGIN
+  IF OLD.home_public_id IS NOT NULL
+     AND NEW.home_public_id IS DISTINCT FROM OLD.home_public_id THEN
+    PERFORM public.api_error(
+      'HOUSE_NORMS_PUBLIC_ID_IMMUTABLE',
+      'home_public_id cannot be changed once assigned.',
+      '22023',
+      jsonb_build_object(
+        'home_id', NEW.home_id,
+        'home_public_id', OLD.home_public_id
+      )
+    );
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."_house_norms_enforce_public_id_immutable"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_house_norms_generate_content"("p_inputs" "jsonb", "p_template_body" "jsonb", "p_locale_base" "text") RETURNS "jsonb"
+    LANGUAGE "plpgsql" STABLE
+    SET "search_path" TO ''
+    AS $$
+DECLARE
+  v_section_keys constant text[] := ARRAY[
+    'norms_rhythm_quiet',
+    'norms_shared_spaces',
+    'norms_guests_social',
+    'norms_responsibility_flow',
+    'norms_repair_style',
+    'norms_home_identity'
+  ];
+  v_section_key text;
+  v_section_option text;
+  v_section_title_key text;
+  v_section_text text;
+  v_sections jsonb := '{}'::jsonb;
+
+  v_prop_i text;
+  v_rel_i text;
+  v_property text;
+  v_relation text;
+  v_context_template text;
+  v_context_line text;
+
+  v_summary_title_key text;
+  v_summary_subtitle_key text;
+  v_summary_framing text;
+BEGIN
+  PERFORM public.api_assert(
+    jsonb_typeof(p_template_body) = 'object',
+    'HOUSE_NORMS_INVALID_TEMPLATE',
+    'Template body must be a JSON object.',
+    '22023'
+  );
+
+  v_summary_title_key := nullif(btrim(p_template_body #>> '{summary,title_key}'), '');
+  v_summary_subtitle_key := nullif(btrim(p_template_body #>> '{summary,subtitle_key}'), '');
+  v_summary_framing := nullif(btrim(p_template_body #>> '{summary,framing_default}'), '');
+
+  PERFORM public.api_assert(
+    v_summary_title_key IS NOT NULL
+    AND v_summary_subtitle_key IS NOT NULL
+    AND v_summary_framing IS NOT NULL,
+    'HOUSE_NORMS_INVALID_TEMPLATE',
+    'Template summary fields are required.',
+    '22023'
+  );
+
+  v_prop_i := p_inputs ->> 'norms_property_context';
+  v_rel_i := p_inputs ->> 'norms_relationship_model';
+
+  v_property := nullif(
+    btrim(p_template_body #>> ARRAY['context', 'property_context', v_prop_i]),
+    ''
+  );
+  v_relation := nullif(
+    btrim(p_template_body #>> ARRAY['context', 'relationship_model', v_rel_i]),
+    ''
+  );
+
+  PERFORM public.api_assert(
+    v_property IS NOT NULL
+    AND v_relation IS NOT NULL,
+    'HOUSE_NORMS_INVALID_TEMPLATE',
+    'Template context options are missing.',
+    '22023',
+    jsonb_build_object(
+      'norms_property_context', v_prop_i,
+      'norms_relationship_model', v_rel_i
+    )
+  );
+
+  v_context_template := nullif(btrim(p_template_body #>> '{context,line_template}'), '');
+  PERFORM public.api_assert(
+    v_context_template IS NOT NULL,
+    'HOUSE_NORMS_INVALID_TEMPLATE',
+    'Template context line_template is required.',
+    '22023'
+  );
+
+  v_context_line := replace(
+    replace(v_context_template, '{{property_context}}', v_property),
+    '{{relationship_model}}',
+    v_relation
+  );
+
+  FOREACH v_section_key IN ARRAY v_section_keys LOOP
+    v_section_option := p_inputs ->> v_section_key;
+    v_section_title_key := nullif(
+      btrim(p_template_body #>> ARRAY['sections', v_section_key, 'title_key']),
+      ''
+    );
+    v_section_text := nullif(
+      btrim(p_template_body #>> ARRAY['sections', v_section_key, 'options', v_section_option]),
+      ''
+    );
+
+    PERFORM public.api_assert(
+      v_section_title_key IS NOT NULL
+      AND v_section_text IS NOT NULL,
+      'HOUSE_NORMS_INVALID_TEMPLATE',
+      'Template section data is missing.',
+      '22023',
+      jsonb_build_object(
+        'section_key', v_section_key,
+        'option', v_section_option
+      )
+    );
+
+    v_sections := v_sections || jsonb_build_object(
+      v_section_key,
+      jsonb_build_object(
+        'title_key', v_section_title_key,
+        'text', v_section_text
+      )
+    );
+  END LOOP;
+
+  RETURN jsonb_build_object(
+    'locale_base', p_locale_base,
+    'summary', jsonb_build_object(
+      'title_key', v_summary_title_key,
+      'subtitle_key', v_summary_subtitle_key,
+      'framing', v_summary_framing
+    ),
+    'context', jsonb_build_object(
+      'line', v_context_line
+    ),
+    'sections', v_sections
+  );
+END;
+$$;
+
+
+ALTER FUNCTION "public"."_house_norms_generate_content"("p_inputs" "jsonb", "p_template_body" "jsonb", "p_locale_base" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_house_norms_generate_public_id"() RETURNS "public"."citext"
+    LANGUAGE "plpgsql"
+    SET "search_path" TO ''
+    AS $$
+DECLARE
+  v_candidate text;
+  v_try int := 0;
+BEGIN
+  LOOP
+    v_try := v_try + 1;
+    v_candidate := lower(substring(replace(gen_random_uuid()::text, '-', '') from 1 for 12));
+
+    EXIT WHEN NOT EXISTS (
+      SELECT 1
+      FROM public.house_norms hn
+      WHERE hn.home_public_id = v_candidate::public.citext
+    );
+
+    IF v_try >= 50 THEN
+      PERFORM public.api_error(
+        'HOUSE_NORMS_PUBLIC_ID_GENERATION_FAILED',
+        'Failed to allocate a unique public id.',
+        'P0001'
+      );
+    END IF;
+  END LOOP;
+
+  RETURN v_candidate::public.citext;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."_house_norms_generate_public_id"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_house_norms_inputs_valid"("p_inputs" "jsonb") RETURNS boolean
+    LANGUAGE "plpgsql" IMMUTABLE
+    SET "search_path" TO ''
+    AS $_$
+DECLARE
+  v_required_keys constant text[] := ARRAY[
+    'norms_property_context',
+    'norms_relationship_model',
+    'norms_rhythm_quiet',
+    'norms_shared_spaces',
+    'norms_guests_social',
+    'norms_responsibility_flow',
+    'norms_repair_style',
+    'norms_home_identity'
+  ];
+  v_key text;
+  v_val_text text;
+  v_max_bytes constant int := 2048;
+BEGIN
+  IF p_inputs IS NULL OR jsonb_typeof(p_inputs) <> 'object' THEN
+    RETURN false;
+  END IF;
+
+  IF octet_length(p_inputs::text) > v_max_bytes THEN
+    RETURN false;
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM unnest(v_required_keys) AS k
+    WHERE NOT (p_inputs ? k)
+  ) THEN
+    RETURN false;
+  END IF;
+
+  IF EXISTS (
+    SELECT 1
+    FROM jsonb_object_keys(p_inputs) AS k
+    WHERE NOT (k = ANY(v_required_keys))
+  ) THEN
+    RETURN false;
+  END IF;
+
+  FOREACH v_key IN ARRAY v_required_keys LOOP
+    v_val_text := p_inputs ->> v_key;
+    IF v_val_text IS NULL OR v_val_text !~ '^[0-2]$' THEN
+      RETURN false;
+    END IF;
+  END LOOP;
+
+  RETURN true;
+END;
+$_$;
+
+
+ALTER FUNCTION "public"."_house_norms_inputs_valid"("p_inputs" "jsonb") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_house_norms_next_published_version"("p_prev" "text") RETURNS "text"
+    LANGUAGE "plpgsql" STABLE
+    SET "search_path" TO ''
+    AS $_$
+DECLARE
+  v_next int;
+BEGIN
+  IF p_prev IS NULL OR btrim(p_prev) = '' THEN
+    RETURN 'v000001';
+  END IF;
+
+  IF p_prev !~ '^v[0-9]{6}$' THEN
+    PERFORM public.api_error(
+      'HOUSE_NORMS_INVALID_PUBLISHED_VERSION',
+      'Invalid published version format.',
+      '22023',
+      jsonb_build_object('published_version', p_prev)
+    );
+  END IF;
+
+  v_next := substring(p_prev from 2)::int + 1;
+  RETURN 'v' || lpad(v_next::text, 6, '0');
+END;
+$_$;
+
+
+ALTER FUNCTION "public"."_house_norms_next_published_version"("p_prev" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_house_norms_publish_sync_call"("p_home_public_id" "text", "p_published_at" timestamp with time zone, "p_published_version" "text", "p_template_key" "text", "p_locale_base" "text", "p_published_content" "jsonb", "p_public_url_path" "text" DEFAULT NULL::"text") RETURNS "void"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+DECLARE
+  v_supabase_url text := nullif(current_setting('app.settings.supabase_url', true), '');
+  v_secret text := nullif(current_setting('app.settings.worker_shared_secret', true), '');
+  v_published_at_iso text := public._to_iso_utc_ms(p_published_at);
+
+  v_req_id bigint;
+  v_started timestamptz := clock_timestamp();
+  v_deadline interval := interval '12 seconds';
+  v_status_code int;
+  v_content text;
+  v_error_msg text;
+  v_body jsonb;
+BEGIN
+  PERFORM public.api_assert(
+    v_supabase_url IS NOT NULL,
+    'HOUSE_NORMS_PUBLISH_ARTIFACT_FAILED',
+    'Missing app.settings.supabase_url.',
+    'P0001'
+  );
+
+  -- Harden: ensure secret exists; otherwise edge will 401 and it’s confusing.
+  PERFORM public.api_assert(
+    v_secret IS NOT NULL,
+    'HOUSE_NORMS_PUBLISH_ARTIFACT_FAILED',
+    'Missing app.settings.worker_shared_secret.',
+    'P0001'
+  );
+
+  v_req_id := net.http_post(
+    url := v_supabase_url || '/functions/v1/house_norms_publish_sync',
+    headers := jsonb_strip_nulls(jsonb_build_object(
+      'Content-Type', 'application/json',
+      'x-internal-secret', v_secret
+    )),
+    body := jsonb_build_object(
+      'home_public_id', p_home_public_id,
+      -- IMPORTANT: canonical ISO string expected by edge strict toISOString check
+      'published_at', v_published_at_iso,
+      'published_version', p_published_version,
+      'template_key', p_template_key,
+      'locale_base', p_locale_base,
+      'published_content', p_published_content,
+      'public_url_path', p_public_url_path
+    )
+  );
+
+  LOOP
+    SELECT r.status_code, r.content, r.error_msg
+      INTO v_status_code, v_content, v_error_msg
+    FROM net._http_response r
+    WHERE r.id = v_req_id
+    ORDER BY r.created DESC
+    LIMIT 1;
+
+    EXIT WHEN v_status_code IS NOT NULL
+           OR v_error_msg IS NOT NULL
+           OR clock_timestamp() - v_started > v_deadline;
+
+    PERFORM pg_sleep(0.10);
+  END LOOP;
+
+  IF v_error_msg IS NOT NULL THEN
+    PERFORM public.api_error(
+      'HOUSE_NORMS_PUBLISH_ARTIFACT_FAILED',
+      'Publish sync request failed.',
+      'P0001',
+      jsonb_build_object('error', v_error_msg, 'request_id', v_req_id)
+    );
+  END IF;
+
+  PERFORM public.api_assert(
+    v_status_code IS NOT NULL,
+    'HOUSE_NORMS_PUBLISH_ARTIFACT_FAILED',
+    'Publish sync request timed out.',
+    'P0001',
+    jsonb_build_object('request_id', v_req_id)
+  );
+
+  PERFORM public.api_assert(
+    v_status_code BETWEEN 200 AND 299,
+    'HOUSE_NORMS_PUBLISH_ARTIFACT_FAILED',
+    'Publish sync returned non-success status.',
+    'P0001',
+    jsonb_build_object('status_code', v_status_code, 'body', v_content)
+  );
+
+  BEGIN
+    v_body := COALESCE(v_content, '{}')::jsonb;
+  EXCEPTION WHEN others THEN
+    PERFORM public.api_error(
+      'HOUSE_NORMS_PUBLISH_ARTIFACT_FAILED',
+      'Publish sync returned invalid JSON.',
+      'P0001',
+      jsonb_build_object('body', v_content)
+    );
+  END;
+
+  PERFORM public.api_assert(
+    COALESCE((v_body ->> 'artifact_ok')::boolean, false),
+    'HOUSE_NORMS_PUBLISH_ARTIFACT_FAILED',
+    'Publish artifact write failed.',
+    'P0001',
+    v_body
+  );
+
+  PERFORM public.api_assert(
+    COALESCE((v_body ->> 'revalidate_ok')::boolean, false),
+    'HOUSE_NORMS_PUBLISH_REVALIDATE_FAILED',
+    'Publish revalidation failed.',
+    'P0001',
+    v_body
+  );
+END;
+$$;
+
+
+ALTER FUNCTION "public"."_house_norms_publish_sync_call"("p_home_public_id" "text", "p_published_at" timestamp with time zone, "p_published_version" "text", "p_template_key" "text", "p_locale_base" "text", "p_published_content" "jsonb", "p_public_url_path" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_house_norms_section_key_valid"("p_section_key" "text") RETURNS boolean
+    LANGUAGE "sql" IMMUTABLE
+    SET "search_path" TO ''
+    AS $$
+  SELECT p_section_key = ANY(
+    ARRAY[
+      'summary_framing',
+      'norms_rhythm_quiet',
+      'norms_shared_spaces',
+      'norms_guests_social',
+      'norms_responsibility_flow',
+      'norms_repair_style',
+      'norms_home_identity'
+    ]
+  );
+$$;
+
+
+ALTER FUNCTION "public"."_house_norms_section_key_valid"("p_section_key" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_house_norms_text_safe_en"("p_text" "text") RETURNS boolean
+    LANGUAGE "sql" IMMUTABLE
+    SET "search_path" TO ''
+    AS $_$
+  SELECT NOT (
+    p_text ~* '(^|[^a-z])(must|always|never)([^a-z]|$)'
+    OR p_text ~* '(punish|penalt|consequence|or else|if you don''t)'
+    OR p_text ~* '(^|[^a-z])(allowed|forbidden|permission|required)([^a-z]|$)'
+    OR p_text ~* '(track|monitor|watchlist)'
+  );
+$_$;
+
+
+ALTER FUNCTION "public"."_house_norms_text_safe_en"("p_text" "text") OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."_house_vibe_confidence_kind"("p_label_id" "text") RETURNS "text"
     LANGUAGE "sql" IMMUTABLE
     SET "search_path" TO ''
@@ -2179,6 +2817,17 @@ $$;
 
 
 ALTER FUNCTION "public"."_shopping_list_get_or_create_active"("p_home_id" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_to_iso_utc_ms"("p_ts" timestamp with time zone) RETURNS "text"
+    LANGUAGE "sql" IMMUTABLE
+    SET "search_path" TO ''
+    AS $$
+  SELECT to_char(p_ts AT TIME ZONE 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"');
+$$;
+
+
+ALTER FUNCTION "public"."_to_iso_utc_ms"("p_ts" timestamp with time zone) OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."_touch_updated_at"() RETURNS "trigger"
@@ -8396,6 +9045,678 @@ $$;
 ALTER FUNCTION "public"."homes_transfer_owner"("p_home_id" "uuid", "p_new_owner_id" "uuid") OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."house_norms_edit_section_text"("p_home_id" "uuid", "p_locale" "text", "p_section_key" "text", "p_new_text" "text", "p_change_summary" "text" DEFAULT NULL::"text") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $_$
+DECLARE
+  v_user uuid := auth.uid();
+  v_row public.house_norms%ROWTYPE;
+  v_content jsonb;
+  v_now timestamptz := now();
+  v_trimmed text := regexp_replace(btrim(COALESCE(p_new_text, '')), '\s+', ' ', 'g');
+  v_summary text := NULLIF(regexp_replace(btrim(COALESCE(p_change_summary, '')), '\s+', ' ', 'g'), '');
+  v_requested_locale_base text;
+  v_general_max constant int := 2000;
+  v_keep_revisions constant int := 100;
+  v_status text;
+  v_mentions_username boolean := false;
+  v_mentions_member_name boolean := false;
+BEGIN
+  PERFORM public._assert_authenticated();
+  PERFORM public._assert_home_member(p_home_id);
+  PERFORM public._assert_home_active(p_home_id);
+  PERFORM public._house_norms_assert_owner(p_home_id);
+
+  PERFORM public.api_assert(
+    p_locale ~ '^[a-z]{2}(-[A-Z]{2})?$',
+    'INVALID_LOCALE',
+    'Locale must be ISO 639-1 (e.g. en) or ISO 639-1 + "-" + ISO 3166-1 (e.g. en-NZ).',
+    '22023'
+  );
+
+  v_requested_locale_base := lower(COALESCE(public.locale_base(p_locale), 'en'));
+
+  PERFORM public.api_assert(
+    v_requested_locale_base ~ '^[a-z]{2}$',
+    'INVALID_LOCALE',
+    'Locale base must be ISO 639-1 lowercase (e.g. en).',
+    '22023',
+    jsonb_build_object('locale_base', v_requested_locale_base)
+  );
+
+  PERFORM public.api_assert(
+    public._house_norms_section_key_valid(p_section_key),
+    'HOUSE_NORMS_INVALID_SECTION',
+    'Unknown section key for house norms edit.',
+    '22023',
+    jsonb_build_object('section_key', p_section_key)
+  );
+
+  PERFORM public.api_assert(
+    v_trimmed <> '',
+    'HOUSE_NORMS_INVALID_INPUTS',
+    'Edited text cannot be empty.',
+    '22023'
+  );
+
+  PERFORM public.api_assert(
+    char_length(v_trimmed) <= v_general_max,
+    'HOUSE_NORMS_INVALID_INPUTS',
+    format('Edited text must be %s characters or fewer.', v_general_max),
+    '22023',
+    jsonb_build_object('max_length', v_general_max)
+  );
+
+  IF p_section_key = 'summary_framing' THEN
+    PERFORM public.api_assert(
+      char_length(v_trimmed) <= 500,
+      'HOUSE_NORMS_INVALID_INPUTS',
+      'Summary framing must be 500 characters or fewer.',
+      '22023',
+      jsonb_build_object('max_length', 500)
+    );
+  END IF;
+
+  IF v_summary IS NOT NULL THEN
+    PERFORM public.api_assert(
+      char_length(v_summary) <= 280,
+      'HOUSE_NORMS_INVALID_INPUTS',
+      'Change summary must be 280 characters or fewer.',
+      '22023',
+      jsonb_build_object('max_length', 280)
+    );
+  END IF;
+
+  -- Concurrency: lock row to prevent lost updates
+  SELECT *
+    INTO v_row
+  FROM public.house_norms hn
+  WHERE hn.home_id = p_home_id
+  FOR UPDATE;
+
+  IF v_row.home_id IS NULL THEN
+    PERFORM public.api_error(
+      'HOUSE_NORMS_NOT_FOUND',
+      'No house norms document found for this home.',
+      'P0002',
+      jsonb_build_object('home_id', p_home_id)
+    );
+  END IF;
+
+  -- English-only strict checks. For all other locales, skip regex.
+  IF v_row.locale_base = 'en' THEN
+    v_mentions_username := (v_trimmed ~* '(^|\\s)@[a-z0-9._]{3,30}\\b');
+
+    SELECT EXISTS (
+      SELECT 1
+      FROM public.memberships m
+      JOIN public.profiles p
+        ON p.id = m.user_id
+      WHERE m.home_id = p_home_id
+        AND m.is_current = TRUE
+        AND p.deactivated_at IS NULL
+        AND (
+          position(lower(p.username::text) in lower(v_trimmed)) > 0
+          OR (
+            p.full_name IS NOT NULL
+            AND btrim(p.full_name) <> ''
+            AND position(lower(btrim(p.full_name)) in lower(v_trimmed)) > 0
+          )
+        )
+    )
+    INTO v_mentions_member_name;
+
+    PERFORM public.api_assert(
+      public._house_norms_text_safe_en(v_trimmed),
+      'HOUSE_NORMS_UNSAFE_TEXT',
+      'Edited text contains disallowed enforcement or threat language.',
+      '22023'
+    );
+
+    PERFORM public.api_assert(
+      NOT v_mentions_username
+      AND NOT v_mentions_member_name,
+      'HOUSE_NORMS_UNSAFE_TEXT',
+      'Edited text must not name individuals.',
+      '22023'
+    );
+  END IF;
+
+  -- Edit DRAFT (generated_content)
+  v_content := v_row.generated_content;
+
+  IF p_section_key = 'summary_framing' THEN
+    v_content := jsonb_set(v_content, '{summary,framing}', to_jsonb(v_trimmed), true);
+  ELSE
+    v_content := jsonb_set(v_content, ARRAY['sections', p_section_key, 'text'], to_jsonb(v_trimmed), true);
+  END IF;
+
+  v_status := CASE
+    WHEN v_row.published_content IS NULL THEN 'out_of_date'
+    WHEN v_content IS DISTINCT FROM v_row.published_content THEN 'out_of_date'
+    ELSE 'published'
+  END;
+
+  UPDATE public.house_norms
+  SET generated_content = v_content,
+      generated_at = v_now,
+      status = v_status,
+      last_edited_at = v_now,
+      last_edited_by = v_user
+  WHERE home_id = p_home_id
+  RETURNING *
+  INTO v_row;
+
+  -- Revision snapshot stores draft after edit
+  INSERT INTO public.house_norms_revisions (
+    home_id,
+    editor_user_id,
+    edited_at,
+    content,
+    change_summary
+  )
+  VALUES (
+    p_home_id,
+    v_user,
+    v_now,
+    v_content,
+    v_summary
+  );
+
+  -- Revisions retention: keep last N per home (default 100)
+  DELETE FROM public.house_norms_revisions r
+  WHERE r.home_id = p_home_id
+    AND r.id IN (
+      SELECT id
+      FROM public.house_norms_revisions
+      WHERE home_id = p_home_id
+      ORDER BY edited_at DESC, id DESC
+      OFFSET v_keep_revisions
+    );
+
+  RETURN jsonb_build_object(
+    'ok', true,
+    'home_id', p_home_id,
+    'requested_locale_base', v_requested_locale_base,
+    'doc_locale_base', v_row.locale_base,
+    'section_key', p_section_key,
+    'draft_content', v_content,
+    'draft_updated_at', v_row.generated_at,
+    'published_at', v_row.published_at,
+    'status', v_row.status,
+    'has_unpublished_changes',
+      (v_row.published_content IS NULL OR v_content IS DISTINCT FROM v_row.published_content),
+    'last_edited_at', v_row.last_edited_at,
+    'last_edited_by', v_row.last_edited_by
+  );
+END;
+$_$;
+
+
+ALTER FUNCTION "public"."house_norms_edit_section_text"("p_home_id" "uuid", "p_locale" "text", "p_section_key" "text", "p_new_text" "text", "p_change_summary" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."house_norms_generate_for_home"("p_home_id" "uuid", "p_template_key" "text", "p_locale" "text", "p_inputs" "jsonb", "p_force" boolean DEFAULT false) RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $_$
+DECLARE
+  v_now timestamptz := now();
+  v_requested_locale_base text;
+  v_doc_locale_base text;
+  v_template_body jsonb;
+  v_generated jsonb;
+  v_existing public.house_norms%ROWTYPE;
+  v_user uuid := auth.uid();
+  v_status text;
+BEGIN
+  PERFORM public._assert_authenticated();
+  PERFORM public._assert_home_member(p_home_id);
+  PERFORM public._assert_home_active(p_home_id);
+  PERFORM public._house_norms_assert_owner(p_home_id);
+
+  PERFORM public.api_assert(
+    p_template_key = 'house_norms_v1',
+    'HOUSE_NORMS_INVALID_TEMPLATE',
+    'Unsupported house norms template.',
+    '22023',
+    jsonb_build_object('template_key', p_template_key)
+  );
+
+  PERFORM public.api_assert(
+    p_locale ~ '^[a-z]{2}(-[A-Z]{2})?$',
+    'INVALID_LOCALE',
+    'Locale must be ISO 639-1 (e.g. en) or ISO 639-1 + "-" + ISO 3166-1 (e.g. en-NZ).',
+    '22023'
+  );
+
+  v_requested_locale_base := lower(COALESCE(public.locale_base(p_locale), 'en'));
+
+  PERFORM public.api_assert(
+    v_requested_locale_base ~ '^[a-z]{2}$',
+    'INVALID_LOCALE',
+    'Locale base must be ISO 639-1 lowercase (e.g. en).',
+    '22023',
+    jsonb_build_object('locale_base', v_requested_locale_base)
+  );
+
+  PERFORM public.api_assert(
+    public._house_norms_inputs_valid(p_inputs),
+    'HOUSE_NORMS_INVALID_INPUTS',
+    'House norms inputs are invalid.',
+    '22023'
+  );
+
+  SELECT *
+    INTO v_existing
+  FROM public.house_norms hn
+  WHERE hn.home_id = p_home_id;
+
+  SELECT
+    t.locale_base,
+    t.body
+  INTO
+    v_doc_locale_base,
+    v_template_body
+  FROM public.house_norm_templates t
+  WHERE t.template_key = p_template_key
+    AND t.locale_base = v_requested_locale_base
+  LIMIT 1;
+
+  IF v_template_body IS NULL THEN
+    SELECT
+      t.locale_base,
+      t.body
+    INTO
+      v_doc_locale_base,
+      v_template_body
+    FROM public.house_norm_templates t
+    WHERE t.template_key = p_template_key
+      AND t.locale_base = 'en'
+    LIMIT 1;
+  END IF;
+
+  PERFORM public.api_assert(
+    v_template_body IS NOT NULL,
+    'HOUSE_NORMS_TEMPLATE_NOT_FOUND',
+    'No house norms template found for requested locale or fallback en.',
+    'P0001',
+    jsonb_build_object(
+      'template_key', p_template_key,
+      'requested_locale_base', v_requested_locale_base
+    )
+  );
+
+  IF v_existing.home_id IS NOT NULL
+     AND COALESCE(p_force, false) = false
+     AND v_existing.template_key = p_template_key
+     AND v_existing.locale_base = v_doc_locale_base
+     AND v_existing.inputs = p_inputs THEN
+    RETURN jsonb_build_object(
+      'ok', true,
+      'home_id', p_home_id,
+      'template_key', v_existing.template_key,
+      'locale_base', v_existing.locale_base,
+      'status', v_existing.status,
+      'draft_content', v_existing.generated_content,
+      'draft_updated_at', v_existing.generated_at,
+      'published_content', v_existing.published_content,
+      'published_at', v_existing.published_at,
+      'has_unpublished_changes',
+        (v_existing.published_content IS NULL OR v_existing.generated_content IS DISTINCT FROM v_existing.published_content),
+      'short_circuited', true
+    );
+  END IF;
+
+  v_generated := public._house_norms_generate_content(
+    p_inputs,
+    v_template_body,
+    v_doc_locale_base
+  );
+
+  v_status := CASE
+    WHEN v_existing.home_id IS NULL THEN 'out_of_date'
+    WHEN v_existing.published_content IS NULL THEN 'out_of_date'
+    WHEN v_generated IS DISTINCT FROM v_existing.published_content THEN 'out_of_date'
+    ELSE 'published'
+  END;
+
+  INSERT INTO public.house_norms (
+    home_id,
+    template_key,
+    locale_base,
+    status,
+    inputs,
+    generated_content,
+    generated_at,
+    last_edited_at,
+    last_edited_by
+  )
+  VALUES (
+    p_home_id,
+    p_template_key,
+    v_doc_locale_base,
+    v_status,
+    p_inputs,
+    v_generated,
+    v_now,
+    v_now,
+    v_user
+  )
+  ON CONFLICT (home_id) DO UPDATE
+  SET template_key      = EXCLUDED.template_key,
+      locale_base       = EXCLUDED.locale_base,
+      status            = EXCLUDED.status,
+      inputs            = EXCLUDED.inputs,
+      generated_content = EXCLUDED.generated_content,
+      generated_at      = EXCLUDED.generated_at,
+      last_edited_at    = EXCLUDED.last_edited_at,
+      last_edited_by    = EXCLUDED.last_edited_by;
+
+  SELECT *
+    INTO v_existing
+  FROM public.house_norms hn
+  WHERE hn.home_id = p_home_id;
+
+  RETURN jsonb_build_object(
+    'ok', true,
+    'home_id', p_home_id,
+    'template_key', v_existing.template_key,
+    'locale_base', v_existing.locale_base,
+    'status', v_existing.status,
+    'draft_content', v_existing.generated_content,
+    'draft_updated_at', v_existing.generated_at,
+    'published_content', v_existing.published_content,
+    'published_at', v_existing.published_at,
+    'has_unpublished_changes',
+      (v_existing.published_content IS NULL OR v_existing.generated_content IS DISTINCT FROM v_existing.published_content),
+    'short_circuited', false
+  );
+END;
+$_$;
+
+
+ALTER FUNCTION "public"."house_norms_generate_for_home"("p_home_id" "uuid", "p_template_key" "text", "p_locale" "text", "p_inputs" "jsonb", "p_force" boolean) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."house_norms_get_for_home"("p_home_id" "uuid", "p_locale" "text") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $_$
+DECLARE
+  v_row public.house_norms%ROWTYPE;
+  v_requested_locale_base text;
+  v_is_owner boolean := false;
+  v_show_publish_button boolean := false;
+  v_show_republish_button boolean := false;
+  v_show_public_url boolean := false;
+  v_owner_meta jsonb := '{}'::jsonb;
+BEGIN
+  PERFORM public._assert_authenticated();
+  PERFORM public._assert_home_member(p_home_id);
+  PERFORM public._assert_home_active(p_home_id);
+  v_is_owner := public.is_home_owner(p_home_id, auth.uid());
+
+  PERFORM public.api_assert(
+    p_locale ~ '^[a-z]{2}(-[A-Z]{2})?$',
+    'INVALID_LOCALE',
+    'Locale must be ISO 639-1 (e.g. en) or ISO 639-1 + "-" + ISO 3166-1 (e.g. en-NZ).',
+    '22023'
+  );
+
+  v_requested_locale_base := lower(COALESCE(public.locale_base(p_locale), 'en'));
+
+  PERFORM public.api_assert(
+    v_requested_locale_base ~ '^[a-z]{2}$',
+    'INVALID_LOCALE',
+    'Locale base must be ISO 639-1 lowercase (e.g. en).',
+    '22023',
+    jsonb_build_object('locale_base', v_requested_locale_base)
+  );
+
+  SELECT *
+    INTO v_row
+  FROM public.house_norms hn
+  WHERE hn.home_id = p_home_id;
+
+  IF v_row.home_id IS NULL THEN
+    RETURN jsonb_build_object(
+      'ok', true,
+      'home_id', p_home_id,
+      'requested_locale_base', v_requested_locale_base,
+      'house_norms', NULL
+    );
+  END IF;
+
+  IF v_is_owner THEN
+    IF v_row.published_content IS NULL THEN
+      v_show_publish_button := true;
+      v_show_republish_button := false;
+      v_show_public_url := false;
+    ELSIF v_row.generated_content IS DISTINCT FROM v_row.published_content THEN
+      v_show_publish_button := false;
+      v_show_republish_button := true;
+      v_show_public_url := true;
+    ELSE
+      v_show_publish_button := false;
+      v_show_republish_button := false;
+      v_show_public_url := true;
+    END IF;
+
+    v_owner_meta := jsonb_build_object(
+      'home_public_id', v_row.home_public_id,
+      'public_url',
+        CASE
+          WHEN v_row.home_public_id IS NULL THEN NULL
+          ELSE public._house_norms_build_public_url(v_row.home_public_id::text)
+        END,
+      'show_publish_button', v_show_publish_button,
+      'show_republish_button', v_show_republish_button,
+      'show_public_url', v_show_public_url
+    );
+  END IF;
+
+  RETURN jsonb_build_object(
+    'ok', true,
+    'home_id', p_home_id,
+    'requested_locale_base', v_requested_locale_base,
+    'doc_locale_base', v_row.locale_base,
+    'house_norms', jsonb_build_object(
+      'template_key', v_row.template_key,
+      'status', v_row.status,
+      'inputs', v_row.inputs,
+      -- Draft
+      'draft_content', v_row.generated_content,
+      'draft_updated_at', v_row.generated_at,
+      -- Published snapshot (web/share)
+      'published_content', v_row.published_content,
+      'published_at', v_row.published_at,
+      'published_version', v_row.published_version,
+      'is_published', (v_row.published_content IS NOT NULL),
+      'has_unpublished_changes',
+        (v_row.published_content IS NULL OR v_row.generated_content IS DISTINCT FROM v_row.published_content),
+      'last_edited_at', v_row.last_edited_at,
+      'last_edited_by', v_row.last_edited_by
+    ) || v_owner_meta
+  );
+END;
+$_$;
+
+
+ALTER FUNCTION "public"."house_norms_get_for_home"("p_home_id" "uuid", "p_locale" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."house_norms_get_public_by_home_public_id"("p_home_public_id" "text", "p_locale" "text") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $_$
+DECLARE
+  v_requested_locale_base text;
+  v_row record;
+BEGIN
+  PERFORM public.api_assert(
+    p_locale ~ '^[a-z]{2}(-[A-Z]{2})?$',
+    'INVALID_LOCALE',
+    'Locale must be ISO 639-1 (e.g. en) or ISO 639-1 + "-" + ISO 3166-1 (e.g. en-NZ).',
+    '22023'
+  );
+
+  v_requested_locale_base := lower(COALESCE(public.locale_base(p_locale), 'en'));
+
+  PERFORM public.api_assert(
+    v_requested_locale_base ~ '^[a-z]{2}$',
+    'INVALID_LOCALE',
+    'Locale base must be ISO 639-1 lowercase (e.g. en).',
+    '22023',
+    jsonb_build_object('locale_base', v_requested_locale_base)
+  );
+
+  SELECT
+    hn.home_public_id::text AS home_public_id,
+    hn.locale_base,
+    hn.status,
+    hn.published_content,
+    hn.published_at,
+    hn.published_version
+  INTO v_row
+  FROM public.house_norms hn
+  JOIN public.homes h
+    ON h.id = hn.home_id
+  WHERE hn.home_public_id = p_home_public_id::public.citext
+    AND h.is_active = TRUE
+    AND hn.published_content IS NOT NULL
+    AND hn.published_at IS NOT NULL
+    AND hn.published_version IS NOT NULL
+  LIMIT 1;
+
+  IF v_row.home_public_id IS NULL THEN
+    RETURN jsonb_build_object(
+      'ok', true,
+      'available', false,
+      'home_public_id', p_home_public_id,
+      'requested_locale_base', v_requested_locale_base,
+      'house_norms_public', NULL
+    );
+  END IF;
+
+  RETURN jsonb_build_object(
+    'ok', true,
+    'available', true,
+    'home_public_id', v_row.home_public_id,
+    'requested_locale_base', v_requested_locale_base,
+    'doc_locale_base', v_row.locale_base,
+    'house_norms_public', jsonb_build_object(
+      'status', v_row.status,
+      'published_content', v_row.published_content,
+      'published_at', v_row.published_at,
+      'published_version', v_row.published_version
+    )
+  );
+END;
+$_$;
+
+
+ALTER FUNCTION "public"."house_norms_get_public_by_home_public_id"("p_home_public_id" "text", "p_locale" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."house_norms_publish_for_home"("p_home_id" "uuid", "p_locale" "text") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $_$
+DECLARE
+  v_row public.house_norms%ROWTYPE;
+  v_now timestamptz := now();
+  v_requested_locale_base text;
+  v_home_public_id public.citext;
+  v_next_published_version text;
+  v_public_url text;
+  v_public_url_path text;
+BEGIN
+  PERFORM public._assert_authenticated();
+  PERFORM public._assert_home_member(p_home_id);
+  PERFORM public._assert_home_active(p_home_id);
+  PERFORM public._house_norms_assert_owner(p_home_id);
+
+  PERFORM public.api_assert(
+    p_locale ~ '^[a-z]{2}(-[A-Z]{2})?$',
+    'INVALID_LOCALE',
+    'Locale must be ISO 639-1 (e.g. en) or ISO 639-1 + "-" + ISO 3166-1 (e.g. en-NZ).',
+    '22023'
+  );
+
+  v_requested_locale_base := lower(COALESCE(public.locale_base(p_locale), 'en'));
+
+  PERFORM public.api_assert(
+    v_requested_locale_base ~ '^[a-z]{2}$',
+    'INVALID_LOCALE',
+    'Locale base must be ISO 639-1 lowercase (e.g. en).',
+    '22023',
+    jsonb_build_object('locale_base', v_requested_locale_base)
+  );
+
+  -- Concurrency: lock row to ensure publish copies a consistent draft snapshot
+  SELECT *
+    INTO v_row
+  FROM public.house_norms hn
+  WHERE hn.home_id = p_home_id
+  FOR UPDATE;
+
+  IF v_row.home_id IS NULL THEN
+    PERFORM public.api_error(
+      'HOUSE_NORMS_NOT_FOUND',
+      'No house norms document found for this home.',
+      'P0002',
+      jsonb_build_object('home_id', p_home_id)
+    );
+  END IF;
+
+  v_home_public_id := COALESCE(v_row.home_public_id, public._house_norms_generate_public_id());
+  v_next_published_version := public._house_norms_next_published_version(v_row.published_version);
+  v_public_url_path := '/kinly/norms/' || v_home_public_id::text;
+
+  UPDATE public.house_norms
+  SET published_content = v_row.generated_content,
+      published_at = v_now,
+      status = 'published',
+      published_version = v_next_published_version,
+      home_public_id = v_home_public_id
+  WHERE home_id = p_home_id
+  RETURNING *
+  INTO v_row;
+
+  v_public_url := public._house_norms_build_public_url(v_row.home_public_id::text);
+
+  PERFORM public._house_norms_publish_sync_call(
+    p_home_public_id => v_row.home_public_id::text,
+    p_published_at => v_row.published_at,
+    p_published_version => v_row.published_version,
+    p_template_key => v_row.template_key,
+    p_locale_base => v_row.locale_base,
+    p_published_content => v_row.published_content,
+    p_public_url_path => v_public_url_path
+  );
+
+  RETURN jsonb_build_object(
+    'ok', true,
+    'home_id', p_home_id,
+    'requested_locale_base', v_requested_locale_base,
+    'doc_locale_base', v_row.locale_base,
+    'status', v_row.status,
+    'published_content', v_row.published_content,
+    'published_at', v_row.published_at,
+    'published_version', v_row.published_version,
+    'home_public_id', v_row.home_public_id,
+    'public_url', v_public_url,
+    'has_unpublished_changes', false
+  );
+END;
+$_$;
+
+
+ALTER FUNCTION "public"."house_norms_publish_for_home"("p_home_id" "uuid", "p_locale" "text") OWNER TO "postgres";
+
+
 CREATE TABLE IF NOT EXISTS "public"."house_pulse_weekly" (
     "home_id" "uuid" NOT NULL,
     "iso_week_year" integer NOT NULL,
@@ -10783,14 +12104,6 @@ BEGIN
       '22023',
       jsonb_build_object('minWords', 6)
     );
-
-    -- require at least one sentence boundary or newline (encourages “discussable” format)
-    PERFORM public.api_assert(
-      v_message ~ '[\.\!\?\n]',
-      'COMPLAINT_NEEDS_SENTENCE',
-      'Please write at least one full sentence (add a period or newline).',
-      '22023'
-    );
   END IF;
 
   /* ---------- Option A: rewrite gate (mood-based) ---------- */
@@ -10852,9 +12165,7 @@ BEGIN
 
   /* ---------- trigger rewrite ---------- */
   IF v_should_rewrite THEN
-    INSERT INTO public.complaint_rewrite_triggers(entry_id, home_id, author_user_id, recipient_user_id)
-    VALUES (v_entry_id, p_home_id, v_user_id, v_recipient_id)
-    ON CONFLICT (entry_id) DO NOTHING;
+    PERFORM public.complaint_trigger_enqueue(v_entry_id, v_recipient_id);
   END IF;
 
   RETURN jsonb_build_object(
@@ -13014,6 +14325,92 @@ $$;
 ALTER FUNCTION "public"."requeue_jobs_after_submit_failure"("p_job_ids" "uuid"[], "p_error" "text", "p_backoff_seconds" integer) OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."rewrite_batch_collector_dispatch_v1"() RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+declare
+  v_pending_count int := 0;
+  v_supabase_url text;
+  v_worker_secret text;
+  v_request_id bigint;
+begin
+  select count(*)::int
+    into v_pending_count
+  from public.rewrite_provider_batches b
+  where b.status in ('submitted', 'running');
+
+  if coalesce(v_pending_count, 0) = 0 then
+    raise notice 'rewrite_batch_collector skipped: no pending items';
+    return jsonb_build_object(
+      'ok', true,
+      'skipped_no_pending', true,
+      'pending_count', 0
+    );
+  end if;
+
+  begin
+    select s.decrypted_secret
+      into v_supabase_url
+    from vault.decrypted_secrets s
+    where s.name = 'SUPABASE_URL'
+    limit 1;
+  exception
+    when undefined_table or insufficient_privilege then
+      v_supabase_url := null;
+  end;
+
+  begin
+    select s.decrypted_secret
+      into v_worker_secret
+    from vault.decrypted_secrets s
+    where s.name = 'WORKER_SHARED_SECRET'
+    limit 1;
+  exception
+    when undefined_table or insufficient_privilege then
+      v_worker_secret := null;
+  end;
+
+  if v_supabase_url is null or btrim(v_supabase_url) = '' then
+    v_supabase_url := nullif(current_setting('app.settings.supabase_url', true), '');
+  end if;
+
+  if v_worker_secret is null or btrim(v_worker_secret) = '' then
+    v_worker_secret := nullif(current_setting('app.settings.worker_shared_secret', true), '');
+  end if;
+
+  if v_supabase_url is null or v_worker_secret is null then
+    raise exception 'rewrite_batch_collector_dispatch_v1_missing_config';
+  end if;
+
+  select net.http_post(
+    url := v_supabase_url || '/functions/v1/rewrite_batch_collector',
+    headers := jsonb_build_object(
+      'Content-Type', 'application/json',
+      'x-internal-secret', v_worker_secret,
+      'x-worker-id', 'cron_batch_collector'
+    ),
+    body := jsonb_build_object(
+      'pending_count', v_pending_count,
+      'source', 'pg_cron',
+      'worker', 'rewrite_batch_collector'
+    )
+  )
+  into v_request_id;
+
+  return jsonb_build_object(
+    'ok', true,
+    'skipped_no_pending', false,
+    'pending_count', v_pending_count,
+    'request_id', v_request_id
+  );
+end;
+$$;
+
+
+ALTER FUNCTION "public"."rewrite_batch_collector_dispatch_v1"() OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."rewrite_batch_list_pending_v1"("p_limit" integer DEFAULT 20) RETURNS TABLE("provider_batch_id" "text", "status" "text", "input_file_id" "text", "output_file_id" "text", "error_file_id" "text", "endpoint" "text")
     LANGUAGE "sql" SECURITY DEFINER
     SET "search_path" TO ''
@@ -13051,6 +14448,95 @@ $$;
 
 
 ALTER FUNCTION "public"."rewrite_batch_register_v1"("p_provider_batch_id" "text", "p_input_file_id" "text", "p_job_count" integer, "p_endpoint" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."rewrite_batch_submitter_dispatch_v1"() RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+declare
+  v_pending_count int := 0;
+  v_supabase_url text;
+  v_worker_secret text;
+  v_request_id bigint;
+begin
+  select count(*)::int
+    into v_pending_count
+  from public.rewrite_jobs j
+  where j.status = 'queued'
+    and (j.not_before_at is null or j.not_before_at <= now())
+    and j.provider_batch_id is null
+    and j.submitted_at is null;
+
+  if coalesce(v_pending_count, 0) = 0 then
+    raise notice 'rewrite_batch_submitter skipped: no pending items';
+    return jsonb_build_object(
+      'ok', true,
+      'skipped_no_pending', true,
+      'pending_count', 0
+    );
+  end if;
+
+  begin
+    select s.decrypted_secret
+      into v_supabase_url
+    from vault.decrypted_secrets s
+    where s.name = 'SUPABASE_URL'
+    limit 1;
+  exception
+    when undefined_table or insufficient_privilege then
+      v_supabase_url := null;
+  end;
+
+  begin
+    select s.decrypted_secret
+      into v_worker_secret
+    from vault.decrypted_secrets s
+    where s.name = 'WORKER_SHARED_SECRET'
+    limit 1;
+  exception
+    when undefined_table or insufficient_privilege then
+      v_worker_secret := null;
+  end;
+
+  if v_supabase_url is null or btrim(v_supabase_url) = '' then
+    v_supabase_url := nullif(current_setting('app.settings.supabase_url', true), '');
+  end if;
+
+  if v_worker_secret is null or btrim(v_worker_secret) = '' then
+    v_worker_secret := nullif(current_setting('app.settings.worker_shared_secret', true), '');
+  end if;
+
+  if v_supabase_url is null or v_worker_secret is null then
+    raise exception 'rewrite_batch_submitter_dispatch_v1_missing_config';
+  end if;
+
+  select net.http_post(
+    url := v_supabase_url || '/functions/v1/rewrite_batch_submitter',
+    headers := jsonb_build_object(
+      'Content-Type', 'application/json',
+      'x-internal-secret', v_worker_secret,
+      'x-worker-id', 'cron_batch_submitter'
+    ),
+    body := jsonb_build_object(
+      'pending_count', v_pending_count,
+      'source', 'pg_cron',
+      'worker', 'rewrite_batch_submitter'
+    )
+  )
+  into v_request_id;
+
+  return jsonb_build_object(
+    'ok', true,
+    'skipped_no_pending', false,
+    'pending_count', v_pending_count,
+    'request_id', v_request_id
+  );
+end;
+$$;
+
+
+ALTER FUNCTION "public"."rewrite_batch_submitter_dispatch_v1"() OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."rewrite_batch_update_v1"("p_provider_batch_id" "text", "p_status" "text", "p_output_file_id" "text" DEFAULT NULL::"text", "p_error_file_id" "text" DEFAULT NULL::"text") RETURNS "void"
@@ -14642,6 +16128,65 @@ COMMENT ON COLUMN "public"."homes"."deactivated_at" IS 'Timestamp when the home 
 
 
 
+CREATE TABLE IF NOT EXISTS "public"."house_norm_templates" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "template_key" "text" NOT NULL,
+    "locale_base" "text" NOT NULL,
+    "body" "jsonb" NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "house_norm_templates_body_object_check" CHECK (("jsonb_typeof"("body") = 'object'::"text")),
+    CONSTRAINT "house_norm_templates_locale_base_check" CHECK (("locale_base" ~ '^[a-z]{2}$'::"text")),
+    CONSTRAINT "house_norm_templates_template_key_check" CHECK (("template_key" ~ '^[a-z0-9_]{1,64}$'::"text"))
+);
+
+
+ALTER TABLE "public"."house_norm_templates" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."house_norms" (
+    "home_id" "uuid" NOT NULL,
+    "template_key" "text" NOT NULL,
+    "locale_base" "text" NOT NULL,
+    "status" "text" DEFAULT 'out_of_date'::"text" NOT NULL,
+    "inputs" "jsonb" NOT NULL,
+    "generated_content" "jsonb" NOT NULL,
+    "generated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "published_content" "jsonb",
+    "published_at" timestamp with time zone,
+    "home_public_id" "public"."citext",
+    "published_version" "text",
+    "last_edited_at" timestamp with time zone,
+    "last_edited_by" "uuid",
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "house_norms_generated_content_object_check" CHECK (("jsonb_typeof"("generated_content") = 'object'::"text")),
+    CONSTRAINT "house_norms_inputs_object_check" CHECK (("jsonb_typeof"("inputs") = 'object'::"text")),
+    CONSTRAINT "house_norms_locale_base_check" CHECK (("locale_base" ~ '^[a-z]{2}$'::"text")),
+    CONSTRAINT "house_norms_published_content_object_check" CHECK ((("published_content" IS NULL) OR ("jsonb_typeof"("published_content") = 'object'::"text"))),
+    CONSTRAINT "house_norms_published_version_check" CHECK ((("published_version" IS NULL) OR ("published_version" ~ '^v[0-9]{6}$'::"text"))),
+    CONSTRAINT "house_norms_status_check" CHECK (("status" = ANY (ARRAY['published'::"text", 'out_of_date'::"text"]))),
+    CONSTRAINT "house_norms_template_key_check" CHECK (("template_key" ~ '^[a-z0-9_]{1,64}$'::"text")),
+    CONSTRAINT "house_norms_template_key_exact_check" CHECK (("template_key" = 'house_norms_v1'::"text"))
+);
+
+
+ALTER TABLE "public"."house_norms" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."house_norms_revisions" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "home_id" "uuid" NOT NULL,
+    "editor_user_id" "uuid" NOT NULL,
+    "edited_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "content" "jsonb" NOT NULL,
+    "change_summary" "text",
+    CONSTRAINT "house_norms_revisions_content_object_check" CHECK (("jsonb_typeof"("content") = 'object'::"text"))
+);
+
+
+ALTER TABLE "public"."house_norms_revisions" OWNER TO "postgres";
+
+
 CREATE TABLE IF NOT EXISTS "public"."house_pulse_labels" (
     "contract_version" "text" NOT NULL,
     "pulse_state" "public"."house_pulse_state" NOT NULL,
@@ -15604,6 +17149,26 @@ ALTER TABLE ONLY "public"."homes"
 
 
 
+ALTER TABLE ONLY "public"."house_norm_templates"
+    ADD CONSTRAINT "house_norm_templates_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."house_norm_templates"
+    ADD CONSTRAINT "house_norm_templates_unique_key_locale" UNIQUE ("template_key", "locale_base");
+
+
+
+ALTER TABLE ONLY "public"."house_norms"
+    ADD CONSTRAINT "house_norms_pkey" PRIMARY KEY ("home_id");
+
+
+
+ALTER TABLE ONLY "public"."house_norms_revisions"
+    ADD CONSTRAINT "house_norms_revisions_pkey" PRIMARY KEY ("id");
+
+
+
 ALTER TABLE ONLY "public"."house_vibe_versions"
     ADD CONSTRAINT "house_vibe_versions_pkey" PRIMARY KEY ("mapping_version");
 
@@ -15890,6 +17455,18 @@ ALTER TABLE ONLY "public"."preference_reports"
 
 ALTER TABLE ONLY "public"."user_subscriptions"
     ADD CONSTRAINT "user_subscriptions_pkey" PRIMARY KEY ("id");
+
+
+
+CREATE INDEX "house_norm_templates_lookup_idx" ON "public"."house_norm_templates" USING "btree" ("template_key", "locale_base");
+
+
+
+CREATE UNIQUE INDEX "house_norms_home_public_id_unique_idx" ON "public"."house_norms" USING "btree" ("home_public_id") WHERE ("home_public_id" IS NOT NULL);
+
+
+
+CREATE INDEX "house_norms_revisions_home_edited_id_idx" ON "public"."house_norms_revisions" USING "btree" ("home_id", "edited_at" DESC, "id" DESC);
 
 
 
@@ -16273,6 +17850,22 @@ CREATE OR REPLACE TRIGGER "trg_home_mood_feedback_counters_inc" AFTER INSERT ON 
 
 
 
+CREATE OR REPLACE TRIGGER "trg_house_norm_templates_touch_updated_at" BEFORE UPDATE ON "public"."house_norm_templates" FOR EACH ROW EXECUTE FUNCTION "public"."_touch_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_house_norm_templates_validate" BEFORE INSERT OR UPDATE ON "public"."house_norm_templates" FOR EACH ROW EXECUTE FUNCTION "public"."_house_norm_templates_validate"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_house_norms_public_id_immutable" BEFORE UPDATE ON "public"."house_norms" FOR EACH ROW EXECUTE FUNCTION "public"."_house_norms_enforce_public_id_immutable"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_house_norms_touch_updated_at" BEFORE UPDATE ON "public"."house_norms" FOR EACH ROW EXECUTE FUNCTION "public"."_touch_updated_at"();
+
+
+
 CREATE OR REPLACE TRIGGER "trg_house_pulse_labels_touch_updated_at" BEFORE UPDATE ON "public"."house_pulse_labels" FOR EACH ROW EXECUTE FUNCTION "public"."_touch_updated_at"();
 
 
@@ -16616,6 +18209,26 @@ ALTER TABLE ONLY "public"."homes"
 
 
 
+ALTER TABLE ONLY "public"."house_norms"
+    ADD CONSTRAINT "house_norms_home_id_fkey" FOREIGN KEY ("home_id") REFERENCES "public"."homes"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."house_norms"
+    ADD CONSTRAINT "house_norms_last_edited_by_fkey" FOREIGN KEY ("last_edited_by") REFERENCES "public"."profiles"("id") ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "public"."house_norms_revisions"
+    ADD CONSTRAINT "house_norms_revisions_editor_user_id_fkey" FOREIGN KEY ("editor_user_id") REFERENCES "public"."profiles"("id") ON DELETE RESTRICT;
+
+
+
+ALTER TABLE ONLY "public"."house_norms_revisions"
+    ADD CONSTRAINT "house_norms_revisions_home_id_fkey" FOREIGN KEY ("home_id") REFERENCES "public"."house_norms"("home_id") ON DELETE CASCADE;
+
+
+
 ALTER TABLE ONLY "public"."house_pulse_reads"
     ADD CONSTRAINT "house_pulse_reads_home_id_fkey" FOREIGN KEY ("home_id") REFERENCES "public"."homes"("id") ON DELETE CASCADE;
 
@@ -16925,6 +18538,15 @@ ALTER TABLE "public"."home_usage_counters" ENABLE ROW LEVEL SECURITY;
 
 
 ALTER TABLE "public"."homes" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."house_norm_templates" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."house_norms" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."house_norms_revisions" ENABLE ROW LEVEL SECURITY;
 
 
 ALTER TABLE "public"."house_pulse_labels" ENABLE ROW LEVEL SECURITY;
@@ -17542,6 +19164,61 @@ GRANT ALL ON FUNCTION "public"."_home_usage_apply_delta"("p_home_id" "uuid", "p_
 
 
 
+REVOKE ALL ON FUNCTION "public"."_house_norm_templates_validate"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_house_norm_templates_validate"() TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_house_norms_assert_owner"("p_home_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_house_norms_assert_owner"("p_home_id" "uuid") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_house_norms_build_public_url"("p_home_public_id" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_house_norms_build_public_url"("p_home_public_id" "text") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_house_norms_enforce_public_id_immutable"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_house_norms_enforce_public_id_immutable"() TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_house_norms_generate_content"("p_inputs" "jsonb", "p_template_body" "jsonb", "p_locale_base" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_house_norms_generate_content"("p_inputs" "jsonb", "p_template_body" "jsonb", "p_locale_base" "text") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_house_norms_generate_public_id"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_house_norms_generate_public_id"() TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_house_norms_inputs_valid"("p_inputs" "jsonb") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_house_norms_inputs_valid"("p_inputs" "jsonb") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_house_norms_next_published_version"("p_prev" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_house_norms_next_published_version"("p_prev" "text") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_house_norms_publish_sync_call"("p_home_public_id" "text", "p_published_at" timestamp with time zone, "p_published_version" "text", "p_template_key" "text", "p_locale_base" "text", "p_published_content" "jsonb", "p_public_url_path" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_house_norms_publish_sync_call"("p_home_public_id" "text", "p_published_at" timestamp with time zone, "p_published_version" "text", "p_template_key" "text", "p_locale_base" "text", "p_published_content" "jsonb", "p_public_url_path" "text") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_house_norms_section_key_valid"("p_section_key" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_house_norms_section_key_valid"("p_section_key" "text") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_house_norms_text_safe_en"("p_text" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_house_norms_text_safe_en"("p_text" "text") TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."_house_vibe_confidence_kind"("p_label_id" "text") TO "anon";
 GRANT ALL ON FUNCTION "public"."_house_vibe_confidence_kind"("p_label_id" "text") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."_house_vibe_confidence_kind"("p_label_id" "text") TO "service_role";
@@ -17647,6 +19324,11 @@ GRANT ALL ON TABLE "public"."shopping_lists" TO "service_role";
 GRANT ALL ON FUNCTION "public"."_shopping_list_get_or_create_active"("p_home_id" "uuid") TO "anon";
 GRANT ALL ON FUNCTION "public"."_shopping_list_get_or_create_active"("p_home_id" "uuid") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."_shopping_list_get_or_create_active"("p_home_id" "uuid") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_to_iso_utc_ms"("p_ts" timestamp with time zone) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_to_iso_utc_ms"("p_ts" timestamp with time zone) TO "service_role";
 
 
 
@@ -19382,6 +21064,36 @@ GRANT ALL ON FUNCTION "public"."homes_transfer_owner"("p_home_id" "uuid", "p_new
 
 
 
+GRANT ALL ON FUNCTION "public"."house_norms_edit_section_text"("p_home_id" "uuid", "p_locale" "text", "p_section_key" "text", "p_new_text" "text", "p_change_summary" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."house_norms_edit_section_text"("p_home_id" "uuid", "p_locale" "text", "p_section_key" "text", "p_new_text" "text", "p_change_summary" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."house_norms_edit_section_text"("p_home_id" "uuid", "p_locale" "text", "p_section_key" "text", "p_new_text" "text", "p_change_summary" "text") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."house_norms_generate_for_home"("p_home_id" "uuid", "p_template_key" "text", "p_locale" "text", "p_inputs" "jsonb", "p_force" boolean) TO "anon";
+GRANT ALL ON FUNCTION "public"."house_norms_generate_for_home"("p_home_id" "uuid", "p_template_key" "text", "p_locale" "text", "p_inputs" "jsonb", "p_force" boolean) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."house_norms_generate_for_home"("p_home_id" "uuid", "p_template_key" "text", "p_locale" "text", "p_inputs" "jsonb", "p_force" boolean) TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."house_norms_get_for_home"("p_home_id" "uuid", "p_locale" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."house_norms_get_for_home"("p_home_id" "uuid", "p_locale" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."house_norms_get_for_home"("p_home_id" "uuid", "p_locale" "text") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."house_norms_get_public_by_home_public_id"("p_home_public_id" "text", "p_locale" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."house_norms_get_public_by_home_public_id"("p_home_public_id" "text", "p_locale" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."house_norms_get_public_by_home_public_id"("p_home_public_id" "text", "p_locale" "text") TO "service_role";
+
+
+
+GRANT ALL ON FUNCTION "public"."house_norms_publish_for_home"("p_home_id" "uuid", "p_locale" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."house_norms_publish_for_home"("p_home_id" "uuid", "p_locale" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."house_norms_publish_for_home"("p_home_id" "uuid", "p_locale" "text") TO "service_role";
+
+
+
 GRANT ALL ON TABLE "public"."house_pulse_weekly" TO "service_role";
 
 
@@ -19842,6 +21554,13 @@ GRANT ALL ON FUNCTION "public"."requeue_jobs_after_submit_failure"("p_job_ids" "
 
 
 
+REVOKE ALL ON FUNCTION "public"."rewrite_batch_collector_dispatch_v1"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."rewrite_batch_collector_dispatch_v1"() TO "anon";
+GRANT ALL ON FUNCTION "public"."rewrite_batch_collector_dispatch_v1"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."rewrite_batch_collector_dispatch_v1"() TO "service_role";
+
+
+
 REVOKE ALL ON FUNCTION "public"."rewrite_batch_list_pending_v1"("p_limit" integer) FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."rewrite_batch_list_pending_v1"("p_limit" integer) TO "anon";
 GRANT ALL ON FUNCTION "public"."rewrite_batch_list_pending_v1"("p_limit" integer) TO "authenticated";
@@ -19853,6 +21572,13 @@ REVOKE ALL ON FUNCTION "public"."rewrite_batch_register_v1"("p_provider_batch_id
 GRANT ALL ON FUNCTION "public"."rewrite_batch_register_v1"("p_provider_batch_id" "text", "p_input_file_id" "text", "p_job_count" integer, "p_endpoint" "text") TO "anon";
 GRANT ALL ON FUNCTION "public"."rewrite_batch_register_v1"("p_provider_batch_id" "text", "p_input_file_id" "text", "p_job_count" integer, "p_endpoint" "text") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."rewrite_batch_register_v1"("p_provider_batch_id" "text", "p_input_file_id" "text", "p_job_count" integer, "p_endpoint" "text") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."rewrite_batch_submitter_dispatch_v1"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."rewrite_batch_submitter_dispatch_v1"() TO "anon";
+GRANT ALL ON FUNCTION "public"."rewrite_batch_submitter_dispatch_v1"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."rewrite_batch_submitter_dispatch_v1"() TO "service_role";
 
 
 
@@ -20168,6 +21894,18 @@ GRANT ALL ON TABLE "public"."home_plan_limits" TO "service_role";
 
 
 GRANT ALL ON TABLE "public"."homes" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."house_norm_templates" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."house_norms" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."house_norms_revisions" TO "service_role";
 
 
 

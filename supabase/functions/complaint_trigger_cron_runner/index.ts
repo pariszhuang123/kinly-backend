@@ -41,8 +41,12 @@ class ApiError extends Error {
 if (import.meta.main) {
   Deno.serve(async (req) => {
     // Optional: protect runner endpoint (recommended)
-    // If RUNNER_SHARED_SECRET is set, caller must send x-internal-secret matching it.
-    requireInternalSecret(req, "RUNNER_SHARED_SECRET");
+    // If RUNNER_SHARED_SECRET or WORKER_SHARED_SECRET is set,
+    // caller must send x-internal-secret matching it.
+    requireInternalSecret(req, [
+      "RUNNER_SHARED_SECRET",
+      "WORKER_SHARED_SECRET",
+    ]);
 
     const supabase = supabaseServiceClient();
 
@@ -155,11 +159,19 @@ function env(name: string): string {
   return v;
 }
 
-function requireInternalSecret(req: Request, envName: string) {
-  const expected = Deno.env.get(envName);
+function requireInternalSecret(req: Request, envNames: string[]) {
+  const expected = firstPresentEnv(envNames);
   if (!expected) return; // allow if you don't set it
   const got = req.headers.get("x-internal-secret");
   if (got !== expected) throw new ApiError(401, "unauthorized", "unauthorized");
+}
+
+function firstPresentEnv(names: string[]): string | null {
+  for (const name of names) {
+    const value = Deno.env.get(name);
+    if (value) return value;
+  }
+  return null;
 }
 
 /* ---------------- Response + RPC helpers ---------------- */
@@ -301,6 +313,7 @@ export {
   ApiError,
   clampInt,
   env,
+  firstPresentEnv,
   mapLimit,
   postJsonWithTimeout,
   processClaimedJob,

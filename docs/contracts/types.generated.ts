@@ -1216,6 +1216,141 @@ export type Database = {
           },
         ]
       }
+      house_norm_templates: {
+        Row: {
+          body: Json
+          created_at: string
+          id: string
+          locale_base: string
+          template_key: string
+          updated_at: string
+        }
+        Insert: {
+          body: Json
+          created_at?: string
+          id?: string
+          locale_base: string
+          template_key: string
+          updated_at?: string
+        }
+        Update: {
+          body?: Json
+          created_at?: string
+          id?: string
+          locale_base?: string
+          template_key?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      house_norms: {
+        Row: {
+          generated_at: string
+          generated_content: Json
+          home_id: string
+          home_public_id: string | null
+          inputs: Json
+          last_edited_at: string | null
+          last_edited_by: string | null
+          locale_base: string
+          published_at: string | null
+          published_content: Json | null
+          published_version: string | null
+          status: string
+          template_key: string
+          updated_at: string
+        }
+        Insert: {
+          generated_at?: string
+          generated_content: Json
+          home_id: string
+          home_public_id?: string | null
+          inputs: Json
+          last_edited_at?: string | null
+          last_edited_by?: string | null
+          locale_base: string
+          published_at?: string | null
+          published_content?: Json | null
+          published_version?: string | null
+          status?: string
+          template_key: string
+          updated_at?: string
+        }
+        Update: {
+          generated_at?: string
+          generated_content?: Json
+          home_id?: string
+          home_public_id?: string | null
+          inputs?: Json
+          last_edited_at?: string | null
+          last_edited_by?: string | null
+          locale_base?: string
+          published_at?: string | null
+          published_content?: Json | null
+          published_version?: string | null
+          status?: string
+          template_key?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "house_norms_home_id_fkey"
+            columns: ["home_id"]
+            isOneToOne: true
+            referencedRelation: "homes"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "house_norms_last_edited_by_fkey"
+            columns: ["last_edited_by"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      house_norms_revisions: {
+        Row: {
+          change_summary: string | null
+          content: Json
+          edited_at: string
+          editor_user_id: string
+          home_id: string
+          id: string
+        }
+        Insert: {
+          change_summary?: string | null
+          content: Json
+          edited_at?: string
+          editor_user_id: string
+          home_id: string
+          id?: string
+        }
+        Update: {
+          change_summary?: string | null
+          content?: Json
+          edited_at?: string
+          editor_user_id?: string
+          home_id?: string
+          id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "house_norms_revisions_editor_user_id_fkey"
+            columns: ["editor_user_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "house_norms_revisions_home_id_fkey"
+            columns: ["home_id"]
+            isOneToOne: false
+            referencedRelation: "house_norms"
+            referencedColumns: ["home_id"]
+          },
+        ]
+      }
       house_pulse_labels: {
         Row: {
           contract_version: string
@@ -3250,6 +3385,41 @@ export type Database = {
           isSetofReturn: false
         }
       }
+      _house_norms_assert_owner: {
+        Args: { p_home_id: string }
+        Returns: undefined
+      }
+      _house_norms_build_public_url: {
+        Args: { p_home_public_id: string }
+        Returns: string
+      }
+      _house_norms_generate_content: {
+        Args: { p_inputs: Json; p_locale_base: string; p_template_body: Json }
+        Returns: Json
+      }
+      _house_norms_generate_public_id: { Args: never; Returns: string }
+      _house_norms_inputs_valid: { Args: { p_inputs: Json }; Returns: boolean }
+      _house_norms_next_published_version: {
+        Args: { p_prev: string }
+        Returns: string
+      }
+      _house_norms_publish_sync_call: {
+        Args: {
+          p_home_public_id: string
+          p_locale_base: string
+          p_public_url_path?: string
+          p_published_at: string
+          p_published_content: Json
+          p_published_version: string
+          p_template_key: string
+        }
+        Returns: undefined
+      }
+      _house_norms_section_key_valid: {
+        Args: { p_section_key: string }
+        Returns: boolean
+      }
+      _house_norms_text_safe_en: { Args: { p_text: string }; Returns: boolean }
       _house_vibe_confidence_kind: {
         Args: { p_label_id: string }
         Returns: string
@@ -3329,6 +3499,7 @@ export type Database = {
           isSetofReturn: false
         }
       }
+      _to_iso_utc_ms: { Args: { p_ts: string }; Returns: string }
       api_assert: {
         Args: {
           p_code: string
@@ -4137,6 +4308,38 @@ export type Database = {
         Args: { p_home_id: string; p_new_owner_id: string }
         Returns: Json
       }
+      house_norms_edit_section_text: {
+        Args: {
+          p_change_summary?: string
+          p_home_id: string
+          p_locale: string
+          p_new_text: string
+          p_section_key: string
+        }
+        Returns: Json
+      }
+      house_norms_generate_for_home: {
+        Args: {
+          p_force?: boolean
+          p_home_id: string
+          p_inputs: Json
+          p_locale: string
+          p_template_key: string
+        }
+        Returns: Json
+      }
+      house_norms_get_for_home: {
+        Args: { p_home_id: string; p_locale: string }
+        Returns: Json
+      }
+      house_norms_get_public_by_home_public_id: {
+        Args: { p_home_public_id: string; p_locale: string }
+        Returns: Json
+      }
+      house_norms_publish_for_home: {
+        Args: { p_home_id: string; p_locale: string }
+        Returns: Json
+      }
       house_pulse_compute_week: {
         Args: {
           p_contract_version?: string
@@ -4541,6 +4744,7 @@ export type Database = {
         }
         Returns: undefined
       }
+      rewrite_batch_collector_dispatch_v1: { Args: never; Returns: Json }
       rewrite_batch_list_pending_v1: {
         Args: { p_limit?: number }
         Returns: {
@@ -4561,6 +4765,7 @@ export type Database = {
         }
         Returns: undefined
       }
+      rewrite_batch_submitter_dispatch_v1: { Args: never; Returns: Json }
       rewrite_batch_update_v1: {
         Args: {
           p_error_file_id?: string

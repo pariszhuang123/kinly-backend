@@ -9,6 +9,9 @@
     "complaint_trigger_cron_runner": {
       "path": "supabase/functions/complaint_trigger_cron_runner"
     },
+    "house_norms_publish_sync": {
+      "path": "supabase/functions/house_norms_publish_sync"
+    },
     "notifications_daily": {
       "path": "supabase/functions/notifications_daily"
     },

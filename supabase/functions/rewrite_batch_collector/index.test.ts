@@ -1,6 +1,7 @@
 import {
   getPowerMode,
   mapOpenAIStatus,
+  parseInvocationPayload,
   rejectHugeBodies,
   safeShort,
 } from "./index.ts";
@@ -57,5 +58,47 @@ Deno.test("rejectHugeBodies throws on large content-length", () => {
     throw new Error("expected payload_too_large");
   } catch (e) {
     expect(String(e).includes("payload_too_large"), "payload too large error");
+  }
+});
+
+Deno.test("parseInvocationPayload accepts empty object payload", async () => {
+  const req = new Request("http://localhost", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: "{}",
+  });
+  const parsed = await parseInvocationPayload(req);
+  expect(parsed.ok, "payload should parse");
+  if (parsed.ok) {
+    expect(
+      parsed.payload.pending_count === null,
+      "pending_count defaults null",
+    );
+  }
+});
+
+Deno.test("parseInvocationPayload returns pending_count when present", async () => {
+  const req = new Request("http://localhost", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ pending_count: 0 }),
+  });
+  const parsed = await parseInvocationPayload(req);
+  expect(parsed.ok, "payload should parse");
+  if (parsed.ok) {
+    expect(parsed.payload.pending_count === 0, "pending_count parsed");
+  }
+});
+
+Deno.test("parseInvocationPayload rejects malformed json", async () => {
+  const req = new Request("http://localhost", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: "{",
+  });
+  const parsed = await parseInvocationPayload(req);
+  expect(!parsed.ok, "malformed payload rejected");
+  if (!parsed.ok) {
+    expect(parsed.status === 400, "malformed json is 400");
   }
 });
