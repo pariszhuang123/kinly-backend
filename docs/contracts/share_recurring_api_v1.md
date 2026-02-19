@@ -1,11 +1,11 @@
 ---
-Domain: SHARE
-Capability: Recurring Expenses API
+Domain: Share
+Capability: Share Recurring Api
 Scope: backend
 Artifact-Type: contract
-Stability: stable
-Status: Draft
-Version: v1.1
+Stability: evolving
+Status: draft
+Version: v1.0
 ---
 
 # Kinly Share — One-Off & Recurring Expenses (API) v1.1
@@ -17,22 +17,22 @@ Applies to: expenses, expense_splits, expense_plans, expense_plan_debtors, paywa
 Introduce recurring shared expenses while keeping one-off behavior stable, audit-friendly, and paywall-aware. Recurring intent is expressed as plans; each cycle is a normal immutable `expenses` row.
 
 ## 2. Core Principles
-- Plans define intent; expenses record reality. Once active, expenses are immutable snapshots.
+- Plans define intent; expenses record reality.
 - Draft is provisional (creator-only, quota-free); activation is a one-way door.
-- Assignment is the commitment trigger: activation requires ≥2 distinct debtors.
+- Assignment is the commitment trigger: activation requires >=1 debtor, and creator must not be sole debtor.
 - Each cycle is independent; there is no global “settled plan.”
 - System generation is never blocked: cron always generates cycles; paywall blocks users, not cron.
 - Termination stops future cycles only; historical expenses remain payable.
 - Harmony-first payments: bulk “pay what I owe to payer X,” no cherry-picking per-cycle UI.
+- Active one-off expenses allow creator-only edits for `description`/`notes`; amount/splits/startDate/recurrence are immutable. Recurring cycle rows and converted rows are immutable.
 
 ## 3. Definitions
 - **Draft**: Creator-only placeholder. May include amount + startDate, but cannot be recurring. No paywall impact.
 - **Expense Plan**: Recurring intent owned by the payer (`created_by_user_id`). Immutable amount/split/debtors once active.
-- **Cycle Expense**: An `expenses` row generated from a plan for a specific period. `plan_id` set, `recurrence_interval != none`, `status=active`.
+- **Cycle Expense**: An `expenses` row generated from a plan for a specific period. `plan_id` set, `recurrence_every`/`recurrence_unit` set, `status=active`.
 - **Debtor**: Household member who owes money for an expense via `expense_splits`.
 
 ## 4. Enums & Reuse
-- `recurrence_interval`: `none | weekly | every_2_weeks | monthly | every_2_months | annual`
 - `expense_split_type`: `equal | custom`
 - `expense_status`: `draft | active | cancelled | converted` (converted = draft shell promoted into plan)
 - `expense_plan_status`: `active | terminated`
@@ -47,34 +47,37 @@ First-class recurring intent.
 - `split_type expense_split_type`
 - `amount_cents bigint`
 - `description text`, `notes text`
-- `recurrence_interval recurrence_interval` (non-`none`)
+- `recurrence_every integer` (`>=1`)
+- `recurrence_unit text` (`day | week | month | year`)
 - `start_date date`
 - `next_cycle_date date`
 - `status expense_plan_status default 'active'`
 - `terminated_at timestamptz?`
 - `created_at timestamptz default now()`, `updated_at timestamptz default now()`
-Invariants: ≥2 debtors; amount/split/debtors immutable once active.
+Invariants: >=1 debtor, and creator must not be sole debtor; amount/split/debtors immutable once active.
 
 ### 5.2 expense_plan_debtors
 Template for cycle generation.
 - `plan_id uuid` FK expense_plans
 - `debtor_user_id uuid` FK profiles
 - `share_amount_cents bigint`
-Invariants: ≥2 distinct debtors; for `custom`, sum = plan amount.
+Invariants: >=1 debtor, and creator must not be sole debtor; for `custom`, sum = plan amount.
 
 ### 5.3 expenses (extended)
 - `plan_id uuid?` FK expense_plans; NULL for one-off.
-- `recurrence_interval recurrence_interval not null default 'none'`
+- `recurrence_every integer?` (`NULL` for one-off)
+- `recurrence_unit text?` (`NULL` for one-off; `day | week | month | year` for recurring)
 - `start_date date not null`
 - `fully_paid_at timestamptz?`
 - `status expense_status` (includes `converted`)
 Classification:
-- One-off: `recurrence_interval='none' AND plan_id IS NULL`.
-- Cycle expense: `recurrence_interval!='none' AND plan_id IS NOT NULL AND status='active'`.
+- One-off: `recurrence_every IS NULL AND recurrence_unit IS NULL AND plan_id IS NULL`.
+- Cycle expense: `recurrence_every IS NOT NULL AND recurrence_unit IS NOT NULL AND plan_id IS NOT NULL AND status='active'`.
 Invariants:
 - If `status='active'`: `amount_cents > 0` and `split_type` present.
 - `amount_cents NULL OR amount_cents > 0` (drafts may store amount or leave null).
-- Plan alignment: `recurrence_interval='none'` implies `plan_id IS NULL`; otherwise `plan_id` required.
+- Recurrence alignment: `(recurrence_every IS NULL) = (recurrence_unit IS NULL)`.
+- Plan alignment: recurrence NULL pair implies `plan_id IS NULL`; recurrence set implies `plan_id` required.
 
 ### 5.4 expense_splits
 Generated per expense (one-off or cycle).
@@ -82,18 +85,18 @@ Generated per expense (one-off or cycle).
 
 ## 6. Lifecycle
 ### 6.1 Draft Creation (`expenses.create` with `p_split_mode=NULL`)
-- Recurrence must be `none`.
+- Recurrence must be unset (`recurrenceEvery=NULL`, `recurrenceUnit=NULL`).
 - Amount optional but, if set, must be >0.
 - No quota consumption; no splits inserted.
 
 ### 6.2 One-off Activation
-- Call `expenses.create` or `expenses.edit` with split params and `recurrence_interval='none'`.
-- Validates: ≥2 distinct debtors (at least one non-creator), split sums, start_date within membership window (not older than 90 days).
+- Call `expenses.create` or `expenses.edit` with split params and recurrence null (`recurrenceEvery=NULL`, `recurrenceUnit=NULL`).
+- Validates: >=1 debtor, creator not sole debtor, split sums, start_date within membership window (not older than 90 days).
 - Writes `status=active`, inserts splits (creator share auto-paid), increments `active_expenses` usage.
-- Active expenses are immutable thereafter.
+- Active one-off expenses allow creator-only edits for `description`/`notes`; amount/splits/startDate/recurrence remain immutable.
 
 ### 6.3 Recurring Activation
-- Invoke `expenses.create`/`expenses.edit` with split params and `recurrence_interval!='none'`.
+- Invoke `expenses.create`/`expenses.edit` with split params and recurrence set (`recurrenceEvery>=1` plus valid `recurrenceUnit`).
 - Creates `expense_plans` + `expense_plan_debtors`.
 - Marks the original draft `status=converted` with `plan_id` set (no quota hit).
 - Generates the first cycle expense immediately (via `_expense_plan_generate_cycle`), which increments `active_expenses`.
@@ -119,9 +122,9 @@ Generated per expense (one-off or cycle).
 
 ## 9. Validation Guards
 - Start date required; must be within membership stint and not more than 90 days backdated.
-- Recurrence interval must be one of the allowed values when non-`none`.
-- Splits require ≥2 unique debtors and positive amounts; creator must not be the sole debtor.
-- Active expenses are immutable; only drafts can be edited/activated.
+- Recurrence fields are paired; when set: `recurrenceEvery>=1` and `recurrenceUnit in (day, week, month, year)`.
+- Splits require >=1 unique debtor and positive amounts; creator must not be the sole debtor.
+- Active one-off expenses support creator-only description/notes edits; recurring cycles and converted rows are immutable.
 
 ## 10. Cron
 - Job name: `expense_plans_generate_daily`

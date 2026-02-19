@@ -1,10 +1,15 @@
-import { assert, assertEquals, assertRejects } from "jsr:@std/assert@0.224.0";
+import {
+  assert,
+  assertEquals,
+  assertRejects,
+  assertThrows,
+} from "jsr:@std/assert@0.224.0";
 
 import {
   ApiError,
-  firstPresentEnv,
   postJsonWithTimeout,
   processClaimedJob,
+  requireInternalSecret,
   rpcJson,
 } from "./index.ts";
 
@@ -147,29 +152,30 @@ Deno.test("postJsonWithTimeout aborts long request", async () => {
   }
 });
 
-Deno.test("firstPresentEnv resolves first configured secret", () => {
+Deno.test("requireInternalSecret accepts matching RUNNER_SHARED_SECRET", () => {
   Deno.env.set("RUNNER_SHARED_SECRET", "runner-secret");
-  Deno.env.set("WORKER_SHARED_SECRET", "worker-secret");
   try {
-    assertEquals(
-      firstPresentEnv(["RUNNER_SHARED_SECRET", "WORKER_SHARED_SECRET"]),
-      "runner-secret",
-    );
+    const req = new Request("https://example.test", {
+      headers: { "x-internal-secret": "runner-secret" },
+    });
+    requireInternalSecret(req, "RUNNER_SHARED_SECRET");
   } finally {
     Deno.env.delete("RUNNER_SHARED_SECRET");
-    Deno.env.delete("WORKER_SHARED_SECRET");
   }
 });
 
-Deno.test("firstPresentEnv falls back when primary secret missing", () => {
-  Deno.env.delete("RUNNER_SHARED_SECRET");
-  Deno.env.set("WORKER_SHARED_SECRET", "worker-secret");
+Deno.test("requireInternalSecret rejects mismatched RUNNER_SHARED_SECRET", () => {
+  Deno.env.set("RUNNER_SHARED_SECRET", "runner-secret");
   try {
-    assertEquals(
-      firstPresentEnv(["RUNNER_SHARED_SECRET", "WORKER_SHARED_SECRET"]),
-      "worker-secret",
+    const req = new Request("https://example.test", {
+      headers: { "x-internal-secret": "worker-secret" },
+    });
+    assertThrows(
+      () => requireInternalSecret(req, "RUNNER_SHARED_SECRET"),
+      ApiError,
+      "unauthorized",
     );
   } finally {
-    Deno.env.delete("WORKER_SHARED_SECRET");
+    Deno.env.delete("RUNNER_SHARED_SECRET");
   }
 });

@@ -40,77 +40,94 @@ class ApiError extends Error {
 
 if (import.meta.main) {
   Deno.serve(async (req) => {
-    // Optional: protect runner endpoint (recommended)
-    // If RUNNER_SHARED_SECRET or WORKER_SHARED_SECRET is set,
-    // caller must send x-internal-secret matching it.
-    requireInternalSecret(req, [
-      "RUNNER_SHARED_SECRET",
-      "WORKER_SHARED_SECRET",
-    ]);
+    try {
+      // Optional: protect runner endpoint (recommended)
+      // If RUNNER_SHARED_SECRET is set, caller must send x-internal-secret.
+      requireInternalSecret(req, "RUNNER_SHARED_SECRET");
 
-    const supabase = supabaseServiceClient();
+      const supabase = supabaseServiceClient();
 
-    const orchestratorUrl = env("ORCHESTRATOR_FUNCTION_URL");
-    const orchestratorSecret = env("ORCHESTRATOR_SHARED_SECRET");
+      const orchestratorUrl = env("ORCHESTRATOR_FUNCTION_URL");
+      const orchestratorSecret = env("ORCHESTRATOR_SHARED_SECRET");
 
-    const limit = clampInt(Deno.env.get("RUNNER_POP_LIMIT"), 1, 200, 20);
-    const maxAttempts = clampInt(
-      Deno.env.get("RUNNER_MAX_ATTEMPTS"),
-      1,
-      50,
-      10,
-    );
-    const concurrency = clampInt(Deno.env.get("RUNNER_CONCURRENCY"), 1, 20, 5);
+      const limit = clampInt(Deno.env.get("RUNNER_POP_LIMIT"), 1, 200, 20);
+      const maxAttempts = clampInt(
+        Deno.env.get("RUNNER_MAX_ATTEMPTS"),
+        1,
+        50,
+        10,
+      );
+      const concurrency = clampInt(
+        Deno.env.get("RUNNER_CONCURRENCY"),
+        1,
+        20,
+        5,
+      );
 
-    const orchestratorTimeoutMs = clampInt(
-      Deno.env.get("RUNNER_ORCHESTRATOR_TIMEOUT_MS"),
-      1000,
-      120_000,
-      15_000,
-    );
+      const orchestratorTimeoutMs = clampInt(
+        Deno.env.get("RUNNER_ORCHESTRATOR_TIMEOUT_MS"),
+        1000,
+        120_000,
+        15_000,
+      );
 
-    // interval literal safe for postgres (INTERVAL)
-    const retryAfter = Deno.env.get("RUNNER_RETRY_AFTER")?.trim() || "00:10:00";
+      // interval literal safe for postgres (INTERVAL)
+      const retryAfter = Deno.env.get("RUNNER_RETRY_AFTER")?.trim() ||
+        "00:10:00";
 
-    // 1) Claim queued jobs (atomic)
-    const jobs = (await rpcJson<TriggerRow[]>(
-      supabase,
-      "complaint_trigger_pop_pending",
-      { p_limit: limit, p_max_attempts: maxAttempts },
-    )) ?? [];
+      // 1) Claim queued jobs (atomic)
+      const jobs = (await rpcJson<TriggerRow[]>(
+        supabase,
+        "complaint_trigger_pop_pending",
+        { p_limit: limit, p_max_attempts: maxAttempts },
+      )) ?? [];
 
-    if (jobs.length === 0) {
-      return json({ ok: true, claimed: 0 }, 200);
+      if (jobs.length === 0) {
+        return json({ ok: true, claimed: 0 }, 200);
+      }
+
+      // 2) Process jobs with limited concurrency
+      const results = await mapLimit(
+        jobs,
+        concurrency,
+        (job) =>
+          processClaimedJob({
+            supabase,
+            job,
+            orchestratorUrl,
+            orchestratorSecret,
+            orchestratorTimeoutMs,
+            retryAfter,
+          }),
+      );
+
+      const okCount = results.filter((r) => r.ok).length;
+      const failCount = results.length - okCount;
+
+      return json(
+        {
+          ok: true,
+          claimed: jobs.length,
+          orchestrator_ok: okCount,
+          orchestrator_failed: failCount,
+          sample_failures: results.filter((r) => !r.ok).slice(0, 5),
+        },
+        200,
+      );
+    } catch (e) {
+      if (e instanceof ApiError) {
+        return json(
+          { ok: false, code: e.code ?? "api_error", message: e.message },
+          e.status,
+        );
+      }
+
+      console.error("complaint_trigger_cron_runner_unhandled", e);
+      return json(
+        { ok: false, code: "internal_error", message: "internal_error" },
+        500,
+      );
     }
-
-    // 2) Process jobs with limited concurrency
-    const results = await mapLimit(
-      jobs,
-      concurrency,
-      (job) =>
-        processClaimedJob({
-          supabase,
-          job,
-          orchestratorUrl,
-          orchestratorSecret,
-          orchestratorTimeoutMs,
-          retryAfter,
-        }),
-    );
-
-    const okCount = results.filter((r) => r.ok).length;
-    const failCount = results.length - okCount;
-
-    return json(
-      {
-        ok: true,
-        claimed: jobs.length,
-        orchestrator_ok: okCount,
-        orchestrator_failed: failCount,
-        sample_failures: results.filter((r) => !r.ok).slice(0, 5),
-      },
-      200,
-    );
   });
 }
 
@@ -159,19 +176,11 @@ function env(name: string): string {
   return v;
 }
 
-function requireInternalSecret(req: Request, envNames: string[]) {
-  const expected = firstPresentEnv(envNames);
+function requireInternalSecret(req: Request, envName: string) {
+  const expected = Deno.env.get(envName);
   if (!expected) return; // allow if you don't set it
   const got = req.headers.get("x-internal-secret");
   if (got !== expected) throw new ApiError(401, "unauthorized", "unauthorized");
-}
-
-function firstPresentEnv(names: string[]): string | null {
-  for (const name of names) {
-    const value = Deno.env.get(name);
-    if (value) return value;
-  }
-  return null;
 }
 
 /* ---------------- Response + RPC helpers ---------------- */
@@ -313,7 +322,6 @@ export {
   ApiError,
   clampInt,
   env,
-  firstPresentEnv,
   mapLimit,
   postJsonWithTimeout,
   processClaimedJob,

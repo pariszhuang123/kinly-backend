@@ -1,11 +1,11 @@
 ---
-Domain: SHARE
-Capability: Recurring Expenses UX
+Domain: Shared
+Capability: Share Recurring Product
 Scope: shared
 Artifact-Type: contract
-Stability: stable
-Status: Draft
-Version: v1.1
+Stability: evolving
+Status: draft
+Version: v1.0
 ---
 
 # Kinly Share — One-Off & Recurring Expenses (Product) v1.1
@@ -13,20 +13,20 @@ Version: v1.1
 Purpose: product-facing rules and UX expectations for recurring expenses. API/DB details live in `share_recurring_api_v1.md`.
 
 ## Core Principles (product lens)
-- Plans define intent; expenses are immutable snapshots once active.
+- Plans define intent; expenses are immutable snapshots for billing fields once active.
 - Drafts are creator-only and quota-free; activation is a one-way door.
-- Activation requires ≥2 distinct debtors; creator cannot be sole debtor.
+- Activation requires >=1 debtor; creator cannot be sole debtor.
 - Cron always generates cycles; paywall blocks users, not cron.
 - Termination stops future cycles; history remains payable.
 - Payments are harmony-first (bulk “pay what I owe to payer X”).
 
 ## Lifecycle (user-facing)
-- Draft → Activate one-off: validate splits, set active, immutable thereafter.
+- Draft → Activate one-off: validate splits, set active; creator may later edit description/notes only.
 - Draft → Activate recurring: create plan, convert draft to `converted`, generate first cycle immediately, then cron generates future cycles.
 - Terminate: creator stops future cycles; past cycles remain payable.
 
 ## Surface Expectations
-- Recurring cycles appear in Today/Explore as regular active expenses with `planId` + `recurrenceInterval`.
+- Recurring cycles appear in Today/Explore as regular active expenses with `planId` + `recurrenceEvery`/`recurrenceUnit`.
 - `expenses_get_for_edit` returns `editDisabledReason` of `ACTIVE_IMMUTABLE`, `RECURRING_CYCLE_IMMUTABLE`, or `CONVERTED_TO_PLAN` when edits are blocked.
 - Cron-generated cycles should not prompt user paywall flows; user-triggered activation enforces quota/paywall.
 

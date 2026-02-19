@@ -173,7 +173,9 @@ jobs:
         if: steps.flags.outputs.do_deploy == 'true'
         shell: bash
         env:
-          INTERNAL_SECRET: ${{ secrets.DEV_WORKER_SHARED_SECRET }}
+          INTERNAL_WORKER_SECRET: ${{ secrets.DEV_WORKER_SHARED_SECRET }}
+          INTERNAL_RUNNER_SECRET: ${{ secrets.DEV_RUNNER_SHARED_SECRET }}
+          INTERNAL_ORCHESTRATOR_SECRET: ${{ secrets.DEV_ORCHESTRATOR_SHARED_SECRET }}
         run: |
           set -euo pipefail
 
@@ -183,12 +185,12 @@ jobs:
 
           # Internal-only endpoints require the internal header
           # (supabase functions invoke supports --headers)
-          supabase functions invoke rewrite_batch_submitter --headers "x-internal-secret: $INTERNAL_SECRET" || true
-          supabase functions invoke rewrite_batch_collector --headers "x-internal-secret: $INTERNAL_SECRET" || true
-          supabase functions invoke rewrite_worker         --headers "x-internal-secret: $INTERNAL_SECRET" || true
-          supabase functions invoke complaint_trigger_cron_runner --headers "x-internal-secret: $INTERNAL_SECRET" || true
-          supabase functions invoke complaint_orchestrator --headers "x-internal-secret: $INTERNAL_SECRET" || true
-          supabase functions invoke house_norms_publish_sync --headers "x-internal-secret: $INTERNAL_SECRET" || true
+          supabase functions invoke rewrite_batch_submitter --headers "x-internal-secret: $INTERNAL_WORKER_SECRET" || true
+          supabase functions invoke rewrite_batch_collector --headers "x-internal-secret: $INTERNAL_WORKER_SECRET" || true
+          supabase functions invoke rewrite_worker         --headers "x-internal-secret: $INTERNAL_WORKER_SECRET" || true
+          supabase functions invoke complaint_trigger_cron_runner --headers "x-internal-secret: $INTERNAL_RUNNER_SECRET" || true
+          supabase functions invoke complaint_orchestrator --headers "x-internal-secret: $INTERNAL_ORCHESTRATOR_SECRET" || true
+          supabase functions invoke house_norms_publish_sync --headers "x-internal-secret: $INTERNAL_WORKER_SECRET" || true
 
   deploy_prod:
     name: Deploy • Supabase Prod
@@ -280,19 +282,21 @@ jobs:
         if: steps.flags.outputs.do_deploy == 'true'
         shell: bash
         env:
-          INTERNAL_SECRET: ${{ secrets.PROD_WORKER_SHARED_SECRET }}
+          INTERNAL_WORKER_SECRET: ${{ secrets.PROD_WORKER_SHARED_SECRET }}
+          INTERNAL_RUNNER_SECRET: ${{ secrets.PROD_RUNNER_SHARED_SECRET }}
+          INTERNAL_ORCHESTRATOR_SECRET: ${{ secrets.PROD_ORCHESTRATOR_SHARED_SECRET }}
         run: |
           set -euo pipefail
 
           supabase functions invoke notifications_daily || true
           supabase functions invoke revenuecat_webhook || true
 
-          supabase functions invoke rewrite_batch_submitter --headers "x-internal-secret: $INTERNAL_SECRET" || true
-          supabase functions invoke rewrite_batch_collector --headers "x-internal-secret: $INTERNAL_SECRET" || true
-          supabase functions invoke rewrite_worker         --headers "x-internal-secret: $INTERNAL_SECRET" || true
-          supabase functions invoke complaint_trigger_cron_runner --headers "x-internal-secret: $INTERNAL_SECRET" || true
-          supabase functions invoke complaint_orchestrator --headers "x-internal-secret: $INTERNAL_SECRET" || true
-          supabase functions invoke house_norms_publish_sync --headers "x-internal-secret: $INTERNAL_SECRET" || true
+          supabase functions invoke rewrite_batch_submitter --headers "x-internal-secret: $INTERNAL_WORKER_SECRET" || true
+          supabase functions invoke rewrite_batch_collector --headers "x-internal-secret: $INTERNAL_WORKER_SECRET" || true
+          supabase functions invoke rewrite_worker         --headers "x-internal-secret: $INTERNAL_WORKER_SECRET" || true
+          supabase functions invoke complaint_trigger_cron_runner --headers "x-internal-secret: $INTERNAL_RUNNER_SECRET" || true
+          supabase functions invoke complaint_orchestrator --headers "x-internal-secret: $INTERNAL_ORCHESTRATOR_SECRET" || true
+          supabase functions invoke house_norms_publish_sync --headers "x-internal-secret: $INTERNAL_WORKER_SECRET" || true
 
   publish_contracts:
     name: Publish • Backend Snapshots → kinly-contracts

@@ -983,7 +983,7 @@ BEGIN
     IF p_member_ids IS NULL OR array_length(p_member_ids, 1) IS NULL THEN
       PERFORM public.api_error(
         'SPLIT_MEMBERS_REQUIRED',
-        'Provide at least two members for an equal split.',
+        'Provide at least one member for an equal split.',
         '22023'
       );
     END IF;
@@ -1007,10 +1007,10 @@ BEGIN
       INTO v_total_count
       FROM ordered;
 
-    IF v_total_count < 2 THEN
+    IF v_total_count < 1 THEN
       PERFORM public.api_error(
         'SPLIT_MEMBERS_REQUIRED',
-        'Include at least two members in the split.',
+        'Include at least one member in the split.',
         '22023'
       );
     END IF;
@@ -1058,8 +1058,8 @@ BEGIN
     INTO v_split_count, v_split_sum, v_distinct_count
     FROM pg_temp.expense_split_buffer;
 
-  IF v_split_count < 2 THEN
-    PERFORM public.api_error('SPLIT_MEMBERS_REQUIRED', 'Include at least two members in the split.', '22023');
+  IF v_split_count < 1 THEN
+    PERFORM public.api_error('SPLIT_MEMBERS_REQUIRED', 'Include at least one member in the split.', '22023');
   END IF;
 
   IF EXISTS (
@@ -6116,8 +6116,8 @@ BEGIN
       INTO v_split_count, v_split_sum, v_split_min
       FROM pg_temp.expense_split_buffer;
 
-    IF v_split_count < 2 THEN
-      PERFORM public.api_error('INVALID_DEBTOR', 'At least two debtors are required.', '22023');
+    IF v_split_count < 1 THEN
+      PERFORM public.api_error('INVALID_DEBTOR', 'At least one debtor is required.', '22023');
     END IF;
 
     IF v_split_min <= 0 THEN
@@ -7079,8 +7079,8 @@ BEGIN
     INTO v_split_count, v_split_sum, v_split_min
     FROM pg_temp.expense_split_buffer;
 
-  IF v_split_count < 2 THEN
-    PERFORM public.api_error('INVALID_DEBTOR', 'At least two debtors are required.', '22023');
+  IF v_split_count < 1 THEN
+    PERFORM public.api_error('INVALID_DEBTOR', 'At least one debtor is required.', '22023');
   END IF;
 
   IF v_split_min <= 0 THEN
