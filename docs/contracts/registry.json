@@ -362,6 +362,7 @@
           "fullyPaidAt": "timestamptz|null",
           "description": "text",
           "notes": "text|null",
+          "evidencePhotoPath": "text|null",
           "createdAt": "timestamptz",
           "updatedAt": "timestamptz"
         },
@@ -373,6 +374,7 @@
           "amountCents": "bigint",
           "description": "text",
           "notes": "text|null",
+          "evidencePhotoPath": "text|null",
           "recurrenceEvery": "int",
           "recurrenceUnit": "text",
           "startDate": "date",
@@ -408,6 +410,7 @@
           "amountCents": "bigint|null",
           "fullyPaidAt": "timestamptz|null",
           "description": "text",
+          "evidencePhotoPath": "text|null",
           "createdAt": "timestamptz",
           "totalShares": "int",
           "paidShares": "int",
@@ -419,7 +422,7 @@
         "expenses.create": {
           "type": "rpc",
           "caller": "member",
-          "impl": "public.expenses_create_v2",
+          "impl": "public.expenses_create_v3",
           "args": {
             "p_home_id": "uuid",
             "p_description": "text",
@@ -430,18 +433,22 @@
             "p_splits": "jsonb|null",
             "p_recurrence_every": "int|null",
             "p_recurrence_unit": "text|null",
-            "p_start_date": "date"
+            "p_start_date": "date",
+            "p_evidence_photo_path": "text|null"
           },
           "returns": "Expense",
           "notes": [
             "p_split_mode NULL => draft (recurrence must be null; amount optional)",
-            "p_split_mode set => activation; recurrence null creates one-off active; recurrence set creates plan + first cycle and marks draft converted"
+            "p_split_mode set => activation; recurrence null creates one-off active; recurrence set creates plan + first cycle and marks draft converted",
+            "When provided, p_evidence_photo_path must match households/%; recurring activation copies it to both plan and first cycle",
+            "Draft photo capture is quota-free until activation; charge occurs once at activation/plan-creation boundary on transition rules",
+            "Activation path enforces paywall for active_expenses and expense_photos (no extra +1 for replacements; recurring cycle generation does not increment expense_photos)"
           ]
         },
         "expenses.edit": {
           "type": "rpc",
           "caller": "member",
-          "impl": "public.expenses_edit_v2",
+          "impl": "public.expenses_edit_v3",
           "args": {
             "p_expense_id": "uuid",
             "p_amount_cents": "bigint",
@@ -452,13 +459,17 @@
             "p_splits": "jsonb|null",
             "p_recurrence_every": "int|null",
             "p_recurrence_unit": "text|null",
-            "p_start_date": "date"
+            "p_start_date": "date",
+            "p_evidence_photo_path": "text|null"
           },
           "returns": "Expense",
           "notes": [
             "Drafts: allowed and always activates",
+            "Drafts may add or replace evidencePhotoPath before activation; clearing is supported by sending empty string",
+            "Draft photo updates do not consume expense_photos until activation/plan-creation boundary",
             "Active one-off expenses: creator may edit description/notes only",
             "For active one-off expenses, amount/splits/recurrence/startDate are immutable",
+            "For active one-off expenses, evidencePhotoPath is immutable",
             "Recurrence set creates plan, marks draft converted, and generates first cycle",
             "Recurring cycles and converted rows remain immutable"
           ]
@@ -473,7 +484,7 @@
           "returns": "jsonb",
           "notes": [
             "Bulk marks caller's unpaid splits owed to the recipient as paid",
-            "Stamps marked_paid_at, stamps fully_paid_at once per expense, decrements usage per fully paid expense"
+            "Stamps marked_paid_at, stamps fully_paid_at once per expense, decrements usage per fully paid expense for metrics incremented at expense level (including charged one-off expense_photos)"
           ]
         },
         "expensePlans.terminate": {
@@ -485,7 +496,8 @@
           },
           "returns": "ExpensePlan",
           "notes": [
-            "Stops future cycles; existing expenses remain payable"
+            "Stops future cycles; existing expenses remain payable",
+            "If plan carries evidencePhotoPath, decrements expense_photos once on first termination transition"
           ]
         },
         "expenses.cancel": {
@@ -524,7 +536,7 @@
           },
           "returns": "jsonb",
           "notes": [
-            "Creator-only; returns splits, planId, recurrenceEvery/Unit, startDate, canEdit flag, and editDisabledReason (ACTIVE_IMMUTABLE, RECURRING_CYCLE_IMMUTABLE, CONVERTED_TO_PLAN)"
+            "Creator-only; returns splits, planId, recurrenceEvery/Unit, startDate, evidencePhotoPath, canEdit flag, and editDisabledReason (ACTIVE_IMMUTABLE, RECURRING_CYCLE_IMMUTABLE, CONVERTED_TO_PLAN)"
           ]
         }
       },

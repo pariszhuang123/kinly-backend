@@ -165,7 +165,8 @@ CREATE TYPE "public"."home_usage_metric" AS ENUM (
     'chore_photos',
     'active_members',
     'active_expenses',
-    'shopping_item_photos'
+    'shopping_item_photos',
+    'expense_photos'
 );
 
 
@@ -613,10 +614,12 @@ CREATE TABLE IF NOT EXISTS "public"."expenses" (
     "start_date" "date" NOT NULL,
     "recurrence_every" integer,
     "recurrence_unit" "text",
+    "evidence_photo_path" "text",
     CONSTRAINT "chk_expenses_active_amount_required" CHECK ((("status" <> 'active'::"public"."expense_status") OR (("amount_cents" IS NOT NULL) AND ("amount_cents" > 0)))),
     CONSTRAINT "chk_expenses_active_split_required" CHECK ((("status" <> 'active'::"public"."expense_status") OR ("split_type" IS NOT NULL))),
     CONSTRAINT "chk_expenses_amount_positive" CHECK ((("amount_cents" IS NULL) OR ("amount_cents" > 0))),
     CONSTRAINT "chk_expenses_description_length" CHECK (("char_length"("btrim"("description")) <= 280)),
+    CONSTRAINT "chk_expenses_evidence_photo_path" CHECK ((("evidence_photo_path" IS NULL) OR ("evidence_photo_path" ~~ 'households/%'::"text"))),
     CONSTRAINT "chk_expenses_notes_length" CHECK ((("notes" IS NULL) OR ("char_length"("notes") <= 2000))),
     CONSTRAINT "chk_expenses_plan_alignment" CHECK (((("recurrence_every" IS NULL) AND ("recurrence_unit" IS NULL) AND ("plan_id" IS NULL)) OR (("recurrence_every" IS NOT NULL) AND ("recurrence_unit" IS NOT NULL) AND ("plan_id" IS NOT NULL)))),
     CONSTRAINT "chk_expenses_recurrence_every_min" CHECK ((("recurrence_every" IS NULL) OR ("recurrence_every" >= 1))),
@@ -684,6 +687,10 @@ COMMENT ON COLUMN "public"."expenses"."recurrence_unit" IS 'Recurring interval u
 
 
 
+COMMENT ON COLUMN "public"."expenses"."evidence_photo_path" IS 'Optional evidence image path for the bill. Must start with households/ when present.';
+
+
+
 CREATE OR REPLACE FUNCTION "public"."_expense_plan_generate_cycle"("p_plan_id" "uuid", "p_cycle_date" "date") RETURNS "public"."expenses"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO ''
@@ -698,7 +705,6 @@ BEGIN
     PERFORM public.api_error('INVALID_PLAN', 'Plan id and cycle date are required.', '22023');
   END IF;
 
-  -- Read w/o lock for faster "not found", but do not trust it
   SELECT *
     INTO v_plan_unsafe
     FROM public.expense_plans ep
@@ -713,7 +719,6 @@ BEGIN
     );
   END IF;
 
-  -- Lock home FIRST (global order: homes -> ...)
   SELECT h.is_active
     INTO v_home_active
     FROM public.homes h
@@ -724,7 +729,6 @@ BEGIN
     PERFORM public.api_error('HOME_INACTIVE', 'This home is no longer active.', 'P0004');
   END IF;
 
-  -- Lock plan row
   SELECT *
     INTO v_plan
     FROM public.expense_plans ep
@@ -749,7 +753,6 @@ BEGIN
     );
   END IF;
 
-  -- Idempotent insert (unique on (plan_id, start_date))
   BEGIN
     INSERT INTO public.expenses (
       home_id,
@@ -759,6 +762,7 @@ BEGIN
       amount_cents,
       description,
       notes,
+      evidence_photo_path,
       plan_id,
       recurrence_interval,
       recurrence_every,
@@ -773,6 +777,7 @@ BEGIN
       v_plan.amount_cents,
       v_plan.description,
       v_plan.notes,
+      v_plan.evidence_photo_path,
       v_plan.id,
       v_plan.recurrence_interval,
       v_plan.recurrence_every,
@@ -801,8 +806,6 @@ BEGIN
     RETURN v_expense;
   END;
 
-  -- Create splits for this cycle.
-  -- If payer included as participant, mark their share paid immediately.
   INSERT INTO public.expense_splits (
     expense_id,
     debtor_user_id,
@@ -827,7 +830,6 @@ BEGIN
   FROM public.expense_plan_debtors d
   WHERE d.plan_id = v_plan.id;
 
-  -- Usage increments happen here for recurring cycles (including first cycle)
   PERFORM public._home_usage_apply_delta(
     v_plan.home_id,
     jsonb_build_object('active_expenses', 1)
@@ -913,22 +915,41 @@ CREATE OR REPLACE FUNCTION "public"."_expense_plans_terminate_for_member_change"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO ''
     AS $$
+DECLARE
+  r record;
 BEGIN
-  UPDATE public.expense_plans ep
-     SET status = 'terminated',
-         terminated_at = now(),
-         updated_at = now()
-   WHERE ep.home_id = p_home_id
-     AND ep.status = 'active'
-     AND (
-       ep.created_by_user_id = p_affected_user_id
-       OR EXISTS (
-         SELECT 1
-           FROM public.expense_plan_debtors d
-          WHERE d.plan_id = ep.id
-            AND d.debtor_user_id = p_affected_user_id
-       )
-     );
+  FOR r IN
+    WITH terminated AS (
+      UPDATE public.expense_plans ep
+         SET status = 'terminated',
+             terminated_at = now(),
+             updated_at = now()
+       WHERE ep.home_id = p_home_id
+         AND ep.status = 'active'
+         AND (
+           ep.created_by_user_id = p_affected_user_id
+           OR EXISTS (
+             SELECT 1
+               FROM public.expense_plan_debtors d
+              WHERE d.plan_id = ep.id
+                AND d.debtor_user_id = p_affected_user_id
+           )
+         )
+      RETURNING ep.home_id, ep.evidence_photo_path
+    )
+    SELECT
+      t.home_id,
+      COUNT(*) FILTER (WHERE t.evidence_photo_path IS NOT NULL)::int AS dec_expense_photos
+    FROM terminated t
+    GROUP BY t.home_id
+  LOOP
+    IF COALESCE(r.dec_expense_photos, 0) > 0 THEN
+      PERFORM public._home_usage_apply_delta(
+        r.home_id,
+        jsonb_build_object('expense_photos', -r.dec_expense_photos)
+      );
+    END IF;
+  END LOOP;
 END;
 $$;
 
@@ -1253,6 +1274,7 @@ BEGIN
     v_counters.active_members       := 0;
     v_counters.active_expenses      := 0;
     v_counters.shopping_item_photos := 0;
+    v_counters.expense_photos       := 0;
   END IF;
 
   FOR v_metric_key, v_raw_value IN
@@ -1294,6 +1316,7 @@ BEGIN
       WHEN 'active_members'       THEN COALESCE(v_counters.active_members, 0)
       WHEN 'active_expenses'      THEN COALESCE(v_counters.active_expenses, 0)
       WHEN 'shopping_item_photos' THEN COALESCE(v_counters.shopping_item_photos, 0)
+      WHEN 'expense_photos'       THEN COALESCE(v_counters.expense_photos, 0)
     END;
 
     v_new := GREATEST(0, v_current + v_delta);
@@ -1413,10 +1436,12 @@ CREATE TABLE IF NOT EXISTS "public"."home_usage_counters" (
     "active_members" integer DEFAULT 0 NOT NULL,
     "active_expenses" integer DEFAULT 0 NOT NULL,
     "shopping_item_photos" integer DEFAULT 0 NOT NULL,
+    "expense_photos" integer DEFAULT 0 NOT NULL,
     CONSTRAINT "home_usage_counters_active_chores_check" CHECK (("active_chores" >= 0)),
     CONSTRAINT "home_usage_counters_active_expenses_check" CHECK (("active_expenses" >= 0)),
     CONSTRAINT "home_usage_counters_active_members_check" CHECK (("active_members" >= 0)),
     CONSTRAINT "home_usage_counters_chore_photos_check" CHECK (("chore_photos" >= 0)),
+    CONSTRAINT "home_usage_counters_expense_photos_check" CHECK (("expense_photos" >= 0)),
     CONSTRAINT "home_usage_counters_shopping_item_photos_check" CHECK (("shopping_item_photos" >= 0))
 );
 
@@ -1457,12 +1482,12 @@ DECLARE
   v_active_members_delta        integer := 0;
   v_active_expenses_delta       integer := 0;
   v_shopping_item_photos_delta  integer := 0;
+  v_expense_photos_delta        integer := 0;
 BEGIN
   IF p_home_id IS NULL THEN
     PERFORM public.api_error('INVALID_HOME', 'Home id is required.', '22023');
   END IF;
 
-  -- Lock home FIRST to match global lock order (homes -> ...)
   SELECT h.is_active
     INTO v_home_active
     FROM public.homes h
@@ -1502,6 +1527,10 @@ BEGIN
     IF jsonb_typeof(p_deltas->'shopping_item_photos') = 'number' THEN
       v_shopping_item_photos_delta := (p_deltas->>'shopping_item_photos')::integer;
     END IF;
+
+    IF jsonb_typeof(p_deltas->'expense_photos') = 'number' THEN
+      v_expense_photos_delta := (p_deltas->>'expense_photos')::integer;
+    END IF;
   END IF;
 
   UPDATE public.home_usage_counters h
@@ -1510,6 +1539,7 @@ BEGIN
          active_members       = GREATEST(0, COALESCE(h.active_members, 0) + v_active_members_delta),
          active_expenses      = GREATEST(0, COALESCE(h.active_expenses, 0) + v_active_expenses_delta),
          shopping_item_photos = GREATEST(0, COALESCE(h.shopping_item_photos, 0) + v_shopping_item_photos_delta),
+         expense_photos       = GREATEST(0, COALESCE(h.expense_photos, 0) + v_expense_photos_delta),
          updated_at           = now()
    WHERE h.home_id = p_home_id
    RETURNING * INTO v_row;
@@ -2005,9 +2035,10 @@ CREATE OR REPLACE FUNCTION "public"."_house_norms_publish_sync_call"("p_home_pub
     SET "search_path" TO ''
     AS $$
 DECLARE
-  v_supabase_url text := nullif(current_setting('app.settings.supabase_url', true), '');
-  v_secret text := nullif(current_setting('app.settings.worker_shared_secret', true), '');
+  v_supabase_url text;
+  v_secret text;
   v_published_at_iso text := public._to_iso_utc_ms(p_published_at);
+  v_http_url text;
 
   v_req_id bigint;
   v_started timestamptz := clock_timestamp();
@@ -2015,32 +2046,84 @@ DECLARE
   v_status_code int;
   v_content text;
   v_error_msg text;
-  v_body jsonb;
+  v_body jsonb := '{}'::jsonb;
+  v_edge_error_code text;
+  v_edge_error_details text;
+  v_artifact_ok boolean := false;
+  v_revalidate_ok boolean := false;
 BEGIN
-  PERFORM public.api_assert(
-    v_supabase_url IS NOT NULL,
-    'HOUSE_NORMS_PUBLISH_ARTIFACT_FAILED',
-    'Missing app.settings.supabase_url.',
-    'P0001'
-  );
+  BEGIN
+    SELECT s.decrypted_secret
+      INTO v_supabase_url
+    FROM vault.decrypted_secrets s
+    WHERE s.name = 'SUPABASE_URL'
+    LIMIT 1;
+  EXCEPTION
+    WHEN undefined_table OR insufficient_privilege THEN
+      v_supabase_url := NULL;
+  END;
 
-  -- Harden: ensure secret exists; otherwise edge will 401 and it’s confusing.
-  PERFORM public.api_assert(
-    v_secret IS NOT NULL,
-    'HOUSE_NORMS_PUBLISH_ARTIFACT_FAILED',
-    'Missing app.settings.worker_shared_secret.',
-    'P0001'
-  );
+  BEGIN
+    SELECT s.decrypted_secret
+      INTO v_secret
+    FROM vault.decrypted_secrets s
+    WHERE s.name = 'WORKER_SHARED_SECRET'
+    LIMIT 1;
+  EXCEPTION
+    WHEN undefined_table OR insufficient_privilege THEN
+      v_secret := NULL;
+  END;
+
+  IF v_supabase_url IS NULL OR btrim(v_supabase_url) = '' THEN
+    v_supabase_url := NULLIF(current_setting('app.settings.supabase_url', true), '');
+  END IF;
+
+  IF v_secret IS NULL OR btrim(v_secret) = '' THEN
+    v_secret := NULLIF(current_setting('app.settings.worker_shared_secret', true), '');
+  END IF;
+
+  IF v_supabase_url IS NULL THEN
+    PERFORM public.api_error(
+      'HOUSE_NORMS_PUBLISH_ARTIFACT_FAILED',
+      'Publish sync config missing SUPABASE_URL.',
+      'P0001',
+      jsonb_build_object(
+        'stage', 'config',
+        'missing', 'SUPABASE_URL',
+        'lookup_order', jsonb_build_array(
+          'vault.decrypted_secrets.SUPABASE_URL',
+          'app.settings.supabase_url'
+        )
+      )
+    );
+  END IF;
+
+  IF v_secret IS NULL THEN
+    PERFORM public.api_error(
+      'HOUSE_NORMS_PUBLISH_ARTIFACT_FAILED',
+      'Publish sync config missing WORKER_SHARED_SECRET.',
+      'P0001',
+      jsonb_build_object(
+        'stage', 'config',
+        'missing', 'WORKER_SHARED_SECRET',
+        'lookup_order', jsonb_build_array(
+          'vault.decrypted_secrets.WORKER_SHARED_SECRET',
+          'app.settings.worker_shared_secret'
+        )
+      )
+    );
+  END IF;
+
+  v_http_url := v_supabase_url || '/functions/v1/house_norms_publish_sync';
 
   v_req_id := net.http_post(
-    url := v_supabase_url || '/functions/v1/house_norms_publish_sync',
+    url := v_http_url,
     headers := jsonb_strip_nulls(jsonb_build_object(
       'Content-Type', 'application/json',
       'x-internal-secret', v_secret
     )),
     body := jsonb_build_object(
       'home_public_id', p_home_public_id,
-      -- IMPORTANT: canonical ISO string expected by edge strict toISOString check
       'published_at', v_published_at_iso,
       'published_version', p_published_version,
       'template_key', p_template_key,
@@ -2068,54 +2151,127 @@ BEGIN
   IF v_error_msg IS NOT NULL THEN
     PERFORM public.api_error(
       'HOUSE_NORMS_PUBLISH_ARTIFACT_FAILED',
-      'Publish sync request failed.',
+      'Publish sync HTTP request failed before receiving a response.',
       'P0001',
-      jsonb_build_object('error', v_error_msg, 'request_id', v_req_id)
+      jsonb_build_object(
+        'stage', 'http_post',
+        'request_id', v_req_id,
+        'url', v_http_url,
+        'error', v_error_msg
+      )
     );
   END IF;
 
-  PERFORM public.api_assert(
-    v_status_code IS NOT NULL,
-    'HOUSE_NORMS_PUBLISH_ARTIFACT_FAILED',
-    'Publish sync request timed out.',
-    'P0001',
-    jsonb_build_object('request_id', v_req_id)
-  );
-
-  PERFORM public.api_assert(
-    v_status_code BETWEEN 200 AND 299,
-    'HOUSE_NORMS_PUBLISH_ARTIFACT_FAILED',
-    'Publish sync returned non-success status.',
-    'P0001',
-    jsonb_build_object('status_code', v_status_code, 'body', v_content)
-  );
-
-  BEGIN
-    v_body := COALESCE(v_content, '{}')::jsonb;
-  EXCEPTION WHEN others THEN
+  IF v_status_code IS NULL THEN
     PERFORM public.api_error(
       'HOUSE_NORMS_PUBLISH_ARTIFACT_FAILED',
-      'Publish sync returned invalid JSON.',
+      'Publish sync request timed out waiting for edge response.',
       'P0001',
-      jsonb_build_object('body', v_content)
+      jsonb_build_object(
+        'stage', 'wait_response',
+        'request_id', v_req_id,
+        'url', v_http_url,
+        'timeout_seconds', EXTRACT(epoch FROM v_deadline)
+      )
     );
-  END;
+  END IF;
 
-  PERFORM public.api_assert(
-    COALESCE((v_body ->> 'artifact_ok')::boolean, false),
-    'HOUSE_NORMS_PUBLISH_ARTIFACT_FAILED',
-    'Publish artifact write failed.',
-    'P0001',
-    v_body
-  );
+  IF v_status_code BETWEEN 200 AND 299 THEN
+    BEGIN
+      v_body := COALESCE(v_content, '{}')::jsonb;
+    EXCEPTION WHEN others THEN
+      PERFORM public.api_error(
+        'HOUSE_NORMS_PUBLISH_ARTIFACT_FAILED',
+        'Publish sync returned success status but invalid JSON body.',
+        'P0001',
+        jsonb_build_object(
+          'stage', 'parse_response',
+          'request_id', v_req_id,
+          'status_code', v_status_code,
+          'body', left(COALESCE(v_content, ''), 1200)
+        )
+      );
+    END;
+  ELSE
+    BEGIN
+      v_body := COALESCE(v_content, '{}')::jsonb;
+    EXCEPTION WHEN others THEN
+      v_body := jsonb_build_object('raw_body', left(COALESCE(v_content, ''), 1200));
+    END;
 
-  PERFORM public.api_assert(
-    COALESCE((v_body ->> 'revalidate_ok')::boolean, false),
-    'HOUSE_NORMS_PUBLISH_REVALIDATE_FAILED',
-    'Publish revalidation failed.',
-    'P0001',
-    v_body
-  );
+    v_edge_error_code := nullif(v_body->>'error_code', '');
+    v_edge_error_details := nullif(v_body->>'details', '');
+
+    PERFORM public.api_error(
+      'HOUSE_NORMS_PUBLISH_ARTIFACT_FAILED',
+      format('Publish sync returned non-success status (%s).', v_status_code),
+      'P0001',
+      jsonb_strip_nulls(jsonb_build_object(
+        'stage', 'edge_response',
+        'request_id', v_req_id,
+        'status_code', v_status_code,
+        'url', v_http_url,
+        'edge_error_code', v_edge_error_code,
+        'edge_error_details', v_edge_error_details,
+        'body', v_body,
+        'likely_causes',
+          CASE
+            WHEN v_status_code = 401 THEN jsonb_build_array(
+              'WORKER_SHARED_SECRET mismatch between database config and edge function env.',
+              'Edge function JWT verification is enabled; internal calls need verify_jwt=false.'
+            )
+            WHEN v_status_code = 400 THEN jsonb_build_array(
+              'Payload validation failed in house_norms_publish_sync.'
+            )
+            WHEN v_status_code = 413 THEN jsonb_build_array(
+              'Published payload exceeded edge size limits.'
+            )
+            WHEN v_status_code >= 500 THEN jsonb_build_array(
+              'Missing edge env vars (SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, WORKER_SHARED_SECRET, VERCEL_REVALIDATE_URL, VERCEL_REVALIDATE_SECRET).',
+              'Storage artifact write failed, or revalidation endpoint failed.'
+            )
+            ELSE NULL
+          END
+      ))
+    );
+  END IF;
+
+  v_edge_error_code := nullif(v_body->>'error_code', '');
+  v_edge_error_details := nullif(v_body->>'details', '');
+  v_artifact_ok := lower(COALESCE(v_body->>'artifact_ok', 'false')) IN ('true', 't', '1');
+  v_revalidate_ok := lower(COALESCE(v_body->>'revalidate_ok', 'false')) IN ('true', 't', '1');
+
+  IF NOT v_artifact_ok THEN
+    PERFORM public.api_error(
+      'HOUSE_NORMS_PUBLISH_ARTIFACT_FAILED',
+      'Publish artifact write failed.',
+      'P0001',
+      jsonb_strip_nulls(jsonb_build_object(
+        'stage', 'artifact_check',
+        'request_id', v_req_id,
+        'status_code', v_status_code,
+        'edge_error_code', v_edge_error_code,
+        'edge_error_details', v_edge_error_details,
+        'body', v_body
+      ))
+    );
+  END IF;
+
+  IF NOT v_revalidate_ok THEN
+    PERFORM public.api_error(
+      'HOUSE_NORMS_PUBLISH_REVALIDATE_FAILED',
+      'Publish revalidation failed.',
+      'P0001',
+      jsonb_strip_nulls(jsonb_build_object(
+        'stage', 'revalidate_check',
+        'request_id', v_req_id,
+        'status_code', v_status_code,
+        'edge_error_code', v_edge_error_code,
+        'edge_error_details', v_edge_error_details,
+        'body', v_body
+      ))
+    );
+  END IF;
 END;
 $$;
 
@@ -5216,8 +5372,10 @@ CREATE TABLE IF NOT EXISTS "public"."expense_plans" (
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "recurrence_every" integer NOT NULL,
     "recurrence_unit" "text" NOT NULL,
+    "evidence_photo_path" "text",
     CONSTRAINT "chk_expense_plans_amount_positive" CHECK (("amount_cents" > 0)),
     CONSTRAINT "chk_expense_plans_description_length" CHECK (("char_length"("btrim"("description")) <= 280)),
+    CONSTRAINT "chk_expense_plans_evidence_photo_path" CHECK ((("evidence_photo_path" IS NULL) OR ("evidence_photo_path" ~~ 'households/%'::"text"))),
     CONSTRAINT "chk_expense_plans_next_cycle_not_before_start" CHECK (("next_cycle_date" >= "start_date")),
     CONSTRAINT "chk_expense_plans_notes_length" CHECK ((("notes" IS NULL) OR ("char_length"("notes") <= 2000))),
     CONSTRAINT "chk_expense_plans_recurrence_every_min" CHECK (("recurrence_every" >= 1)),
@@ -5234,6 +5392,10 @@ COMMENT ON COLUMN "public"."expense_plans"."recurrence_every" IS 'Recurring inte
 
 
 COMMENT ON COLUMN "public"."expense_plans"."recurrence_unit" IS 'Recurring interval unit (day|week|month|year).';
+
+
+
+COMMENT ON COLUMN "public"."expense_plans"."evidence_photo_path" IS 'Optional default evidence image path copied to generated recurring cycle expenses.';
 
 
 
@@ -5288,6 +5450,13 @@ BEGIN
    WHERE id = p_plan_id
   RETURNING * INTO v_plan;
 
+  IF v_plan.evidence_photo_path IS NOT NULL THEN
+    PERFORM public._home_usage_apply_delta(
+      v_plan.home_id,
+      jsonb_build_object('expense_photos', -1)
+    );
+  END IF;
+
   RETURN v_plan;
 END;
 $$;
@@ -5305,6 +5474,8 @@ DECLARE
   v_expense        public.expenses%ROWTYPE;
   v_home_is_active boolean;
   v_has_paid       boolean := FALSE;
+  v_was_active     boolean := FALSE;
+  v_photo_delta    integer := 0;
 BEGIN
   PERFORM public._assert_authenticated();
   v_user := auth.uid();
@@ -5352,6 +5523,8 @@ BEGIN
       'P0003'
     );
   END IF;
+
+  v_was_active := (v_expense.status = 'active');
 
   PERFORM 1
   FROM public.memberships m
@@ -5412,10 +5585,21 @@ BEGIN
   WHERE id = v_expense.id
   RETURNING * INTO v_expense;
 
-  PERFORM public._home_usage_apply_delta(
-    v_expense.home_id,
-    jsonb_build_object('active_expenses', -1)
-  );
+  IF v_was_active THEN
+    IF v_expense.plan_id IS NULL
+       AND v_expense.evidence_photo_path IS NOT NULL
+       AND v_expense.fully_paid_at IS NULL THEN
+      v_photo_delta := -1;
+    END IF;
+
+    PERFORM public._home_usage_apply_delta(
+      v_expense.home_id,
+      jsonb_build_object(
+        'active_expenses', -1,
+        'expense_photos', v_photo_delta
+      )
+    );
+  END IF;
 
   RETURN v_expense;
 END;
@@ -6237,6 +6421,356 @@ $$;
 
 
 ALTER FUNCTION "public"."expenses_create_v2"("p_home_id" "uuid", "p_description" "text", "p_amount_cents" bigint, "p_notes" "text", "p_split_mode" "public"."expense_split_type", "p_member_ids" "uuid"[], "p_splits" "jsonb", "p_recurrence_every" integer, "p_recurrence_unit" "text", "p_start_date" "date") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."expenses_create_v3"("p_home_id" "uuid", "p_description" "text", "p_amount_cents" bigint DEFAULT NULL::bigint, "p_notes" "text" DEFAULT NULL::"text", "p_split_mode" "public"."expense_split_type" DEFAULT NULL::"public"."expense_split_type", "p_member_ids" "uuid"[] DEFAULT NULL::"uuid"[], "p_splits" "jsonb" DEFAULT NULL::"jsonb", "p_recurrence_every" integer DEFAULT NULL::integer, "p_recurrence_unit" "text" DEFAULT NULL::"text", "p_start_date" "date" DEFAULT CURRENT_DATE, "p_evidence_photo_path" "text" DEFAULT NULL::"text") RETURNS "public"."expenses"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+DECLARE
+  v_user           uuid;
+  v_home_id        uuid := p_home_id;
+  v_home_is_active boolean;
+
+  v_result         public.expenses%ROWTYPE;
+  v_plan           public.expense_plans%ROWTYPE;
+
+  v_new_status     public.expense_status;
+  v_target_split   public.expense_split_type;
+  v_has_splits     boolean := FALSE;
+  v_is_recurring   boolean := FALSE;
+
+  v_recur_every    integer := p_recurrence_every;
+  v_recur_unit     text := p_recurrence_unit;
+
+  v_split_count    integer := 0;
+  v_split_sum      bigint  := 0;
+  v_split_min      bigint  := 0;
+
+  v_join_date      date;
+
+  v_evidence_photo_path text := NULLIF(btrim(p_evidence_photo_path), '');
+  v_photo_delta integer := 0;
+
+  v_amount_cap constant bigint  := 900000000000;
+  v_desc_max   constant integer := 280;
+  v_notes_max  constant integer := 2000;
+BEGIN
+  PERFORM public._assert_authenticated();
+  v_user := auth.uid();
+
+  IF v_home_id IS NULL THEN
+    PERFORM public.api_error('INVALID_HOME', 'Home id is required.', '22023');
+  END IF;
+
+  IF p_start_date IS NULL THEN
+    PERFORM public.api_error('INVALID_START_DATE', 'Start date is required.', '22023');
+  END IF;
+
+  IF (p_recurrence_every IS NULL) <> (p_recurrence_unit IS NULL) THEN
+    PERFORM public.api_error(
+      'INVALID_RECURRENCE',
+      'Recurrence every and unit must both be set or both be null.',
+      '22023'
+    );
+  END IF;
+
+  IF v_evidence_photo_path IS NOT NULL
+     AND v_evidence_photo_path NOT LIKE 'households/%' THEN
+    PERFORM public.api_error(
+      'INVALID_EVIDENCE_PHOTO_PATH',
+      'Evidence photo path must start with households/.',
+      '22023',
+      jsonb_build_object('field', 'evidencePhotoPath')
+    );
+  END IF;
+
+  v_is_recurring := p_recurrence_every IS NOT NULL;
+
+  IF v_is_recurring THEN
+    IF p_recurrence_every < 1 THEN
+      PERFORM public.api_error(
+        'INVALID_RECURRENCE',
+        'Recurrence every must be >= 1.',
+        '22023'
+      );
+    END IF;
+
+    IF p_recurrence_unit NOT IN ('day', 'week', 'month', 'year') THEN
+      PERFORM public.api_error(
+        'INVALID_RECURRENCE',
+        'Recurrence unit must be day, week, month, or year.',
+        '22023'
+      );
+    END IF;
+  END IF;
+
+  IF btrim(COALESCE(p_description, '')) = '' THEN
+    PERFORM public.api_error('INVALID_DESCRIPTION', 'Description is required.', '22023');
+  END IF;
+
+  IF char_length(btrim(p_description)) > v_desc_max THEN
+    PERFORM public.api_error(
+      'INVALID_DESCRIPTION',
+      format('Description must be %s characters or fewer.', v_desc_max),
+      '22023'
+    );
+  END IF;
+
+  IF p_notes IS NOT NULL AND char_length(p_notes) > v_notes_max THEN
+    PERFORM public.api_error(
+      'INVALID_NOTES',
+      format('Notes must be %s characters or fewer.', v_notes_max),
+      '22023'
+    );
+  END IF;
+
+  IF p_split_mode IS NULL THEN
+    IF v_is_recurring THEN
+      PERFORM public.api_error(
+        'INVALID_RECURRENCE_DRAFT',
+        'Recurring expenses must be activated with splits; drafts cannot be recurring.',
+        '22023'
+      );
+    END IF;
+
+    IF p_amount_cents IS NOT NULL THEN
+      IF p_amount_cents <= 0 OR p_amount_cents > v_amount_cap THEN
+        PERFORM public.api_error(
+          'INVALID_AMOUNT',
+          format('Amount must be between 1 and %s cents when provided.', v_amount_cap),
+          '22023',
+          jsonb_build_object('amountCents', p_amount_cents)
+        );
+      END IF;
+    END IF;
+
+    v_new_status   := 'draft';
+    v_target_split := NULL;
+    v_has_splits   := FALSE;
+  ELSE
+    v_new_status   := 'active';
+    v_target_split := p_split_mode;
+    v_has_splits   := TRUE;
+
+    IF p_amount_cents IS NULL OR p_amount_cents <= 0 OR p_amount_cents > v_amount_cap THEN
+      PERFORM public.api_error(
+        'INVALID_AMOUNT',
+        format('Amount must be between 1 and %s cents.', v_amount_cap),
+        '22023'
+      );
+    END IF;
+  END IF;
+
+  SELECT m.valid_from::date
+    INTO v_join_date
+    FROM public.memberships m
+   WHERE m.home_id    = v_home_id
+     AND m.user_id    = v_user
+     AND m.is_current = TRUE
+     AND m.valid_to IS NULL
+   LIMIT 1;
+
+  IF v_join_date IS NULL THEN
+    PERFORM public.api_error(
+      'NOT_HOME_MEMBER',
+      'You are not a current member of this home.',
+      '42501',
+      jsonb_build_object('homeId', v_home_id, 'userId', v_user)
+    );
+  END IF;
+
+  IF p_start_date < v_join_date OR p_start_date < (current_date - 90) THEN
+    PERFORM public.api_error(
+      'INVALID_START_DATE_RANGE',
+      'Start date is outside the allowed range.',
+      '22023',
+      jsonb_build_object(
+        'minStartDate',        GREATEST(v_join_date, current_date - 90),
+        'joinDate',            v_join_date,
+        'maxBackdateDays',     90,
+        'attemptedStartDate',  p_start_date
+      )
+    );
+  END IF;
+
+  SELECT h.is_active
+    INTO v_home_is_active
+    FROM public.homes h
+   WHERE h.id = v_home_id
+   FOR UPDATE;
+
+  IF v_home_is_active IS DISTINCT FROM TRUE THEN
+    PERFORM public.api_error('HOME_INACTIVE', 'This home is no longer active.', 'P0004');
+  END IF;
+
+  IF v_has_splits THEN
+    PERFORM public._expenses_prepare_split_buffer(
+      v_home_id,
+      v_user,
+      p_amount_cents,
+      v_target_split,
+      p_member_ids,
+      p_splits
+    );
+
+    SELECT COUNT(*)::int,
+           COALESCE(SUM(amount_cents), 0),
+           COALESCE(MIN(amount_cents), 0)
+      INTO v_split_count, v_split_sum, v_split_min
+      FROM pg_temp.expense_split_buffer;
+
+    IF v_split_count < 1 THEN
+      PERFORM public.api_error('INVALID_DEBTOR', 'At least one debtor is required.', '22023');
+    END IF;
+
+    IF v_split_min <= 0 THEN
+      PERFORM public.api_error('INVALID_SPLITS', 'Split amounts must be positive.', '22023');
+    END IF;
+
+    IF v_split_sum <> p_amount_cents THEN
+      PERFORM public.api_error(
+        'INVALID_SPLITS_SUM',
+        'Split amounts must sum to the expense amount.',
+        '22023',
+        jsonb_build_object('amountCents', p_amount_cents, 'splitSumCents', v_split_sum)
+      );
+    END IF;
+  END IF;
+
+  IF NOT v_is_recurring THEN
+    v_photo_delta := CASE
+      WHEN v_new_status = 'active' AND v_evidence_photo_path IS NOT NULL THEN 1
+      ELSE 0
+    END;
+
+    IF v_new_status = 'active' THEN
+      PERFORM public._home_assert_quota(
+        v_home_id,
+        jsonb_build_object(
+          'active_expenses', 1,
+          'expense_photos', v_photo_delta
+        )
+      );
+    END IF;
+
+    INSERT INTO public.expenses (
+      home_id,
+      created_by_user_id,
+      status,
+      split_type,
+      amount_cents,
+      description,
+      notes,
+      evidence_photo_path,
+      recurrence_every,
+      recurrence_unit,
+      start_date
+    )
+    VALUES (
+      v_home_id,
+      v_user,
+      v_new_status,
+      v_target_split,
+      p_amount_cents,
+      btrim(p_description),
+      NULLIF(btrim(p_notes), ''),
+      v_evidence_photo_path,
+      NULL,
+      NULL,
+      p_start_date
+    )
+    RETURNING * INTO v_result;
+
+    IF v_has_splits THEN
+      INSERT INTO public.expense_splits (
+        expense_id,
+        debtor_user_id,
+        amount_cents,
+        status,
+        marked_paid_at
+      )
+      SELECT v_result.id,
+             debtor_user_id,
+             amount_cents,
+             CASE WHEN debtor_user_id = v_user THEN 'paid'::public.expense_share_status
+                  ELSE 'unpaid'::public.expense_share_status
+             END,
+             CASE WHEN debtor_user_id = v_user THEN now() ELSE NULL END
+        FROM pg_temp.expense_split_buffer;
+    END IF;
+
+    IF v_new_status = 'active' THEN
+      PERFORM public._home_usage_apply_delta(
+        v_home_id,
+        jsonb_build_object(
+          'active_expenses', 1,
+          'expense_photos', v_photo_delta
+        )
+      );
+    END IF;
+
+    RETURN v_result;
+  END IF;
+
+  v_photo_delta := CASE WHEN v_evidence_photo_path IS NOT NULL THEN 1 ELSE 0 END;
+
+  PERFORM public._home_assert_quota(
+    v_home_id,
+    jsonb_build_object(
+      'active_expenses', 1,
+      'expense_photos', v_photo_delta
+    )
+  );
+
+  INSERT INTO public.expense_plans (
+    home_id,
+    created_by_user_id,
+    split_type,
+    amount_cents,
+    description,
+    notes,
+    evidence_photo_path,
+    recurrence_every,
+    recurrence_unit,
+    start_date,
+    next_cycle_date,
+    status
+  )
+  VALUES (
+    v_home_id,
+    v_user,
+    v_target_split,
+    p_amount_cents,
+    btrim(p_description),
+    NULLIF(btrim(p_notes), ''),
+    v_evidence_photo_path,
+    v_recur_every,
+    v_recur_unit,
+    p_start_date,
+    public._expense_plan_next_cycle_date_v2(v_recur_every, v_recur_unit, p_start_date),
+    'active'
+  )
+  RETURNING * INTO v_plan;
+
+  INSERT INTO public.expense_plan_debtors (plan_id, debtor_user_id, share_amount_cents)
+  SELECT v_plan.id, debtor_user_id, amount_cents
+    FROM pg_temp.expense_split_buffer;
+
+  IF v_photo_delta > 0 THEN
+    PERFORM public._home_usage_apply_delta(
+      v_home_id,
+      jsonb_build_object('expense_photos', 1)
+    );
+  END IF;
+
+  v_result := public._expense_plan_generate_cycle(v_plan.id, p_start_date);
+  RETURN v_result;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."expenses_create_v3"("p_home_id" "uuid", "p_description" "text", "p_amount_cents" bigint, "p_notes" "text", "p_split_mode" "public"."expense_split_type", "p_member_ids" "uuid"[], "p_splits" "jsonb", "p_recurrence_every" integer, "p_recurrence_unit" "text", "p_start_date" "date", "p_evidence_photo_path" "text") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."expenses_edit"("p_expense_id" "uuid", "p_amount_cents" bigint, "p_description" "text", "p_notes" "text" DEFAULT NULL::"text", "p_split_mode" "public"."expense_split_type" DEFAULT NULL::"public"."expense_split_type", "p_member_ids" "uuid"[] DEFAULT NULL::"uuid"[], "p_splits" "jsonb" DEFAULT NULL::"jsonb") RETURNS "public"."expenses"
@@ -7189,6 +7723,433 @@ $$;
 ALTER FUNCTION "public"."expenses_edit_v2"("p_expense_id" "uuid", "p_amount_cents" bigint, "p_description" "text", "p_notes" "text", "p_split_mode" "public"."expense_split_type", "p_member_ids" "uuid"[], "p_splits" "jsonb", "p_recurrence_every" integer, "p_recurrence_unit" "text", "p_start_date" "date") OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."expenses_edit_v3"("p_expense_id" "uuid", "p_amount_cents" bigint, "p_description" "text", "p_notes" "text" DEFAULT NULL::"text", "p_split_mode" "public"."expense_split_type" DEFAULT NULL::"public"."expense_split_type", "p_member_ids" "uuid"[] DEFAULT NULL::"uuid"[], "p_splits" "jsonb" DEFAULT NULL::"jsonb", "p_recurrence_every" integer DEFAULT NULL::integer, "p_recurrence_unit" "text" DEFAULT NULL::"text", "p_start_date" "date" DEFAULT NULL::"date", "p_evidence_photo_path" "text" DEFAULT NULL::"text") RETURNS "public"."expenses"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+DECLARE
+  v_user            uuid := auth.uid();
+
+  v_existing_unsafe public.expenses%ROWTYPE;
+  v_existing        public.expenses%ROWTYPE;
+
+  v_result          public.expenses%ROWTYPE;
+  v_plan            public.expense_plans%ROWTYPE;
+
+  v_home_is_active  boolean;
+
+  v_target_split       public.expense_split_type;
+  v_target_recur_every integer;
+  v_target_recur_unit  text;
+  v_target_start       date;
+  v_is_recurring       boolean := FALSE;
+
+  v_split_count     integer := 0;
+  v_split_sum       bigint  := 0;
+  v_split_min       bigint  := 0;
+
+  v_join_date       date;
+
+  v_has_evidence_arg boolean := p_evidence_photo_path IS NOT NULL;
+  v_requested_evidence_path text := NULLIF(btrim(p_evidence_photo_path), '');
+  v_target_evidence_path text;
+  v_photo_delta integer := 0;
+
+  v_amount_cap constant bigint  := 900000000000;
+  v_desc_max   constant integer := 280;
+  v_notes_max  constant integer := 2000;
+BEGIN
+  PERFORM public._assert_authenticated();
+
+  IF p_expense_id IS NULL THEN
+    PERFORM public.api_error('INVALID_EXPENSE', 'Expense id is required.', '22023');
+  END IF;
+
+  IF v_requested_evidence_path IS NOT NULL
+     AND v_requested_evidence_path NOT LIKE 'households/%' THEN
+    PERFORM public.api_error(
+      'INVALID_EVIDENCE_PHOTO_PATH',
+      'Evidence photo path must start with households/.',
+      '22023',
+      jsonb_build_object('field', 'evidencePhotoPath')
+    );
+  END IF;
+
+  SELECT *
+    INTO v_existing_unsafe
+    FROM public.expenses e
+   WHERE e.id = p_expense_id;
+
+  IF NOT FOUND THEN
+    PERFORM public.api_error('NOT_FOUND', 'Expense not found.', 'P0002', jsonb_build_object('expenseId', p_expense_id));
+  END IF;
+
+  SELECT h.is_active
+    INTO v_home_is_active
+    FROM public.homes h
+   WHERE h.id = v_existing_unsafe.home_id
+   FOR UPDATE;
+
+  IF v_home_is_active IS DISTINCT FROM TRUE THEN
+    PERFORM public.api_error('HOME_INACTIVE', 'This home is no longer active.', 'P0004', jsonb_build_object('homeId', v_existing_unsafe.home_id));
+  END IF;
+
+  SELECT *
+    INTO v_existing
+    FROM public.expenses e
+   WHERE e.id = p_expense_id
+   FOR UPDATE;
+
+  IF v_existing.home_id <> v_existing_unsafe.home_id THEN
+    PERFORM public.api_error('CONCURRENT_MODIFICATION', 'Expense changed while editing. Please retry.', '40001', jsonb_build_object('expenseId', p_expense_id));
+  END IF;
+
+  SELECT m.valid_from::date
+    INTO v_join_date
+    FROM public.memberships m
+   WHERE m.home_id    = v_existing.home_id
+     AND m.user_id    = v_user
+     AND m.is_current = TRUE
+     AND m.valid_to IS NULL
+   LIMIT 1;
+
+  IF v_join_date IS NULL THEN
+    PERFORM public.api_error('NOT_HOME_MEMBER', 'You are not a current member of this home.', '42501',
+      jsonb_build_object('homeId', v_existing.home_id, 'userId', v_user)
+    );
+  END IF;
+
+  IF v_existing.plan_id IS NOT NULL THEN
+    PERFORM public.api_error('IMMUTABLE_CYCLE', 'Expenses generated from a recurring plan cannot be edited.', '42501');
+  END IF;
+
+  IF v_existing.status = 'active' THEN
+    IF v_existing.created_by_user_id <> v_user THEN
+      PERFORM public.api_error(
+        'NOT_CREATOR',
+        'Only the creator can edit this active expense.',
+        '42501'
+      );
+    END IF;
+
+    IF p_amount_cents IS DISTINCT FROM v_existing.amount_cents THEN
+      PERFORM public.api_error(
+        'EDIT_NOT_ALLOWED',
+        'Amount is immutable for active expenses.',
+        '42501',
+        jsonb_build_object('field', 'amountCents', 'expenseId', v_existing.id)
+      );
+    END IF;
+
+    IF p_split_mode IS NOT NULL AND p_split_mode IS DISTINCT FROM v_existing.split_type THEN
+      PERFORM public.api_error(
+        'EDIT_NOT_ALLOWED',
+        'Split mode is immutable for active expenses.',
+        '42501',
+        jsonb_build_object('field', 'splitMode', 'expenseId', v_existing.id)
+      );
+    END IF;
+
+    IF p_member_ids IS NOT NULL OR p_splits IS NOT NULL THEN
+      PERFORM public.api_error(
+        'EDIT_NOT_ALLOWED',
+        'Splits are immutable for active expenses.',
+        '42501',
+        jsonb_build_object('field', 'splits', 'expenseId', v_existing.id)
+      );
+    END IF;
+
+    IF p_recurrence_every IS NOT NULL OR p_recurrence_unit IS NOT NULL THEN
+      PERFORM public.api_error(
+        'EDIT_NOT_ALLOWED',
+        'Recurrence is immutable for active expenses.',
+        '42501',
+        jsonb_build_object('field', 'recurrence', 'expenseId', v_existing.id)
+      );
+    END IF;
+
+    IF p_start_date IS NOT NULL AND p_start_date IS DISTINCT FROM v_existing.start_date THEN
+      PERFORM public.api_error(
+        'EDIT_NOT_ALLOWED',
+        'Start date is immutable for active expenses.',
+        '42501',
+        jsonb_build_object('field', 'startDate', 'expenseId', v_existing.id)
+      );
+    END IF;
+
+    IF v_has_evidence_arg
+       AND v_requested_evidence_path IS DISTINCT FROM v_existing.evidence_photo_path THEN
+      PERFORM public.api_error(
+        'EDIT_NOT_ALLOWED',
+        'Evidence photo is immutable for active expenses.',
+        '42501',
+        jsonb_build_object('field', 'evidencePhotoPath', 'expenseId', v_existing.id)
+      );
+    END IF;
+
+    IF btrim(COALESCE(p_description, '')) = '' THEN
+      PERFORM public.api_error('INVALID_DESCRIPTION', 'Description is required.', '22023');
+    END IF;
+
+    IF char_length(btrim(p_description)) > v_desc_max THEN
+      PERFORM public.api_error('INVALID_DESCRIPTION', format('Description must be %s characters or fewer.', v_desc_max), '22023');
+    END IF;
+
+    IF p_notes IS NOT NULL AND char_length(p_notes) > v_notes_max THEN
+      PERFORM public.api_error('INVALID_NOTES', format('Notes must be %s characters or fewer.', v_notes_max), '22023');
+    END IF;
+
+    UPDATE public.expenses
+       SET description = btrim(p_description),
+           notes = NULLIF(btrim(p_notes), ''),
+           updated_at = now()
+     WHERE id = v_existing.id
+     RETURNING * INTO v_result;
+
+    RETURN v_result;
+  END IF;
+
+  IF v_existing.created_by_user_id <> v_user THEN
+    PERFORM public.api_error('NOT_CREATOR', 'Only the creator can modify this expense.', '42501');
+  END IF;
+
+  IF v_existing.status <> 'draft' THEN
+    PERFORM public.api_error('INVALID_STATE', 'Only draft expenses can be edited.', '42501',
+      jsonb_build_object('expenseId', v_existing.id, 'status', v_existing.status)
+    );
+  END IF;
+
+  IF p_amount_cents IS NULL OR p_amount_cents <= 0 OR p_amount_cents > v_amount_cap THEN
+    PERFORM public.api_error('INVALID_AMOUNT', format('Amount must be between 1 and %s cents.', v_amount_cap), '22023');
+  END IF;
+
+  IF btrim(COALESCE(p_description, '')) = '' THEN
+    PERFORM public.api_error('INVALID_DESCRIPTION', 'Description is required.', '22023');
+  END IF;
+
+  IF char_length(btrim(p_description)) > v_desc_max THEN
+    PERFORM public.api_error('INVALID_DESCRIPTION', format('Description must be %s characters or fewer.', v_desc_max), '22023');
+  END IF;
+
+  IF p_notes IS NOT NULL AND char_length(p_notes) > v_notes_max THEN
+    PERFORM public.api_error('INVALID_NOTES', format('Notes must be %s characters or fewer.', v_notes_max), '22023');
+  END IF;
+
+  IF p_split_mode IS NULL THEN
+    PERFORM public.api_error('INVALID_SPLITS', 'Splits are required. Editing an expense always activates it.', '22023');
+  END IF;
+
+  IF (p_recurrence_every IS NULL) <> (p_recurrence_unit IS NULL) THEN
+    PERFORM public.api_error(
+      'INVALID_RECURRENCE',
+      'Recurrence every and unit must both be set or both be null.',
+      '22023'
+    );
+  END IF;
+
+  IF v_has_evidence_arg THEN
+    v_target_evidence_path := v_requested_evidence_path;
+  ELSE
+    v_target_evidence_path := v_existing.evidence_photo_path;
+  END IF;
+
+  v_target_split := p_split_mode;
+  v_target_recur_every := p_recurrence_every;
+  v_target_recur_unit := p_recurrence_unit;
+  v_is_recurring := v_target_recur_every IS NOT NULL;
+
+  IF v_is_recurring THEN
+    IF v_target_recur_every < 1 THEN
+      PERFORM public.api_error(
+        'INVALID_RECURRENCE',
+        'Recurrence every must be >= 1.',
+        '22023'
+      );
+    END IF;
+
+    IF v_target_recur_unit NOT IN ('day', 'week', 'month', 'year') THEN
+      PERFORM public.api_error(
+        'INVALID_RECURRENCE',
+        'Recurrence unit must be day, week, month, or year.',
+        '22023'
+      );
+    END IF;
+  END IF;
+
+  v_target_start := COALESCE(p_start_date, v_existing.start_date);
+
+  IF v_target_start IS NULL THEN
+    PERFORM public.api_error('INVALID_START_DATE', 'Start date is required.', '22023');
+  END IF;
+
+  IF v_target_start < v_join_date OR v_target_start < (current_date - 90) THEN
+    PERFORM public.api_error(
+      'INVALID_START_DATE_RANGE',
+      'Start date is outside the allowed range.',
+      '22023',
+      jsonb_build_object(
+        'minStartDate',        GREATEST(v_join_date, current_date - 90),
+        'joinDate',            v_join_date,
+        'maxBackdateDays',     90,
+        'attemptedStartDate',  v_target_start
+      )
+    );
+  END IF;
+
+  PERFORM public._expenses_prepare_split_buffer(
+    v_existing.home_id,
+    v_user,
+    p_amount_cents,
+    v_target_split,
+    p_member_ids,
+    p_splits
+  );
+
+  SELECT COUNT(*)::int,
+         COALESCE(SUM(amount_cents), 0),
+         COALESCE(MIN(amount_cents), 0)
+    INTO v_split_count, v_split_sum, v_split_min
+    FROM pg_temp.expense_split_buffer;
+
+  IF v_split_count < 1 THEN
+    PERFORM public.api_error('INVALID_DEBTOR', 'At least one debtor is required.', '22023');
+  END IF;
+
+  IF v_split_min <= 0 THEN
+    PERFORM public.api_error('INVALID_SPLITS', 'Split amounts must be positive.', '22023');
+  END IF;
+
+  IF v_split_sum <> p_amount_cents THEN
+    PERFORM public.api_error('INVALID_SPLITS_SUM', 'Split amounts must sum to the expense amount.', '22023',
+      jsonb_build_object('amountCents', p_amount_cents, 'splitSumCents', v_split_sum)
+    );
+  END IF;
+
+  DELETE FROM public.expense_splits s
+   WHERE s.expense_id = v_existing.id;
+
+  IF v_is_recurring THEN
+    v_photo_delta := CASE WHEN v_target_evidence_path IS NOT NULL THEN 1 ELSE 0 END;
+
+    PERFORM public._home_assert_quota(
+      v_existing.home_id,
+      jsonb_build_object(
+        'active_expenses', 1,
+        'expense_photos', v_photo_delta
+      )
+    );
+
+    INSERT INTO public.expense_plans (
+      home_id,
+      created_by_user_id,
+      split_type,
+      amount_cents,
+      description,
+      notes,
+      evidence_photo_path,
+      recurrence_every,
+      recurrence_unit,
+      start_date,
+      next_cycle_date,
+      status
+    )
+    VALUES (
+      v_existing.home_id,
+      v_user,
+      v_target_split,
+      p_amount_cents,
+      btrim(p_description),
+      NULLIF(btrim(p_notes), ''),
+      v_target_evidence_path,
+      v_target_recur_every,
+      v_target_recur_unit,
+      v_target_start,
+      public._expense_plan_next_cycle_date_v2(v_target_recur_every, v_target_recur_unit, v_target_start),
+      'active'
+    )
+    RETURNING * INTO v_plan;
+
+    INSERT INTO public.expense_plan_debtors (plan_id, debtor_user_id, share_amount_cents)
+    SELECT v_plan.id, debtor_user_id, amount_cents
+      FROM pg_temp.expense_split_buffer;
+
+    UPDATE public.expenses
+       SET status              = 'converted',
+           plan_id             = v_plan.id,
+           recurrence_every    = v_target_recur_every,
+           recurrence_unit     = v_target_recur_unit,
+           evidence_photo_path = v_target_evidence_path,
+           start_date          = v_target_start,
+           updated_at          = now()
+     WHERE id = v_existing.id;
+
+    IF v_photo_delta > 0 THEN
+      PERFORM public._home_usage_apply_delta(
+        v_existing.home_id,
+        jsonb_build_object('expense_photos', 1)
+      );
+    END IF;
+
+    v_result := public._expense_plan_generate_cycle(v_plan.id, v_target_start);
+    RETURN v_result;
+  END IF;
+
+  v_photo_delta := CASE WHEN v_target_evidence_path IS NOT NULL THEN 1 ELSE 0 END;
+
+  PERFORM public._home_assert_quota(
+    v_existing.home_id,
+    jsonb_build_object(
+      'active_expenses', 1,
+      'expense_photos', v_photo_delta
+    )
+  );
+
+  UPDATE public.expenses
+     SET status              = 'active',
+         split_type          = v_target_split,
+         amount_cents        = p_amount_cents,
+         description         = btrim(p_description),
+         notes               = NULLIF(btrim(p_notes), ''),
+         evidence_photo_path = v_target_evidence_path,
+         recurrence_every    = NULL,
+         recurrence_unit     = NULL,
+         start_date          = v_target_start,
+         updated_at          = now()
+   WHERE id = v_existing.id
+   RETURNING * INTO v_result;
+
+  INSERT INTO public.expense_splits (
+    expense_id,
+    debtor_user_id,
+    amount_cents,
+    status,
+    marked_paid_at
+  )
+  SELECT v_result.id,
+         debtor_user_id,
+         amount_cents,
+         CASE WHEN debtor_user_id = v_user THEN 'paid'::public.expense_share_status
+              ELSE 'unpaid'::public.expense_share_status
+         END,
+         CASE WHEN debtor_user_id = v_user THEN now() ELSE NULL END
+    FROM pg_temp.expense_split_buffer;
+
+  PERFORM public._home_usage_apply_delta(
+    v_existing.home_id,
+    jsonb_build_object(
+      'active_expenses', 1,
+      'expense_photos', v_photo_delta
+    )
+  );
+
+  RETURN v_result;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."expenses_edit_v3"("p_expense_id" "uuid", "p_amount_cents" bigint, "p_description" "text", "p_notes" "text", "p_split_mode" "public"."expense_split_type", "p_member_ids" "uuid"[], "p_splits" "jsonb", "p_recurrence_every" integer, "p_recurrence_unit" "text", "p_start_date" "date", "p_evidence_photo_path" "text") OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."expenses_get_created_by_me"("p_home_id" "uuid") RETURNS "jsonb"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO ''
@@ -7209,7 +8170,6 @@ BEGIN
     );
   END IF;
 
-  -- Caller must be a current member of this home
   PERFORM 1
   FROM public.memberships m
   WHERE m.home_id    = p_home_id
@@ -7226,7 +8186,6 @@ BEGIN
     );
   END IF;
 
-  -- Home is fully frozen when inactive
   SELECT h.is_active
   INTO v_home_is_active
   FROM public.homes h
@@ -7240,26 +8199,24 @@ BEGIN
     );
   END IF;
 
-  /*
-    Build list of live expenses created by the current user.
-  */
   SELECT COALESCE(
            jsonb_agg(
              jsonb_build_object(
-               'expenseId',        e.id,
-               'homeId',           e.home_id,
-               'createdByUserId',  e.created_by_user_id,
-               'description',      e.description,
-               'amountCents',      e.amount_cents,
-               'status',           e.status,
-               'splitType',        e.split_type,
-               'createdAt',        e.created_at,
-               'recurrenceEvery',  e.recurrence_every,
-               'recurrenceUnit',   e.recurrence_unit,
-               'startDate',        e.start_date,
-               'totalShares',      COALESCE(stats.total_shares, 0)::int,
-               'paidShares',       COALESCE(stats.paid_shares, 0)::int,
-               'paidAmountCents',  COALESCE(stats.paid_amount_cents, 0),
+               'expenseId',         e.id,
+               'homeId',            e.home_id,
+               'createdByUserId',   e.created_by_user_id,
+               'description',       e.description,
+               'amountCents',       e.amount_cents,
+               'status',            e.status,
+               'splitType',         e.split_type,
+               'evidencePhotoPath', e.evidence_photo_path,
+               'createdAt',         e.created_at,
+               'recurrenceEvery',   e.recurrence_every,
+               'recurrenceUnit',    e.recurrence_unit,
+               'startDate',         e.start_date,
+               'totalShares',       COALESCE(stats.total_shares, 0)::int,
+               'paidShares',        COALESCE(stats.paid_shares, 0)::int,
+               'paidAmountCents',   COALESCE(stats.paid_amount_cents, 0),
                'allPaid',
                  CASE
                    WHEN COALESCE(stats.total_shares, 0) = 0 THEN FALSE
@@ -7353,13 +8310,14 @@ BEGIN
       SUM(s.amount_cents)                           AS total_owed_cents,
       jsonb_agg(
         jsonb_build_object(
-          'expenseId',       e.id,
-          'description',     e.description,
-          'amountCents',     s.amount_cents,
-          'notes',           e.notes,
-          'recurrenceEvery', e.recurrence_every,
-          'recurrenceUnit',  e.recurrence_unit,
-          'startDate',       e.start_date
+          'expenseId',         e.id,
+          'description',       e.description,
+          'amountCents',       s.amount_cents,
+          'notes',             e.notes,
+          'evidencePhotoPath', e.evidence_photo_path,
+          'recurrenceEvery',   e.recurrence_every,
+          'recurrenceUnit',    e.recurrence_unit,
+          'startDate',         e.start_date
         )
         ORDER BY e.created_at DESC, e.id
       ) AS items
@@ -7643,6 +8601,7 @@ BEGIN
     'amountCents',        v_expense.amount_cents,
     'description',        v_expense.description,
     'notes',              v_expense.notes,
+    'evidencePhotoPath',  v_expense.evidence_photo_path,
     'createdAt',          v_expense.created_at,
     'updatedAt',          v_expense.updated_at,
     'planId',             v_expense.plan_id,
@@ -7715,6 +8674,7 @@ DECLARE
   v_expense_count        integer := 0;
   v_newly_fully_paid_cnt integer := 0;
   v_touched_count        integer := 0;
+  v_newly_photo_cnt      integer := 0;
   r                      record;
 BEGIN
   PERFORM public._assert_authenticated();
@@ -7733,7 +8693,8 @@ BEGIN
   TRUNCATE TABLE pg_temp.expenses_touched;
 
   CREATE TEMP TABLE IF NOT EXISTS pg_temp.expenses_newly_paid (
-    home_id uuid NOT NULL
+    home_id uuid NOT NULL,
+    expense_photo_dec integer NOT NULL DEFAULT 0
   ) ON COMMIT DROP;
   TRUNCATE TABLE pg_temp.expenses_newly_paid;
 
@@ -7813,23 +8774,36 @@ BEGIN
           WHERE s.expense_id = e.id
             AND s.status = 'unpaid'
        )
-    RETURNING e.home_id
+    RETURNING
+      e.home_id,
+      CASE
+        WHEN e.plan_id IS NULL AND e.evidence_photo_path IS NOT NULL THEN 1
+        ELSE 0
+      END AS expense_photo_dec
   )
-  INSERT INTO pg_temp.expenses_newly_paid (home_id)
-  SELECT home_id FROM newly_paid;
+  INSERT INTO pg_temp.expenses_newly_paid (home_id, expense_photo_dec)
+  SELECT home_id, expense_photo_dec FROM newly_paid;
 
-  SELECT COUNT(*)::int
-    INTO v_newly_fully_paid_cnt
+  SELECT
+    COUNT(*)::int,
+    COALESCE(SUM(expense_photo_dec), 0)::int
+    INTO v_newly_fully_paid_cnt, v_newly_photo_cnt
     FROM pg_temp.expenses_newly_paid;
 
   FOR r IN
-    SELECT home_id, COUNT(*)::int AS dec_count
-      FROM pg_temp.expenses_newly_paid
-     GROUP BY home_id
+    SELECT
+      home_id,
+      COUNT(*)::int AS dec_count,
+      COALESCE(SUM(expense_photo_dec), 0)::int AS dec_expense_photo_count
+    FROM pg_temp.expenses_newly_paid
+    GROUP BY home_id
   LOOP
     PERFORM public._home_usage_apply_delta(
       r.home_id,
-      jsonb_build_object('active_expenses', -r.dec_count)
+      jsonb_build_object(
+        'active_expenses', -r.dec_count,
+        'expense_photos',  -r.dec_expense_photo_count
+      )
     );
   END LOOP;
 
@@ -7837,7 +8811,8 @@ BEGIN
     'recipientUserId',          p_recipient_user_id,
     'splitsPaid',               v_split_count,
     'expensesTouched',          v_expense_count,
-    'expensesNewlyFullyPaid',   v_newly_fully_paid_cnt
+    'expensesNewlyFullyPaid',   v_newly_fully_paid_cnt,
+    'expensePhotosFreed',       v_newly_photo_cnt
   );
 END;
 $$;
@@ -19730,6 +20705,12 @@ GRANT ALL ON FUNCTION "public"."expenses_create_v2"("p_home_id" "uuid", "p_descr
 
 
 
+REVOKE ALL ON FUNCTION "public"."expenses_create_v3"("p_home_id" "uuid", "p_description" "text", "p_amount_cents" bigint, "p_notes" "text", "p_split_mode" "public"."expense_split_type", "p_member_ids" "uuid"[], "p_splits" "jsonb", "p_recurrence_every" integer, "p_recurrence_unit" "text", "p_start_date" "date", "p_evidence_photo_path" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."expenses_create_v3"("p_home_id" "uuid", "p_description" "text", "p_amount_cents" bigint, "p_notes" "text", "p_split_mode" "public"."expense_split_type", "p_member_ids" "uuid"[], "p_splits" "jsonb", "p_recurrence_every" integer, "p_recurrence_unit" "text", "p_start_date" "date", "p_evidence_photo_path" "text") TO "service_role";
+GRANT ALL ON FUNCTION "public"."expenses_create_v3"("p_home_id" "uuid", "p_description" "text", "p_amount_cents" bigint, "p_notes" "text", "p_split_mode" "public"."expense_split_type", "p_member_ids" "uuid"[], "p_splits" "jsonb", "p_recurrence_every" integer, "p_recurrence_unit" "text", "p_start_date" "date", "p_evidence_photo_path" "text") TO "authenticated";
+
+
+
 REVOKE ALL ON FUNCTION "public"."expenses_edit"("p_expense_id" "uuid", "p_amount_cents" bigint, "p_description" "text", "p_notes" "text", "p_split_mode" "public"."expense_split_type", "p_member_ids" "uuid"[], "p_splits" "jsonb") FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."expenses_edit"("p_expense_id" "uuid", "p_amount_cents" bigint, "p_description" "text", "p_notes" "text", "p_split_mode" "public"."expense_split_type", "p_member_ids" "uuid"[], "p_splits" "jsonb") TO "service_role";
 GRANT ALL ON FUNCTION "public"."expenses_edit"("p_expense_id" "uuid", "p_amount_cents" bigint, "p_description" "text", "p_notes" "text", "p_split_mode" "public"."expense_split_type", "p_member_ids" "uuid"[], "p_splits" "jsonb") TO "authenticated";
@@ -19745,6 +20726,12 @@ GRANT ALL ON FUNCTION "public"."expenses_edit"("p_expense_id" "uuid", "p_amount_
 REVOKE ALL ON FUNCTION "public"."expenses_edit_v2"("p_expense_id" "uuid", "p_amount_cents" bigint, "p_description" "text", "p_notes" "text", "p_split_mode" "public"."expense_split_type", "p_member_ids" "uuid"[], "p_splits" "jsonb", "p_recurrence_every" integer, "p_recurrence_unit" "text", "p_start_date" "date") FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."expenses_edit_v2"("p_expense_id" "uuid", "p_amount_cents" bigint, "p_description" "text", "p_notes" "text", "p_split_mode" "public"."expense_split_type", "p_member_ids" "uuid"[], "p_splits" "jsonb", "p_recurrence_every" integer, "p_recurrence_unit" "text", "p_start_date" "date") TO "service_role";
 GRANT ALL ON FUNCTION "public"."expenses_edit_v2"("p_expense_id" "uuid", "p_amount_cents" bigint, "p_description" "text", "p_notes" "text", "p_split_mode" "public"."expense_split_type", "p_member_ids" "uuid"[], "p_splits" "jsonb", "p_recurrence_every" integer, "p_recurrence_unit" "text", "p_start_date" "date") TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "public"."expenses_edit_v3"("p_expense_id" "uuid", "p_amount_cents" bigint, "p_description" "text", "p_notes" "text", "p_split_mode" "public"."expense_split_type", "p_member_ids" "uuid"[], "p_splits" "jsonb", "p_recurrence_every" integer, "p_recurrence_unit" "text", "p_start_date" "date", "p_evidence_photo_path" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."expenses_edit_v3"("p_expense_id" "uuid", "p_amount_cents" bigint, "p_description" "text", "p_notes" "text", "p_split_mode" "public"."expense_split_type", "p_member_ids" "uuid"[], "p_splits" "jsonb", "p_recurrence_every" integer, "p_recurrence_unit" "text", "p_start_date" "date", "p_evidence_photo_path" "text") TO "service_role";
+GRANT ALL ON FUNCTION "public"."expenses_edit_v3"("p_expense_id" "uuid", "p_amount_cents" bigint, "p_description" "text", "p_notes" "text", "p_split_mode" "public"."expense_split_type", "p_member_ids" "uuid"[], "p_splits" "jsonb", "p_recurrence_every" integer, "p_recurrence_unit" "text", "p_start_date" "date", "p_evidence_photo_path" "text") TO "authenticated";
 
 
 

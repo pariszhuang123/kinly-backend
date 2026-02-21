@@ -517,6 +517,7 @@ export type Database = {
           created_at: string
           created_by_user_id: string
           description: string
+          evidence_photo_path: string | null
           home_id: string
           id: string
           next_cycle_date: string
@@ -537,6 +538,7 @@ export type Database = {
           created_at?: string
           created_by_user_id: string
           description: string
+          evidence_photo_path?: string | null
           home_id: string
           id?: string
           next_cycle_date: string
@@ -557,6 +559,7 @@ export type Database = {
           created_at?: string
           created_by_user_id?: string
           description?: string
+          evidence_photo_path?: string | null
           home_id?: string
           id?: string
           next_cycle_date?: string
@@ -637,6 +640,7 @@ export type Database = {
           created_at: string
           created_by_user_id: string
           description: string
+          evidence_photo_path: string | null
           fully_paid_at: string | null
           home_id: string
           id: string
@@ -657,6 +661,7 @@ export type Database = {
           created_at?: string
           created_by_user_id: string
           description: string
+          evidence_photo_path?: string | null
           fully_paid_at?: string | null
           home_id: string
           id?: string
@@ -677,6 +682,7 @@ export type Database = {
           created_at?: string
           created_by_user_id?: string
           description?: string
+          evidence_photo_path?: string | null
           fully_paid_at?: string | null
           home_id?: string
           id?: string
@@ -1149,6 +1155,7 @@ export type Database = {
           active_expenses: number
           active_members: number
           chore_photos: number
+          expense_photos: number
           home_id: string
           shopping_item_photos: number
           updated_at: string
@@ -1158,6 +1165,7 @@ export type Database = {
           active_expenses?: number
           active_members?: number
           chore_photos?: number
+          expense_photos?: number
           home_id: string
           shopping_item_photos?: number
           updated_at?: string
@@ -1167,6 +1175,7 @@ export type Database = {
           active_expenses?: number
           active_members?: number
           chore_photos?: number
+          expense_photos?: number
           home_id?: string
           shopping_item_photos?: number
           updated_at?: string
@@ -3300,6 +3309,7 @@ export type Database = {
           created_at: string
           created_by_user_id: string
           description: string
+          evidence_photo_path: string | null
           fully_paid_at: string | null
           home_id: string
           id: string
@@ -3374,6 +3384,7 @@ export type Database = {
           active_expenses: number
           active_members: number
           chore_photos: number
+          expense_photos: number
           home_id: string
           shopping_item_photos: number
           updated_at: string
@@ -3907,6 +3918,7 @@ export type Database = {
           created_at: string
           created_by_user_id: string
           description: string
+          evidence_photo_path: string | null
           home_id: string
           id: string
           next_cycle_date: string
@@ -3936,6 +3948,7 @@ export type Database = {
           created_at: string
           created_by_user_id: string
           description: string
+          evidence_photo_path: string | null
           fully_paid_at: string | null
           home_id: string
           id: string
@@ -3974,6 +3987,7 @@ export type Database = {
               created_at: string
               created_by_user_id: string
               description: string
+              evidence_photo_path: string | null
               fully_paid_at: string | null
               home_id: string
               id: string
@@ -4015,6 +4029,7 @@ export type Database = {
               created_at: string
               created_by_user_id: string
               description: string
+              evidence_photo_path: string | null
               fully_paid_at: string | null
               home_id: string
               id: string
@@ -4057,6 +4072,49 @@ export type Database = {
           created_at: string
           created_by_user_id: string
           description: string
+          evidence_photo_path: string | null
+          fully_paid_at: string | null
+          home_id: string
+          id: string
+          notes: string | null
+          plan_id: string | null
+          recurrence_every: number | null
+          recurrence_interval:
+            | Database["public"]["Enums"]["recurrence_interval"]
+            | null
+          recurrence_unit: string | null
+          split_type: Database["public"]["Enums"]["expense_split_type"] | null
+          start_date: string
+          status: Database["public"]["Enums"]["expense_status"]
+          updated_at: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "expenses"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
+      expenses_create_v3: {
+        Args: {
+          p_amount_cents?: number
+          p_description: string
+          p_evidence_photo_path?: string
+          p_home_id: string
+          p_member_ids?: string[]
+          p_notes?: string
+          p_recurrence_every?: number
+          p_recurrence_unit?: string
+          p_split_mode?: Database["public"]["Enums"]["expense_split_type"]
+          p_splits?: Json
+          p_start_date?: string
+        }
+        Returns: {
+          amount_cents: number | null
+          created_at: string
+          created_by_user_id: string
+          description: string
+          evidence_photo_path: string | null
           fully_paid_at: string | null
           home_id: string
           id: string
@@ -4095,6 +4153,7 @@ export type Database = {
               created_at: string
               created_by_user_id: string
               description: string
+              evidence_photo_path: string | null
               fully_paid_at: string | null
               home_id: string
               id: string
@@ -4136,6 +4195,7 @@ export type Database = {
               created_at: string
               created_by_user_id: string
               description: string
+              evidence_photo_path: string | null
               fully_paid_at: string | null
               home_id: string
               id: string
@@ -4178,6 +4238,49 @@ export type Database = {
           created_at: string
           created_by_user_id: string
           description: string
+          evidence_photo_path: string | null
+          fully_paid_at: string | null
+          home_id: string
+          id: string
+          notes: string | null
+          plan_id: string | null
+          recurrence_every: number | null
+          recurrence_interval:
+            | Database["public"]["Enums"]["recurrence_interval"]
+            | null
+          recurrence_unit: string | null
+          split_type: Database["public"]["Enums"]["expense_split_type"] | null
+          start_date: string
+          status: Database["public"]["Enums"]["expense_status"]
+          updated_at: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "expenses"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
+      expenses_edit_v3: {
+        Args: {
+          p_amount_cents: number
+          p_description: string
+          p_evidence_photo_path?: string
+          p_expense_id: string
+          p_member_ids?: string[]
+          p_notes?: string
+          p_recurrence_every?: number
+          p_recurrence_unit?: string
+          p_split_mode?: Database["public"]["Enums"]["expense_split_type"]
+          p_splits?: Json
+          p_start_date?: string
+        }
+        Returns: {
+          amount_cents: number | null
+          created_at: string
+          created_by_user_id: string
+          description: string
+          evidence_photo_path: string | null
           fully_paid_at: string | null
           home_id: string
           id: string
@@ -4936,6 +5039,7 @@ export type Database = {
         | "active_members"
         | "active_expenses"
         | "shopping_item_photos"
+        | "expense_photos"
       house_pulse_state:
         | "forming"
         | "sunny_calm"
@@ -5105,6 +5209,7 @@ export const Constants = {
         "active_members",
         "active_expenses",
         "shopping_item_photos",
+        "expense_photos",
       ],
       house_pulse_state: [
         "forming",

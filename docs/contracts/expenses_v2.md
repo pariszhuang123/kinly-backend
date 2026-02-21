@@ -5,14 +5,14 @@ Scope: backend
 Artifact-Type: contract
 Stability: evolving
 Status: draft
-Version: v2.0
+Version: v2.4
 ---
 
 # Expenses Contracts v2
 
-Status: Draft (recurrence every/unit refactor)
+Status: Draft (recurrence every/unit refactor + bill evidence photos + transition-based photo quota)
 
-Scope: Updates expense recurrence from legacy enum to flexible `recurrenceEvery` + `recurrenceUnit`. Recurring intent remains modeled via `expense_plans`; each cycle is an immutable `expenses` row.
+Scope: Updates expense recurrence from legacy enum to flexible `recurrenceEvery` + `recurrenceUnit`, and adds optional bill evidence photos via `evidencePhotoPath`. Recurring intent remains modeled via `expense_plans`; each cycle is an immutable `expenses` row.
 
 ## Domain Overview
 - Drafts: creator-only; `amountCents` optional; drafts cannot be recurring.
@@ -21,6 +21,8 @@ Scope: Updates expense recurrence from legacy enum to flexible `recurrenceEvery`
 - Splits live in `expense_splits`. Creator shares (if included) are auto-marked `paid`.
 - Payments are bulk: `expenses.payMyDue(p_recipient_user_id)` marks all unpaid splits the caller owes to a given payer.
 - Recurrence fields are paired: both null for one-off; both set for recurring.
+- Bills can carry one optional evidence photo (`evidencePhotoPath`) to document the amount owed.
+- For recurring bills, `evidencePhotoPath` is stored on the plan and copied to generated cycle expenses.
 
 ## Entities
 
@@ -29,8 +31,8 @@ Scope: Updates expense recurrence from legacy enum to flexible `recurrenceEvery`
 - `homeId` (`uuid`)
 - `createdByUserId` (`uuid`)
 - `planId` (`uuid|null`)
-- `recurrenceEvery` (`int|null`) — `NULL` for one-off.
-- `recurrenceUnit` (`text|null`) — one of `day|week|month|year`; `NULL` for one-off.
+- `recurrenceEvery` (`int|null`) - `NULL` for one-off.
+- `recurrenceUnit` (`text|null`) - one of `day|week|month|year`; `NULL` for one-off.
 - `startDate` (`date`)
 - `status` (`ExpenseStatus`)
 - `splitType` (`ExpenseSplitType|null`)
@@ -38,6 +40,7 @@ Scope: Updates expense recurrence from legacy enum to flexible `recurrenceEvery`
 - `fullyPaidAt` (`timestamptz|null`)
 - `description` (`text`)
 - `notes` (`text|null`)
+- `evidencePhotoPath` (`text|null`) - evidence image storage path; must match `households/%` when present.
 - `createdAt` / `updatedAt` (`timestamptz`)
 
 ### ExpensePlan
@@ -48,8 +51,9 @@ Scope: Updates expense recurrence from legacy enum to flexible `recurrenceEvery`
 - `amountCents` (`bigint`)
 - `description` (`text`)
 - `notes` (`text|null`)
-- `recurrenceEvery` (`int`) — `>= 1`
-- `recurrenceUnit` (`text`) — one of `day|week|month|year`
+- `evidencePhotoPath` (`text|null`) - default evidence image for generated bill cycles.
+- `recurrenceEvery` (`int`) - `>= 1`
+- `recurrenceUnit` (`text`) - one of `day|week|month|year`
 - `startDate` (`date`)
 - `nextCycleDate` (`date`)
 - `status` (`ExpensePlanStatus`)
@@ -82,6 +86,7 @@ Scope: Updates expense recurrence from legacy enum to flexible `recurrenceEvery`
 - `amountCents: bigint|null`
 - `fullyPaidAt: timestamptz|null`
 - `description: text`
+- `evidencePhotoPath: text|null`
 - `createdAt: timestamptz`
 - `totalShares: int`
 - `paidShares: int`
@@ -101,6 +106,29 @@ Scope: Updates expense recurrence from legacy enum to flexible `recurrenceEvery`
 
 ### ExpenseShareStatus
 `unpaid | paid`
+
+## Validation and Paywall Rules
+- `recurrenceEvery` is NULL iff `recurrenceUnit` is NULL.
+- `evidencePhotoPath` is optional and must start with `households/` when provided.
+- A bill/expense stores at most one evidence photo path at a time.
+- `expenses.edit` path semantics: omitted/`NULL` keeps existing draft `evidencePhotoPath`; sending empty string clears it before activation.
+- Drafts are quota-free while still draft: adding/replacing photo on a draft does not consume `active_expenses` or `expense_photos`.
+- `expense_photos` is charged on activation/plan-creation boundary:
+  - One-off path (`status=draft -> active`): if `planId is null` and `evidencePhotoPath` is non-null, apply `+1 expense_photos`.
+  - Recurring path (`status=draft -> converted` + plan create): if plan `evidencePhotoPath` is non-null, apply `+1 expense_photos` (at plan creation only).
+  - Direct active create follows the same rule on the quota-owning record.
+  - Replacing photo (`non-null -> non-null`) never increments usage.
+- User-triggered activation (`expenses.create`/`expenses.edit` with `p_split_mode` set) enforces paywall quota for:
+  - `active_expenses` (+1 for the activated one-off or first recurring cycle)
+  - `expense_photos` (+1 once at activation/plan-creation boundary when evidence exists)
+- Recurring bill conversion stores `evidencePhotoPath` on `expense_plans`; generated cycles snapshot the plan value into each cycle `expenses` row.
+- Recurring cycles do not increment `expense_photos` when using plan photo (first cycle and cron cycles are no-op for this metric).
+- Decrement model (transition-based, idempotent):
+  - One-off photo charge decrements once when a charged one-off exits counting state:
+    - on `active -> cancelled` when `planId is null` and `evidencePhotoPath` is non-null, OR
+    - on first `fullyPaidAt NULL -> non-NULL` when `planId is null` and `evidencePhotoPath` is non-null.
+  - Recurring plan photo charge decrements once on first plan termination (`terminatedAt NULL -> non-NULL`) when plan `evidencePhotoPath` is non-null (including membership-change auto-termination flows).
+- Canonical errors include `PAYWALL_LIMIT_ACTIVE_EXPENSES`, `PAYWALL_LIMIT_EXPENSE_PHOTOS`, and `INVALID_EVIDENCE_PHOTO_PATH`.
 
 ## Contracts JSON
 
@@ -123,6 +151,7 @@ Scope: Updates expense recurrence from legacy enum to flexible `recurrenceEvery`
       "fullyPaidAt": "timestamptz|null",
       "description": "text",
       "notes": "text|null",
+      "evidencePhotoPath": "text|null",
       "createdAt": "timestamptz",
       "updatedAt": "timestamptz"
     },
@@ -134,6 +163,7 @@ Scope: Updates expense recurrence from legacy enum to flexible `recurrenceEvery`
       "amountCents": "bigint",
       "description": "text",
       "notes": "text|null",
+      "evidencePhotoPath": "text|null",
       "recurrenceEvery": "int",
       "recurrenceUnit": "text",
       "startDate": "date",
@@ -169,6 +199,7 @@ Scope: Updates expense recurrence from legacy enum to flexible `recurrenceEvery`
       "amountCents": "bigint|null",
       "fullyPaidAt": "timestamptz|null",
       "description": "text",
+      "evidencePhotoPath": "text|null",
       "createdAt": "timestamptz",
       "totalShares": "int",
       "paidShares": "int",
@@ -218,7 +249,7 @@ Scope: Updates expense recurrence from legacy enum to flexible `recurrenceEvery`
     "expenses.create": {
       "type": "rpc",
       "caller": "member",
-      "impl": "public.expenses_create_v2",
+      "impl": "public.expenses_create_v3",
       "args": {
         "p_home_id": "uuid",
         "p_description": "text",
@@ -229,18 +260,22 @@ Scope: Updates expense recurrence from legacy enum to flexible `recurrenceEvery`
         "p_splits": "jsonb|null",
         "p_recurrence_every": "int|null",
         "p_recurrence_unit": "text|null",
-        "p_start_date": "date"
+        "p_start_date": "date",
+        "p_evidence_photo_path": "text|null"
       },
       "returns": "Expense",
       "notes": [
         "p_split_mode NULL => draft (recurrence must be null; amount optional)",
-        "p_split_mode set => activation; recurrence null creates one-off active; recurrence set creates plan + first cycle and marks draft converted"
+        "p_split_mode set => activation; recurrence null creates one-off active; recurrence set creates plan + first cycle and marks draft converted",
+        "When provided, p_evidence_photo_path must match households/%; recurring activation copies it to both plan and first cycle",
+        "Draft photo capture is quota-free until activation; charge occurs once at activation/plan-creation boundary on transition rules",
+        "Activation path enforces paywall for active_expenses and expense_photos (no extra +1 for replacements; recurring cycle generation does not increment expense_photos)"
       ]
     },
     "expenses.edit": {
       "type": "rpc",
       "caller": "member",
-      "impl": "public.expenses_edit_v2",
+      "impl": "public.expenses_edit_v3",
       "args": {
         "p_expense_id": "uuid",
         "p_amount_cents": "bigint",
@@ -251,13 +286,17 @@ Scope: Updates expense recurrence from legacy enum to flexible `recurrenceEvery`
         "p_splits": "jsonb|null",
         "p_recurrence_every": "int|null",
         "p_recurrence_unit": "text|null",
-        "p_start_date": "date"
+        "p_start_date": "date",
+        "p_evidence_photo_path": "text|null"
       },
       "returns": "Expense",
       "notes": [
         "Drafts: allowed and always activates",
+        "Drafts may add or replace evidencePhotoPath before activation; clearing is supported by sending empty string",
+        "Draft photo updates do not consume expense_photos until activation/plan-creation boundary",
         "Active one-off expenses: creator may edit description/notes only",
         "For active one-off expenses, amount/splits/recurrence/startDate are immutable",
+        "For active one-off expenses, evidencePhotoPath is immutable",
         "Recurrence set creates plan, marks draft converted, and generates first cycle",
         "Recurring cycles and converted rows remain immutable"
       ]
@@ -272,7 +311,7 @@ Scope: Updates expense recurrence from legacy enum to flexible `recurrenceEvery`
       "returns": "jsonb",
       "notes": [
         "Bulk marks caller's unpaid splits owed to the recipient as paid",
-        "Stamps marked_paid_at, stamps fully_paid_at once per expense, decrements usage per fully paid expense"
+        "Stamps marked_paid_at, stamps fully_paid_at once per expense, decrements usage per fully paid expense for metrics incremented at expense level (including charged one-off expense_photos)"
       ]
     },
     "expensePlans.terminate": {
@@ -284,7 +323,8 @@ Scope: Updates expense recurrence from legacy enum to flexible `recurrenceEvery`
       },
       "returns": "ExpensePlan",
       "notes": [
-        "Stops future cycles; existing expenses remain payable"
+        "Stops future cycles; existing expenses remain payable",
+        "If plan carries evidencePhotoPath, decrements expense_photos once on first termination transition"
       ]
     },
     "expenses.cancel": {
@@ -323,7 +363,7 @@ Scope: Updates expense recurrence from legacy enum to flexible `recurrenceEvery`
       },
       "returns": "jsonb",
       "notes": [
-        "Creator-only; returns splits, planId, recurrenceEvery/Unit, startDate, canEdit flag, and editDisabledReason (ACTIVE_IMMUTABLE, RECURRING_CYCLE_IMMUTABLE, CONVERTED_TO_PLAN)"
+        "Creator-only; returns splits, planId, recurrenceEvery/Unit, startDate, evidencePhotoPath, canEdit flag, and editDisabledReason (ACTIVE_IMMUTABLE, RECURRING_CYCLE_IMMUTABLE, CONVERTED_TO_PLAN)"
       ]
     }
   }
