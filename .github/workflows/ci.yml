@@ -130,7 +130,9 @@ jobs:
             RUNNER_SHARED_SECRET="${{ secrets.DEV_RUNNER_SHARED_SECRET }}" \
             OPENAI_CLASSIFIER_API_KEY="${{ secrets.OPENAI_CLASSIFIER_API_KEY }}" \
             OPENAI_REWRITE_API_KEY="${{ secrets.OPENAI_REWRITE_API_KEY }}" \
-            WORKER_SHARED_SECRET="${{ secrets.DEV_WORKER_SHARED_SECRET }}" \
+            WORKER_SHARED_SECRET="${{ secrets.WORKER_SHARED_SECRET }}" \
+            VERCEL_REVALIDATE_URL="${{ secrets.VERCEL_REVALIDATE_URL }}" \
+            VERCEL_REVALIDATE_SECRET="${{ secrets.VERCEL_REVALIDATE_SECRET }}" \
             RC_WEBHOOK_SECRET="${{ secrets.DEV_RC_WEBHOOK_SECRET }}" \
             FCM_SERVICE_ACCOUNT="$FCM_SA_JSON" \
             FCM_PROJECT_ID="${{ secrets.FCM_PROJECT_ID }}"
@@ -173,7 +175,7 @@ jobs:
         if: steps.flags.outputs.do_deploy == 'true'
         shell: bash
         env:
-          INTERNAL_WORKER_SECRET: ${{ secrets.DEV_WORKER_SHARED_SECRET }}
+          INTERNAL_WORKER_SECRET: ${{ secrets.WORKER_SHARED_SECRET }}
           INTERNAL_RUNNER_SECRET: ${{ secrets.DEV_RUNNER_SHARED_SECRET }}
           INTERNAL_ORCHESTRATOR_SECRET: ${{ secrets.DEV_ORCHESTRATOR_SHARED_SECRET }}
         run: |
@@ -242,7 +244,9 @@ jobs:
             RUNNER_SHARED_SECRET="${{ secrets.PROD_RUNNER_SHARED_SECRET }}" \
             OPENAI_CLASSIFIER_API_KEY="${{ secrets.OPENAI_CLASSIFIER_API_KEY }}" \
             OPENAI_REWRITE_API_KEY="${{ secrets.OPENAI_REWRITE_API_KEY }}" \
-            WORKER_SHARED_SECRET="${{ secrets.PROD_WORKER_SHARED_SECRET }}" \
+            WORKER_SHARED_SECRET="${{ secrets.WORKER_SHARED_SECRET }}" \
+            VERCEL_REVALIDATE_URL="${{ secrets.VERCEL_REVALIDATE_URL }}" \
+            VERCEL_REVALIDATE_SECRET="${{ secrets.VERCEL_REVALIDATE_SECRET }}" \
             RC_WEBHOOK_SECRET="${{ secrets.PROD_RC_WEBHOOK_SECRET }}" \
             FCM_SERVICE_ACCOUNT="$FCM_SA_JSON" \
             FCM_PROJECT_ID="${{ secrets.FCM_PROJECT_ID }}"
@@ -282,7 +286,7 @@ jobs:
         if: steps.flags.outputs.do_deploy == 'true'
         shell: bash
         env:
-          INTERNAL_WORKER_SECRET: ${{ secrets.PROD_WORKER_SHARED_SECRET }}
+          INTERNAL_WORKER_SECRET: ${{ secrets.WORKER_SHARED_SECRET }}
           INTERNAL_RUNNER_SECRET: ${{ secrets.PROD_RUNNER_SHARED_SECRET }}
           INTERNAL_ORCHESTRATOR_SECRET: ${{ secrets.PROD_ORCHESTRATOR_SHARED_SECRET }}
         run: |

@@ -123,11 +123,7 @@ Scope: Updates expense recurrence from legacy enum to flexible `recurrenceEvery`
   - `expense_photos` (+1 once at activation/plan-creation boundary when evidence exists)
 - Recurring bill conversion stores `evidencePhotoPath` on `expense_plans`; generated cycles snapshot the plan value into each cycle `expenses` row.
 - Recurring cycles do not increment `expense_photos` when using plan photo (first cycle and cron cycles are no-op for this metric).
-- Decrement model (transition-based, idempotent):
-  - One-off photo charge decrements once when a charged one-off exits counting state:
-    - on `active -> cancelled` when `planId is null` and `evidencePhotoPath` is non-null, OR
-    - on first `fullyPaidAt NULL -> non-NULL` when `planId is null` and `evidencePhotoPath` is non-null.
-  - Recurring plan photo charge decrements once on first plan termination (`terminatedAt NULL -> non-NULL`) when plan `evidencePhotoPath` is non-null (including membership-change auto-termination flows).
+- `expense_photos` is monotonic (add-only): once charged at activation/plan-creation boundary, it is not decremented by cancel, fully-paid transitions, or plan termination.
 - Canonical errors include `PAYWALL_LIMIT_ACTIVE_EXPENSES`, `PAYWALL_LIMIT_EXPENSE_PHOTOS`, and `INVALID_EVIDENCE_PHOTO_PATH`.
 
 ## Contracts JSON
@@ -311,7 +307,7 @@ Scope: Updates expense recurrence from legacy enum to flexible `recurrenceEvery`
       "returns": "jsonb",
       "notes": [
         "Bulk marks caller's unpaid splits owed to the recipient as paid",
-        "Stamps marked_paid_at, stamps fully_paid_at once per expense, decrements usage per fully paid expense for metrics incremented at expense level (including charged one-off expense_photos)"
+        "Stamps marked_paid_at and fully_paid_at once per expense; decrements active_expenses per newly fully paid expense"
       ]
     },
     "expensePlans.terminate": {
@@ -324,7 +320,7 @@ Scope: Updates expense recurrence from legacy enum to flexible `recurrenceEvery`
       "returns": "ExpensePlan",
       "notes": [
         "Stops future cycles; existing expenses remain payable",
-        "If plan carries evidencePhotoPath, decrements expense_photos once on first termination transition"
+        "Does not decrement expense_photos; photo usage is add-only"
       ]
     },
     "expenses.cancel": {

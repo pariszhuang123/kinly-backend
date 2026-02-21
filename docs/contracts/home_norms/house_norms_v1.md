@@ -112,7 +112,6 @@ shared understanding without politicizing language or creating social pressure.
 - `published_content` updates only when owner explicitly publishes.
 - Regeneration copy is resolved from `house_norm_templates` by locale:
   requested locale first, fallback to `en` when missing.
-- Current seeded v1 template locales: `en`, `es`, `ar`.
 
 5. Generated Output Model
 
@@ -174,6 +173,10 @@ Optional:
   - Caller MUST be authenticated.
   - Caller MUST be a current home member.
   - Returns draft + published snapshot metadata when document exists, else null.
+  - For non-owner callers, response includes:
+    - `member_viewed_at` (timestamptz | null)
+    - `show_member_review_card` (boolean, backend-computed with 24-hour
+      debounce and `viewed_at` comparison against latest norms change).
 
 7.2 Generate (owner-only)
 - `house_norms_generate_for_home(p_home_id uuid, p_template_key text, p_locale text, p_inputs jsonb, p_force boolean) -> jsonb`
@@ -197,6 +200,13 @@ Optional:
   - Edits draft section text for the six norms section keys.
   - Does not mutate `published_content`.
   - Records a revision.
+
+7.5 Record member view
+- `house_norms_record_view(p_home_id uuid) -> jsonb`
+  - Caller MUST be authenticated.
+  - Caller MUST be a current home member.
+  - Upserts `house_norms_member_views` with `viewed_at = now()`.
+  - Returns `{ "ok": true, "viewed_at": "<timestamptz>" }`.
 
 8. Storage Model (Supabase, Proposed)
 
@@ -234,13 +244,21 @@ Optional:
 - `created_at` (timestamptz)
 - `updated_at` (timestamptz)
 
+`house_norms_member_views`
+- `home_id` (uuid, FK homes)
+- `user_id` (uuid, FK auth.users)
+- `viewed_at` (timestamptz)
+- PK: (`home_id`, `user_id`)
+
 8.2 RLS
 - RPC-only model.
 - Direct table DML denied for `authenticated`.
 - `SECURITY DEFINER` RPCs must assert:
   - Authenticated caller.
   - Current home membership.
-  - Role=`owner` for write operations.
+  - Role-appropriate authorization:
+    - `owner` for generate/publish/edit writes.
+    - current member for `house_norms_record_view`.
 
 9. Safety and Non-Goals
 
@@ -253,7 +271,9 @@ Optional:
 - Voting and approvals.
 - Comment threads.
 - Suggest-an-edit workflows.
-- Auto-reminders based on norms.
+- Auto-reminders based on norm content (e.g., behavioral nudges). Member
+  awareness of norm updates is covered by the Today House Norms Member
+  Review contract.
 - Policy enforcement workflows (belongs to House Rules track).
 
 10. Invariants
@@ -307,6 +327,11 @@ Optional:
       "body": "jsonb",
       "createdAt": "timestamptz",
       "updatedAt": "timestamptz"
+    },
+    "HouseNormsMemberView": {
+      "homeId": "uuid",
+      "userId": "uuid",
+      "viewedAt": "timestamptz"
     }
   },
   "functions": {
@@ -353,6 +378,15 @@ Optional:
         "p_section_key": "text",
         "p_new_text": "text",
         "p_change_summary": "text|null"
+      },
+      "returns": "jsonb"
+    },
+    "houseNorms.recordView": {
+      "type": "rpc",
+      "caller": "member",
+      "impl": "public.house_norms_record_view",
+      "args": {
+        "p_home_id": "uuid"
       },
       "returns": "jsonb"
     }

@@ -106,6 +106,8 @@ Behavior:
 - Owner-facing URL/control metadata is included only for owner callers.
 - Owner-facing `public_url` is derived from canonical host +
   `/kinly/norms/{home_public_id}` and is never persisted as a DB column.
+- Member-review visibility is backend-computed and returned as
+  `show_member_review_card` for non-owner callers.
 
 Response shape (member baseline):
 
@@ -143,6 +145,17 @@ Owner metadata extension (owner callers only):
     "show_publish_button": true,
     "show_republish_button": false,
     "show_public_url": false
+  }
+}
+```
+
+Member metadata extension (non-owner callers only):
+
+```json
+{
+  "house_norms": {
+    "member_viewed_at": "timestamptz|null",
+    "show_member_review_card": false
   }
 }
 ```
@@ -388,6 +401,10 @@ Derived delivery artifacts:
 - Public artifact paths MUST use `home_public_id` (never `home_id`):
   - `public_norms/home/{home_public_id}/published_{published_version}.json`
   - `public_norms/home/{home_public_id}/manifest.json`
+    - Public web storage URL derivation (for web reads) is environment-based:
+  - base: `${NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/households`
+  - manifest: `${base}/public_norms/home/{home_public_id}/manifest.json`
+  - snapshot: `${base}/{latest_snapshot_path}` from manifest
 - Artifacts MUST contain only published-safe fields and no draft/private data.
 - v1 does not support disable/unpublish/rotation of public norms links; once
   published, `home_public_id` remains the stable public identity.

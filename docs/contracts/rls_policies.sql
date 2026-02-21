@@ -25,6 +25,7 @@ ALTER TABLE "public"."home_usage_counters" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "public"."homes" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "public"."house_norm_templates" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "public"."house_norms" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "public"."house_norms_member_views" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "public"."house_norms_revisions" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "public"."house_pulse_labels" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "public"."house_pulse_reads" ENABLE ROW LEVEL SECURITY;

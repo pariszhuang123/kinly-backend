@@ -2,7 +2,7 @@ SET search_path = pgtap, public, auth, extensions;
 
 BEGIN;
 
-SELECT plan(41);
+SELECT plan(52);
 
 CREATE TEMP TABLE tmp_users (
   label text PRIMARY KEY,
@@ -208,6 +208,53 @@ SELECT ok(
   'member read shows unpublished changes'
 );
 
+SELECT ok(
+  NOT COALESCE(
+    (public.house_norms_get_for_home((SELECT home_id FROM tmp_home), 'en')->'house_norms'->>'show_member_review_card')::boolean,
+    true
+  ),
+  'member review card remains hidden within 24-hour debounce window'
+);
+
+UPDATE public.house_norms
+SET last_edited_at = now() - interval '25 hours'
+WHERE home_id = (SELECT home_id FROM tmp_home);
+
+SELECT ok(
+  COALESCE(
+    (public.house_norms_get_for_home((SELECT home_id FROM tmp_home), 'en')->'house_norms'->>'show_member_review_card')::boolean,
+    false
+  ),
+  'member review card appears after debounce when member has not viewed'
+);
+
+SELECT ok(
+  (
+    public.house_norms_get_for_home((SELECT home_id FROM tmp_home), 'en')->'house_norms'->>'member_viewed_at'
+  ) IS NULL,
+  'member read returns null member_viewed_at before recording a view'
+);
+
+SELECT ok(
+  (public.house_norms_record_view((SELECT home_id FROM tmp_home))->>'ok')::boolean,
+  'member can record house norms view'
+);
+
+SELECT ok(
+  (
+    public.house_norms_get_for_home((SELECT home_id FROM tmp_home), 'en')->'house_norms'->>'member_viewed_at'
+  ) IS NOT NULL,
+  'member read includes member_viewed_at after recording a view'
+);
+
+SELECT ok(
+  NOT COALESCE(
+    (public.house_norms_get_for_home((SELECT home_id FROM tmp_home), 'en')->'house_norms'->>'show_member_review_card')::boolean,
+    true
+  ),
+  'member review card hides after recording view for current norms change'
+);
+
 -- Outsider cannot read.
 SELECT set_config('request.jwt.claim.sub', (SELECT user_id::text FROM tmp_users WHERE label = 'outsider'), true);
 SELECT throws_like(
@@ -216,8 +263,22 @@ SELECT throws_like(
   'outsider read denied'
 );
 
+SELECT throws_like(
+  $$ SELECT public.house_norms_record_view((SELECT home_id FROM tmp_home)); $$,
+  '%NOT_HOME_MEMBER%',
+  'outsider cannot record member view'
+);
+
 -- Owner publish copies draft -> published.
 SELECT set_config('request.jwt.claim.sub', (SELECT user_id::text FROM tmp_users WHERE label = 'owner'), true);
+SELECT ok(
+  NOT COALESCE(
+    (public.house_norms_get_for_home((SELECT home_id FROM tmp_home), 'en')->'house_norms'->>'show_member_review_card')::boolean,
+    true
+  ),
+  'owner never sees member review card signal'
+);
+
 SELECT ok(
   (public.house_norms_publish_for_home((SELECT home_id FROM tmp_home), 'en')->>'ok')::boolean,
   'owner can publish'
@@ -313,6 +374,17 @@ SELECT ok(
   )->>'ok')::boolean,
   'owner can edit summary_framing'
 );
+
+SELECT set_config('request.jwt.claim.sub', (SELECT user_id::text FROM tmp_users WHERE label = 'member'), true);
+SELECT ok(
+  NOT COALESCE(
+    (public.house_norms_get_for_home((SELECT home_id FROM tmp_home), 'en')->'house_norms'->>'show_member_review_card')::boolean,
+    true
+  ),
+  'member review card re-enters debounce window immediately after owner edit'
+);
+
+SELECT set_config('request.jwt.claim.sub', (SELECT user_id::text FROM tmp_users WHERE label = 'owner'), true);
 
 SELECT ok(
   (SELECT (generated_content #>> '{summary,framing}') = 'We aim to stay calm together and keep this home workable for everyone.'
@@ -501,6 +573,18 @@ SELECT throws_like(
      ); $$,
   '%permission denied%',
   'direct table insert denied'
+);
+
+SELECT throws_like(
+  $$ SET LOCAL ROLE authenticated;
+     INSERT INTO public.house_norms_member_views(home_id, user_id, viewed_at)
+     VALUES (
+       '00000000-0000-4000-8000-000000000001'::uuid,
+       '00000000-0000-4000-8000-000000000411'::uuid,
+       now()
+     ); $$,
+  '%permission denied%',
+  'direct member_views table insert denied'
 );
 
 SELECT * FROM finish();

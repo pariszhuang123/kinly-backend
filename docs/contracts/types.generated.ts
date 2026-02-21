@@ -1318,6 +1318,32 @@ export type Database = {
           },
         ]
       }
+      house_norms_member_views: {
+        Row: {
+          home_id: string
+          user_id: string
+          viewed_at: string
+        }
+        Insert: {
+          home_id: string
+          user_id: string
+          viewed_at?: string
+        }
+        Update: {
+          home_id?: string
+          user_id?: string
+          viewed_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "house_norms_member_views_home_id_fkey"
+            columns: ["home_id"]
+            isOneToOne: false
+            referencedRelation: "homes"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       house_norms_revisions: {
         Row: {
           change_summary: string | null
@@ -4443,6 +4469,7 @@ export type Database = {
         Args: { p_home_id: string; p_locale: string }
         Returns: Json
       }
+      house_norms_record_view: { Args: { p_home_id: string }; Returns: Json }
       house_pulse_compute_week: {
         Args: {
           p_contract_version?: string

@@ -583,7 +583,7 @@ SELECT is(
   'recurring cron cycle does not increment expense_photos'
 );
 
--- Manual termination decrements recurring plan charge once.
+-- Manual termination does not decrement recurring photo usage.
 INSERT INTO tmp_metrics (label, active_expenses, expense_photos)
 VALUES (
   'before_manual_terminate',
@@ -598,8 +598,8 @@ SELECT public.expense_plans_terminate((SELECT plan_id FROM tmp_plans WHERE label
 
 SELECT is(
   COALESCE((SELECT expense_photos FROM public.home_usage_counters WHERE home_id = (SELECT home_id FROM tmp_home)), 0),
-  (SELECT expense_photos - 1 FROM tmp_metrics WHERE label = 'before_manual_terminate'),
-  'manual plan termination decrements expense_photos once'
+  (SELECT expense_photos FROM tmp_metrics WHERE label = 'before_manual_terminate'),
+  'manual plan termination does not decrement expense_photos'
 );
 
 INSERT INTO tmp_metrics (label, active_expenses, expense_photos)
@@ -620,7 +620,7 @@ SELECT is(
   'repeat termination is idempotent for expense_photos'
 );
 
--- Membership-change helper also decrements recurring photo charge once.
+-- Membership-change helper does not decrement recurring photo usage.
 WITH created AS (
   SELECT public.expenses_create_v3(
     p_home_id => (SELECT home_id FROM tmp_home),
@@ -671,8 +671,8 @@ SELECT is(
 
 SELECT is(
   COALESCE((SELECT expense_photos FROM public.home_usage_counters WHERE home_id = (SELECT home_id FROM tmp_home)), 0),
-  (SELECT expense_photos - 1 FROM tmp_metrics WHERE label = 'before_member_change_terminate'),
-  'membership-change helper decrements expense_photos once'
+  (SELECT expense_photos FROM tmp_metrics WHERE label = 'before_member_change_terminate'),
+  'membership-change helper does not decrement expense_photos'
 );
 
 INSERT INTO tmp_metrics (label, active_expenses, expense_photos)
@@ -741,7 +741,7 @@ SELECT is(
   'cancelling draft does not change expense_photos'
 );
 
--- Active one-off cancel frees both active_expenses and expense_photos when charged.
+-- Active one-off cancel frees active_expenses only; photo usage is monotonic.
 WITH created AS (
   SELECT public.expenses_create_v3(
     p_home_id => (SELECT home_id FROM tmp_home),
@@ -784,11 +784,11 @@ SELECT is(
 
 SELECT is(
   COALESCE((SELECT expense_photos FROM public.home_usage_counters WHERE home_id = (SELECT home_id FROM tmp_home)), 0),
-  (SELECT expense_photos - 1 FROM tmp_metrics WHERE label = 'before_active_cancel'),
-  'cancelling charged active one-off decrements expense_photos'
+  (SELECT expense_photos FROM tmp_metrics WHERE label = 'before_active_cancel'),
+  'cancelling charged active one-off does not decrement expense_photos'
 );
 
--- Bulk pay fully-paid transition decrements one-off expense_photos once.
+-- Bulk pay fully-paid transition does not decrement one-off expense_photos.
 WITH created AS (
   SELECT public.expenses_create_v3(
     p_home_id => (SELECT home_id FROM tmp_home),
@@ -836,8 +836,8 @@ SELECT ok(
 
 SELECT is(
   COALESCE((SELECT expense_photos FROM public.home_usage_counters WHERE home_id = (SELECT home_id FROM tmp_home)), 0),
-  (SELECT expense_photos - 1 FROM tmp_metrics WHERE label = 'before_paydown'),
-  'bulk pay fully-paid transition decrements one-off expense_photos once'
+  (SELECT expense_photos FROM tmp_metrics WHERE label = 'before_paydown'),
+  'bulk pay fully-paid transition does not decrement one-off expense_photos'
 );
 
 SELECT * FROM finish();

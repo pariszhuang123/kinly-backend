@@ -915,41 +915,22 @@ CREATE OR REPLACE FUNCTION "public"."_expense_plans_terminate_for_member_change"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO ''
     AS $$
-DECLARE
-  r record;
 BEGIN
-  FOR r IN
-    WITH terminated AS (
-      UPDATE public.expense_plans ep
-         SET status = 'terminated',
-             terminated_at = now(),
-             updated_at = now()
-       WHERE ep.home_id = p_home_id
-         AND ep.status = 'active'
-         AND (
-           ep.created_by_user_id = p_affected_user_id
-           OR EXISTS (
-             SELECT 1
-               FROM public.expense_plan_debtors d
-              WHERE d.plan_id = ep.id
-                AND d.debtor_user_id = p_affected_user_id
-           )
-         )
-      RETURNING ep.home_id, ep.evidence_photo_path
-    )
-    SELECT
-      t.home_id,
-      COUNT(*) FILTER (WHERE t.evidence_photo_path IS NOT NULL)::int AS dec_expense_photos
-    FROM terminated t
-    GROUP BY t.home_id
-  LOOP
-    IF COALESCE(r.dec_expense_photos, 0) > 0 THEN
-      PERFORM public._home_usage_apply_delta(
-        r.home_id,
-        jsonb_build_object('expense_photos', -r.dec_expense_photos)
-      );
-    END IF;
-  END LOOP;
+  UPDATE public.expense_plans ep
+     SET status = 'terminated',
+         terminated_at = now(),
+         updated_at = now()
+   WHERE ep.home_id = p_home_id
+     AND ep.status = 'active'
+     AND (
+       ep.created_by_user_id = p_affected_user_id
+       OR EXISTS (
+         SELECT 1
+           FROM public.expense_plan_debtors d
+          WHERE d.plan_id = ep.id
+            AND d.debtor_user_id = p_affected_user_id
+       )
+     );
 END;
 $$;
 
@@ -5450,13 +5431,6 @@ BEGIN
    WHERE id = p_plan_id
   RETURNING * INTO v_plan;
 
-  IF v_plan.evidence_photo_path IS NOT NULL THEN
-    PERFORM public._home_usage_apply_delta(
-      v_plan.home_id,
-      jsonb_build_object('expense_photos', -1)
-    );
-  END IF;
-
   RETURN v_plan;
 END;
 $$;
@@ -5475,7 +5449,6 @@ DECLARE
   v_home_is_active boolean;
   v_has_paid       boolean := FALSE;
   v_was_active     boolean := FALSE;
-  v_photo_delta    integer := 0;
 BEGIN
   PERFORM public._assert_authenticated();
   v_user := auth.uid();
@@ -5586,18 +5559,9 @@ BEGIN
   RETURNING * INTO v_expense;
 
   IF v_was_active THEN
-    IF v_expense.plan_id IS NULL
-       AND v_expense.evidence_photo_path IS NOT NULL
-       AND v_expense.fully_paid_at IS NULL THEN
-      v_photo_delta := -1;
-    END IF;
-
     PERFORM public._home_usage_apply_delta(
       v_expense.home_id,
-      jsonb_build_object(
-        'active_expenses', -1,
-        'expense_photos', v_photo_delta
-      )
+      jsonb_build_object('active_expenses', -1)
     );
   END IF;
 
@@ -8776,10 +8740,7 @@ BEGIN
        )
     RETURNING
       e.home_id,
-      CASE
-        WHEN e.plan_id IS NULL AND e.evidence_photo_path IS NOT NULL THEN 1
-        ELSE 0
-      END AS expense_photo_dec
+      0 AS expense_photo_dec
   )
   INSERT INTO pg_temp.expenses_newly_paid (home_id, expense_photo_dec)
   SELECT home_id, expense_photo_dec FROM newly_paid;
@@ -8801,8 +8762,7 @@ BEGIN
     PERFORM public._home_usage_apply_delta(
       r.home_id,
       jsonb_build_object(
-        'active_expenses', -r.dec_count,
-        'expense_photos',  -r.dec_expense_photo_count
+        'active_expenses', -r.dec_count
       )
     );
   END LOOP;
@@ -9447,6 +9407,15 @@ BEGIN
   -- 5) Seed starter draft chores for quick household setup (weekly recurrence)
   PERFORM public.chores_create_v2(
     p_home_id => v_home.id,
+    p_name => 'Take out trash',
+    p_recurrence_every => 1,
+    p_recurrence_unit => 'week',
+    p_how_to_video_url => 'https://www.youtube.com/shorts/tF_smwdwzMk',
+    p_expectation_photo_path => 'flow/expectations/1771359335379-pc7yvv_template.jpg',
+    p_notes => 'Don''t forget to throw the rubbish, or else need to wait for a month!!'
+  );
+  PERFORM public.chores_create_v2(
+    p_home_id => v_home.id,
     p_name => 'Clean kitchen',
     p_recurrence_every => 1,
     p_recurrence_unit => 'week'
@@ -9463,28 +9432,29 @@ BEGIN
     p_recurrence_every => 1,
     p_recurrence_unit => 'week'
   );
-  PERFORM public.chores_create_v2(
-    p_home_id => v_home.id,
-    p_name => 'Take out trash',
-    p_recurrence_every => 1,
-    p_recurrence_unit => 'week'
-  );
   -- 6) Seed starter draft bill templates
-  PERFORM public.expenses_create_v2(
+  PERFORM public.expenses_create_v3(
     p_home_id => v_home.id,
     p_description => 'Internet bills'
   );
-  PERFORM public.expenses_create_v2(
+  PERFORM public.expenses_create_v3(
     p_home_id => v_home.id,
     p_description => 'Electric bills'
   );
-  PERFORM public.expenses_create_v2(
+  PERFORM public.expenses_create_v3(
     p_home_id => v_home.id,
     p_description => 'Water bills'
   );
-  PERFORM public.expenses_create_v2(
+  PERFORM public.expenses_create_v3(
     p_home_id => v_home.id,
     p_description => 'Rent'
+  );
+  PERFORM public.shopping_list_add_item(
+    p_home_id => v_home.id,
+    p_name => 'Toilet paper',
+    p_quantity => '1',
+    p_details => 'Get the 3-ply one for extra comfort!', 
+    p_reference_photo_path => 'households/shopping/item/1771297308238-ecgval_template.jpg'
   );
 
   -- 7) Create first invite (one active per home enforced by partial index)
@@ -10423,10 +10393,14 @@ DECLARE
   v_row public.house_norms%ROWTYPE;
   v_requested_locale_base text;
   v_is_owner boolean := false;
+  v_norms_change_at timestamptz := NULL;
+  v_show_member_review_card boolean := false;
   v_show_publish_button boolean := false;
   v_show_republish_button boolean := false;
   v_show_public_url boolean := false;
   v_owner_meta jsonb := '{}'::jsonb;
+  v_member_meta jsonb := '{}'::jsonb;
+  v_member_viewed_at timestamptz := NULL;
 BEGIN
   PERFORM public._assert_authenticated();
   PERFORM public._assert_home_member(p_home_id);
@@ -10490,6 +10464,25 @@ BEGIN
       'show_republish_button', v_show_republish_button,
       'show_public_url', v_show_public_url
     );
+  ELSE
+    SELECT mv.viewed_at
+      INTO v_member_viewed_at
+    FROM public.house_norms_member_views mv
+    WHERE mv.home_id = p_home_id
+      AND mv.user_id = auth.uid()
+    LIMIT 1;
+
+    v_norms_change_at := COALESCE(v_row.last_edited_at, v_row.generated_at);
+    v_show_member_review_card := (
+      v_norms_change_at IS NOT NULL
+      AND now() >= (v_norms_change_at + interval '24 hours')
+      AND (v_member_viewed_at IS NULL OR v_member_viewed_at < v_norms_change_at)
+    );
+
+    v_member_meta := jsonb_build_object(
+      'member_viewed_at', v_member_viewed_at,
+      'show_member_review_card', v_show_member_review_card
+    );
   END IF;
 
   RETURN jsonb_build_object(
@@ -10511,9 +10504,10 @@ BEGIN
       'is_published', (v_row.published_content IS NOT NULL),
       'has_unpublished_changes',
         (v_row.published_content IS NULL OR v_row.generated_content IS DISTINCT FROM v_row.published_content),
+      'show_member_review_card', false,
       'last_edited_at', v_row.last_edited_at,
       'last_edited_by', v_row.last_edited_by
-    ) || v_owner_meta
+    ) || v_owner_meta || v_member_meta
   );
 END;
 $_$;
@@ -10690,6 +10684,41 @@ $_$;
 
 
 ALTER FUNCTION "public"."house_norms_publish_for_home"("p_home_id" "uuid", "p_locale" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."house_norms_record_view"("p_home_id" "uuid") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+DECLARE
+  v_now timestamptz := now();
+BEGIN
+  PERFORM public._assert_authenticated();
+  PERFORM public._assert_home_member(p_home_id);
+  PERFORM public._assert_home_active(p_home_id);
+
+  INSERT INTO public.house_norms_member_views (
+    home_id,
+    user_id,
+    viewed_at
+  )
+  VALUES (
+    p_home_id,
+    auth.uid(),
+    v_now
+  )
+  ON CONFLICT (home_id, user_id) DO UPDATE
+  SET viewed_at = EXCLUDED.viewed_at;
+
+  RETURN jsonb_build_object(
+    'ok', true,
+    'viewed_at', v_now
+  );
+END;
+$$;
+
+
+ALTER FUNCTION "public"."house_norms_record_view"("p_home_id" "uuid") OWNER TO "postgres";
 
 
 CREATE TABLE IF NOT EXISTS "public"."house_pulse_weekly" (
@@ -17148,6 +17177,16 @@ CREATE TABLE IF NOT EXISTS "public"."house_norms" (
 ALTER TABLE "public"."house_norms" OWNER TO "postgres";
 
 
+CREATE TABLE IF NOT EXISTS "public"."house_norms_member_views" (
+    "home_id" "uuid" NOT NULL,
+    "user_id" "uuid" NOT NULL,
+    "viewed_at" timestamp with time zone DEFAULT "now"() NOT NULL
+);
+
+
+ALTER TABLE "public"."house_norms_member_views" OWNER TO "postgres";
+
+
 CREATE TABLE IF NOT EXISTS "public"."house_norms_revisions" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "home_id" "uuid" NOT NULL,
@@ -18131,6 +18170,11 @@ ALTER TABLE ONLY "public"."house_norm_templates"
 
 ALTER TABLE ONLY "public"."house_norm_templates"
     ADD CONSTRAINT "house_norm_templates_unique_key_locale" UNIQUE ("template_key", "locale_base");
+
+
+
+ALTER TABLE ONLY "public"."house_norms_member_views"
+    ADD CONSTRAINT "house_norms_member_views_pkey" PRIMARY KEY ("home_id", "user_id");
 
 
 
@@ -19194,6 +19238,16 @@ ALTER TABLE ONLY "public"."house_norms"
 
 
 
+ALTER TABLE ONLY "public"."house_norms_member_views"
+    ADD CONSTRAINT "house_norms_member_views_home_id_fkey" FOREIGN KEY ("home_id") REFERENCES "public"."homes"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."house_norms_member_views"
+    ADD CONSTRAINT "house_norms_member_views_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."users"("id") ON DELETE CASCADE;
+
+
+
 ALTER TABLE ONLY "public"."house_norms_revisions"
     ADD CONSTRAINT "house_norms_revisions_editor_user_id_fkey" FOREIGN KEY ("editor_user_id") REFERENCES "public"."profiles"("id") ON DELETE RESTRICT;
 
@@ -19519,6 +19573,9 @@ ALTER TABLE "public"."house_norm_templates" ENABLE ROW LEVEL SECURITY;
 
 
 ALTER TABLE "public"."house_norms" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."house_norms_member_views" ENABLE ROW LEVEL SECURITY;
 
 
 ALTER TABLE "public"."house_norms_revisions" ENABLE ROW LEVEL SECURITY;
@@ -22081,6 +22138,12 @@ GRANT ALL ON FUNCTION "public"."house_norms_publish_for_home"("p_home_id" "uuid"
 
 
 
+GRANT ALL ON FUNCTION "public"."house_norms_record_view"("p_home_id" "uuid") TO "anon";
+GRANT ALL ON FUNCTION "public"."house_norms_record_view"("p_home_id" "uuid") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."house_norms_record_view"("p_home_id" "uuid") TO "service_role";
+
+
+
 GRANT ALL ON TABLE "public"."house_pulse_weekly" TO "service_role";
 
 
@@ -22889,6 +22952,10 @@ GRANT ALL ON TABLE "public"."house_norm_templates" TO "service_role";
 
 
 GRANT ALL ON TABLE "public"."house_norms" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."house_norms_member_views" TO "service_role";
 
 
 

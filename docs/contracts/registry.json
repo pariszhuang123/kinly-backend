@@ -484,7 +484,7 @@
           "returns": "jsonb",
           "notes": [
             "Bulk marks caller's unpaid splits owed to the recipient as paid",
-            "Stamps marked_paid_at, stamps fully_paid_at once per expense, decrements usage per fully paid expense for metrics incremented at expense level (including charged one-off expense_photos)"
+            "Stamps marked_paid_at and fully_paid_at once per expense; decrements active_expenses per newly fully paid expense"
           ]
         },
         "expensePlans.terminate": {
@@ -497,7 +497,7 @@
           "returns": "ExpensePlan",
           "notes": [
             "Stops future cycles; existing expenses remain payable",
-            "If plan carries evidencePhotoPath, decrements expense_photos once on first termination transition"
+            "Does not decrement expense_photos; photo usage is add-only"
           ]
         },
         "expenses.cancel": {
