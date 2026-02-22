@@ -2628,6 +2628,147 @@ $$;
 ALTER FUNCTION "public"."_outreach_rate_limit_bucketed"("p_key" "text", "p_bucket_start" timestamp with time zone, "p_limit" integer) OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."_outreach_short_links_before_write"() RETURNS "trigger"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+begin
+  new.short_code := lower(trim(new.short_code::text))::public.citext;
+  new.target_path := trim(new.target_path);
+  new.target_query := coalesce(new.target_query, '{}'::jsonb);
+  new.utm_campaign := trim(new.utm_campaign);
+  new.utm_source := lower(trim(new.utm_source));
+  new.utm_medium := lower(trim(new.utm_medium));
+  new.app_key := trim(new.app_key);
+  new.page_key := trim(new.page_key);
+
+  new.source_id_resolved := coalesce(
+    nullif(trim(new.source_id_resolved), ''),
+    public._outreach_short_links_resolve_source(new.utm_source)
+  );
+
+  new.destination_fingerprint := public._outreach_short_links_fingerprint(
+    new.target_path,
+    new.target_query,
+    new.utm_campaign,
+    new.utm_source,
+    new.utm_medium,
+    new.app_key,
+    new.page_key
+  );
+
+  new.updated_at := now();
+
+  if new.created_by is null then
+    new.created_by := auth.uid();
+  end if;
+
+  return new;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."_outreach_short_links_before_write"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_outreach_short_links_fingerprint"("p_target_path" "text", "p_target_query" "jsonb", "p_utm_campaign" "text", "p_utm_source" "text", "p_utm_medium" "text", "p_app_key" "text", "p_page_key" "text") RETURNS "text"
+    LANGUAGE "sql" IMMUTABLE
+    SET "search_path" TO ''
+    AS $$
+  select encode(
+    extensions.digest(
+      convert_to(
+        concat_ws(
+          '|',
+          trim(coalesce(p_target_path, '')),
+          coalesce(p_target_query, '{}'::jsonb)::text,
+          trim(coalesce(p_utm_campaign, '')),
+          lower(trim(coalesce(p_utm_source, ''))),
+          lower(trim(coalesce(p_utm_medium, ''))),
+          trim(coalesce(p_app_key, '')),
+          trim(coalesce(p_page_key, ''))
+        ),
+        'utf8'
+      ),
+      'sha256'::text
+    ),
+    'hex'
+  );
+$$;
+
+
+ALTER FUNCTION "public"."_outreach_short_links_fingerprint"("p_target_path" "text", "p_target_query" "jsonb", "p_utm_campaign" "text", "p_utm_source" "text", "p_utm_medium" "text", "p_app_key" "text", "p_page_key" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_outreach_short_links_generate_code"("p_len" integer DEFAULT 6) RETURNS "public"."citext"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+declare
+  -- Excludes ambiguous characters: 0, 1, i, l, o
+  v_alphabet constant text := 'abcdefghjkmnpqrstuvwxyz23456789';
+  v_alpha_len constant integer := length(v_alphabet);
+
+  v_bytes bytea;
+  v_code text := '';
+  v_i integer;
+  v_byte integer;
+begin
+  if p_len < 4 or p_len > 24 then
+    raise exception 'invalid code length'
+      using errcode = '22023';
+  end if;
+
+  -- cryptographically strong randomness
+  v_bytes := extensions.gen_random_bytes(p_len);
+
+  for v_i in 0 .. p_len - 1 loop
+    v_byte := get_byte(v_bytes, v_i);
+    v_code := v_code || substr(v_alphabet, (v_byte % v_alpha_len) + 1, 1);
+  end loop;
+
+  return v_code::public.citext;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."_outreach_short_links_generate_code"("p_len" integer) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_outreach_short_links_resolve_source"("p_utm_source" "text") RETURNS "text"
+    LANGUAGE "plpgsql" STABLE SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+declare
+  v_utm_source text := lower(trim(coalesce(p_utm_source, '')));
+  v_resolved text;
+begin
+  select s.source_id
+    into v_resolved
+    from public.outreach_sources s
+   where s.source_id = v_utm_source
+     and s.active = true
+   limit 1;
+
+  if v_resolved is null then
+    select s.source_id
+      into v_resolved
+      from public.outreach_source_aliases a
+      join public.outreach_sources s on s.source_id = a.source_id
+     where a.alias = v_utm_source
+       and a.active = true
+       and s.active = true
+     limit 1;
+  end if;
+
+  return coalesce(v_resolved, 'unknown');
+end;
+$$;
+
+
+ALTER FUNCTION "public"."_outreach_short_links_resolve_source"("p_utm_source" "text") OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."_outreach_sources_protect_unknown"() RETURNS "trigger"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO ''
@@ -13771,6 +13912,289 @@ $$;
 ALTER FUNCTION "public"."outreach_rate_limits_cleanup"("p_keep" interval) OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."outreach_short_links_disable"("p_short_code" "text") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $_$
+declare
+  v_short_code text := lower(trim(coalesce(p_short_code, '')));
+  v_row public.outreach_short_links%rowtype;
+begin
+  perform public.api_assert(
+    v_short_code ~ '^[a-z0-9_-]{4,24}$',
+    'INVALID_SHORT_CODE',
+    'short_code must match ^[a-z0-9_-]{4,24}$',
+    '22023'
+  );
+
+  update public.outreach_short_links
+     set active = false,
+         updated_at = now()
+   where short_code = v_short_code::public.citext
+     and active = true
+  returning * into v_row;
+
+  if found then
+    return jsonb_build_object(
+      'ok', true,
+      'disabled', true,
+      'id', v_row.id,
+      'short_code', v_row.short_code::text
+    );
+  end if;
+
+  select *
+    into v_row
+    from public.outreach_short_links
+   where short_code = v_short_code::public.citext
+   limit 1;
+
+  if not found then
+    perform public.api_error(
+      'SHORT_CODE_NOT_FOUND',
+      'short_code was not found',
+      'P0002'
+    );
+
+    return null;
+  end if;
+
+  return jsonb_build_object(
+    'ok', true,
+    'disabled', false,
+    'id', v_row.id,
+    'short_code', v_row.short_code::text
+  );
+end;
+$_$;
+
+
+ALTER FUNCTION "public"."outreach_short_links_disable"("p_short_code" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."outreach_short_links_get_or_create"("p_short_code" "text" DEFAULT NULL::"text", "p_target_path" "text" DEFAULT NULL::"text", "p_target_query" "jsonb" DEFAULT '{}'::"jsonb", "p_utm_campaign" "text" DEFAULT NULL::"text", "p_utm_source" "text" DEFAULT NULL::"text", "p_utm_medium" "text" DEFAULT NULL::"text", "p_app_key" "text" DEFAULT 'kinly-web'::"text", "p_page_key" "text" DEFAULT NULL::"text", "p_expires_at" timestamp with time zone DEFAULT NULL::timestamp with time zone) RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $_$
+declare
+  v_short_code text := nullif(lower(trim(coalesce(p_short_code, ''))), '');
+  v_target_path text := trim(coalesce(p_target_path, ''));
+  v_target_query jsonb := coalesce(p_target_query, '{}'::jsonb);
+  v_utm_campaign text := trim(coalesce(p_utm_campaign, ''));
+  v_utm_source text := lower(trim(coalesce(p_utm_source, '')));
+  v_utm_medium text := lower(trim(coalesce(p_utm_medium, '')));
+  v_app_key text := trim(coalesce(p_app_key, ''));
+  v_page_key text := trim(coalesce(p_page_key, ''));
+  v_source_id_resolved text;
+  v_fingerprint text;
+  v_row public.outreach_short_links%rowtype;
+  v_attempt integer := 0;
+  c_max_attempts constant integer := 8;
+begin
+  perform public.api_assert(
+    v_target_path like '/kinly/%',
+    'INVALID_TARGET_PATH',
+    'target_path must start with /kinly/',
+    '22023'
+  );
+
+  perform public.api_assert(
+    jsonb_typeof(v_target_query) = 'object',
+    'INVALID_TARGET_QUERY',
+    'target_query must be a JSON object',
+    '22023'
+  );
+
+  perform public.api_assert(
+    v_utm_campaign <> '' and v_utm_source <> '' and v_utm_medium <> '',
+    'INVALID_UTM',
+    'utm_campaign, utm_source, and utm_medium are required',
+    '22023'
+  );
+
+  perform public.api_assert(
+    v_app_key <> '' and v_page_key <> '',
+    'INVALID_INPUT',
+    'app_key and page_key are required',
+    '22023'
+  );
+
+  if v_short_code is not null then
+    perform public.api_assert(
+      v_short_code ~ '^[a-z0-9_-]{4,24}$',
+      'INVALID_SHORT_CODE',
+      'short_code must match ^[a-z0-9_-]{4,24}$',
+      '22023'
+    );
+  end if;
+
+  v_source_id_resolved := public._outreach_short_links_resolve_source(v_utm_source);
+  v_fingerprint := public._outreach_short_links_fingerprint(
+    v_target_path,
+    v_target_query,
+    v_utm_campaign,
+    v_utm_source,
+    v_utm_medium,
+    v_app_key,
+    v_page_key
+  );
+
+  select *
+    into v_row
+    from public.outreach_short_links
+   where destination_fingerprint = v_fingerprint
+   limit 1;
+
+  if found then
+    return jsonb_build_object(
+      'ok', true,
+      'created', false,
+      'id', v_row.id,
+      'short_code', v_row.short_code::text,
+      'short_url', 'https://go.makinglifeeasie.com/' || v_row.short_code::text,
+      'destination_fingerprint', v_row.destination_fingerprint
+    );
+  end if;
+
+  if v_short_code is not null then
+    begin
+      insert into public.outreach_short_links (
+        short_code,
+        target_path,
+        target_query,
+        utm_campaign,
+        utm_source,
+        utm_medium,
+        source_id_resolved,
+        app_key,
+        page_key,
+        destination_fingerprint,
+        expires_at
+      ) values (
+        v_short_code::public.citext,
+        v_target_path,
+        v_target_query,
+        v_utm_campaign,
+        v_utm_source,
+        v_utm_medium,
+        v_source_id_resolved,
+        v_app_key,
+        v_page_key,
+        v_fingerprint,
+        p_expires_at
+      )
+      returning * into v_row;
+
+      return jsonb_build_object(
+        'ok', true,
+        'created', true,
+        'id', v_row.id,
+        'short_code', v_row.short_code::text,
+        'short_url', 'https://go.makinglifeeasie.com/' || v_row.short_code::text,
+        'destination_fingerprint', v_row.destination_fingerprint
+      );
+    exception
+      when unique_violation then
+        select *
+          into v_row
+          from public.outreach_short_links
+         where destination_fingerprint = v_fingerprint
+         limit 1;
+
+        if found then
+          return jsonb_build_object(
+            'ok', true,
+            'created', false,
+            'id', v_row.id,
+            'short_code', v_row.short_code::text,
+            'short_url', 'https://go.makinglifeeasie.com/' || v_row.short_code::text,
+            'destination_fingerprint', v_row.destination_fingerprint
+          );
+        end if;
+
+        perform public.api_error(
+          'SHORT_CODE_ALREADY_EXISTS',
+          'Requested short_code is already bound to a different destination',
+          '23505'
+        );
+    end;
+  end if;
+
+  while v_attempt < c_max_attempts loop
+    v_attempt := v_attempt + 1;
+    v_short_code := public._outreach_short_links_generate_code(6)::text;
+
+    begin
+      insert into public.outreach_short_links (
+        short_code,
+        target_path,
+        target_query,
+        utm_campaign,
+        utm_source,
+        utm_medium,
+        source_id_resolved,
+        app_key,
+        page_key,
+        destination_fingerprint,
+        expires_at
+      ) values (
+        v_short_code::public.citext,
+        v_target_path,
+        v_target_query,
+        v_utm_campaign,
+        v_utm_source,
+        v_utm_medium,
+        v_source_id_resolved,
+        v_app_key,
+        v_page_key,
+        v_fingerprint,
+        p_expires_at
+      )
+      returning * into v_row;
+
+      return jsonb_build_object(
+        'ok', true,
+        'created', true,
+        'id', v_row.id,
+        'short_code', v_row.short_code::text,
+        'short_url', 'https://go.makinglifeeasie.com/' || v_row.short_code::text,
+        'destination_fingerprint', v_row.destination_fingerprint
+      );
+    exception
+      when unique_violation then
+        select *
+          into v_row
+          from public.outreach_short_links
+         where destination_fingerprint = v_fingerprint
+         limit 1;
+
+        if found then
+          return jsonb_build_object(
+            'ok', true,
+            'created', false,
+            'id', v_row.id,
+            'short_code', v_row.short_code::text,
+            'short_url', 'https://go.makinglifeeasie.com/' || v_row.short_code::text,
+            'destination_fingerprint', v_row.destination_fingerprint
+          );
+        end if;
+    end;
+  end loop;
+
+  perform public.api_error(
+    'SHORT_CODE_COLLISION_EXHAUSTED',
+    'Could not allocate a unique short code after bounded retries',
+    '23505'
+  );
+
+  return null;
+end;
+$_$;
+
+
+ALTER FUNCTION "public"."outreach_short_links_get_or_create"("p_short_code" "text", "p_target_path" "text", "p_target_query" "jsonb", "p_utm_campaign" "text", "p_utm_source" "text", "p_utm_medium" "text", "p_app_key" "text", "p_page_key" "text", "p_expires_at" timestamp with time zone) OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."paywall_log_event"("p_home_id" "uuid", "p_event_type" "text", "p_source" "text" DEFAULT NULL::"text") RETURNS "void"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO ''
@@ -13987,8 +14411,8 @@ CREATE OR REPLACE FUNCTION "public"."paywall_status_get"("p_home_id" "uuid") RET
     SET "search_path" TO ''
     AS $$
 DECLARE
-  v_plan           text;
-  v_now            timestamptz := now();
+  v_plan text;
+  v_now  timestamptz := now();
 BEGIN
   PERFORM public._assert_home_member(p_home_id);
 
@@ -14007,6 +14431,7 @@ BEGIN
         'chore_photos',    c.chore_photos,
         'active_members',  c.active_members,
         'active_expenses', c.active_expenses,
+        'expense_photos',  c.expense_photos,   -- added
         'updated_at',      c.updated_at
       )
       FROM public.home_usage_counters c
@@ -14016,9 +14441,9 @@ BEGIN
       'chore_photos', 0,
       'active_members', 0,
       'active_expenses', 0,
+      'expense_photos', 0,                      -- added
       'updated_at', v_now
     )),
-
     'limits', COALESCE((
       SELECT jsonb_agg(
         jsonb_build_object(
@@ -17487,6 +17912,85 @@ CREATE TABLE IF NOT EXISTS "public"."outreach_rate_limits" (
 ALTER TABLE "public"."outreach_rate_limits" OWNER TO "postgres";
 
 
+CREATE TABLE IF NOT EXISTS "public"."outreach_short_links" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "short_code" "public"."citext" NOT NULL,
+    "target_path" "text" NOT NULL,
+    "target_query" "jsonb" DEFAULT '{}'::"jsonb" NOT NULL,
+    "utm_campaign" "text" NOT NULL,
+    "utm_source" "text" NOT NULL,
+    "utm_medium" "text" NOT NULL,
+    "source_id_resolved" "text" DEFAULT 'unknown'::"text" NOT NULL,
+    "app_key" "text" DEFAULT 'kinly-web'::"text" NOT NULL,
+    "page_key" "text" NOT NULL,
+    "destination_fingerprint" "text" NOT NULL,
+    "active" boolean DEFAULT true NOT NULL,
+    "expires_at" timestamp with time zone,
+    "created_by" "uuid",
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "chk_outreach_short_links_app_key" CHECK ((NULLIF(TRIM(BOTH FROM "app_key"), ''::"text") IS NOT NULL)),
+    CONSTRAINT "chk_outreach_short_links_page_key" CHECK ((NULLIF(TRIM(BOTH FROM "page_key"), ''::"text") IS NOT NULL)),
+    CONSTRAINT "chk_outreach_short_links_short_code" CHECK (("lower"(("short_code")::"text") ~ '^[a-z0-9_-]{4,24}$'::"text")),
+    CONSTRAINT "chk_outreach_short_links_target_path" CHECK (("target_path" ~~ '/kinly/%'::"text")),
+    CONSTRAINT "chk_outreach_short_links_target_query_object" CHECK (("jsonb_typeof"("target_query") = 'object'::"text")),
+    CONSTRAINT "chk_outreach_short_links_utm_campaign" CHECK ((NULLIF(TRIM(BOTH FROM "utm_campaign"), ''::"text") IS NOT NULL)),
+    CONSTRAINT "chk_outreach_short_links_utm_medium" CHECK ((NULLIF(TRIM(BOTH FROM "utm_medium"), ''::"text") IS NOT NULL)),
+    CONSTRAINT "chk_outreach_short_links_utm_source" CHECK ((NULLIF(TRIM(BOTH FROM "utm_source"), ''::"text") IS NOT NULL))
+);
+
+
+ALTER TABLE "public"."outreach_short_links" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."outreach_short_links" IS 'Service-managed short links for outreach URLs.';
+
+
+
+COMMENT ON COLUMN "public"."outreach_short_links"."short_code" IS 'Case-insensitive short code (normalized to lowercase on write).';
+
+
+
+COMMENT ON COLUMN "public"."outreach_short_links"."target_path" IS 'Host-agnostic target path (must be /kinly/...).';
+
+
+
+COMMENT ON COLUMN "public"."outreach_short_links"."target_query" IS 'Canonical query object merged into redirect destination.';
+
+
+
+COMMENT ON COLUMN "public"."outreach_short_links"."destination_fingerprint" IS 'sha256 of canonical destination tuple.';
+
+
+
+COMMENT ON COLUMN "public"."outreach_short_links"."expires_at" IS 'Optional expiry; immutable for an existing destination_fingerprint.';
+
+
+
+CREATE OR REPLACE VIEW "public"."outreach_short_links_effective" AS
+ SELECT "id",
+    "short_code",
+    "target_path",
+    "target_query",
+    "utm_campaign",
+    "utm_source",
+    "utm_medium",
+    "source_id_resolved",
+    "app_key",
+    "page_key",
+    "destination_fingerprint",
+    "active",
+    "expires_at",
+    "created_by",
+    "created_at",
+    "updated_at",
+    ("active" AND (("expires_at" IS NULL) OR ("expires_at" > "now"()))) AS "effective_active"
+   FROM "public"."outreach_short_links";
+
+
+ALTER VIEW "public"."outreach_short_links_effective" OWNER TO "postgres";
+
+
 CREATE TABLE IF NOT EXISTS "public"."outreach_source_aliases" (
     "alias" "text" NOT NULL,
     "source_id" "text" NOT NULL,
@@ -17965,42 +18469,6 @@ COMMENT ON TABLE "public"."share_events" IS 'Internal analytics for tracking sha
 
 
 
-CREATE TABLE IF NOT EXISTS "public"."shared_preferences" (
-    "user_id" "uuid" NOT NULL,
-    "pref_key" "text" NOT NULL,
-    "pref_value" "jsonb" DEFAULT '{}'::"jsonb" NOT NULL,
-    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
-    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL
-);
-
-
-ALTER TABLE "public"."shared_preferences" OWNER TO "postgres";
-
-
-COMMENT ON TABLE "public"."shared_preferences" IS 'Per-user key/value preferences (current state only); accessed via RPCs, not direct client DML.';
-
-
-
-COMMENT ON COLUMN "public"."shared_preferences"."user_id" IS 'Owner of the preference; references profiles(id).';
-
-
-
-COMMENT ON COLUMN "public"."shared_preferences"."pref_key" IS 'Preference key (namespaced, e.g., legal.consent.v1, tutorial.free_upload_camera.v1).';
-
-
-
-COMMENT ON COLUMN "public"."shared_preferences"."pref_value" IS 'Preference value as JSONB (boolean, number, string, or structured object).';
-
-
-
-COMMENT ON COLUMN "public"."shared_preferences"."created_at" IS 'Timestamp when this preference row was first created.';
-
-
-
-COMMENT ON COLUMN "public"."shared_preferences"."updated_at" IS 'Timestamp when this preference row was last updated.';
-
-
-
 CREATE TABLE IF NOT EXISTS "public"."user_subscriptions" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "user_id" "uuid" NOT NULL,
@@ -18257,6 +18725,11 @@ ALTER TABLE ONLY "public"."outreach_event_logs"
 
 
 
+ALTER TABLE ONLY "public"."outreach_short_links"
+    ADD CONSTRAINT "outreach_short_links_pkey" PRIMARY KEY ("id");
+
+
+
 ALTER TABLE ONLY "public"."outreach_source_aliases"
     ADD CONSTRAINT "outreach_source_aliases_pkey" PRIMARY KEY ("alias");
 
@@ -18329,11 +18802,6 @@ ALTER TABLE ONLY "public"."outreach_rate_limits"
 
 ALTER TABLE ONLY "public"."preference_responses"
     ADD CONSTRAINT "pk_preference_responses" PRIMARY KEY ("user_id", "preference_id");
-
-
-
-ALTER TABLE ONLY "public"."shared_preferences"
-    ADD CONSTRAINT "pk_shared_preferences" PRIMARY KEY ("user_id", "pref_key");
 
 
 
@@ -18657,6 +19125,18 @@ CREATE INDEX "idx_outreach_rate_limits_updated" ON "public"."outreach_rate_limit
 
 
 
+CREATE INDEX "idx_outreach_short_links_active_created_at" ON "public"."outreach_short_links" USING "btree" ("active", "created_at" DESC);
+
+
+
+CREATE INDEX "idx_outreach_short_links_expires_at" ON "public"."outreach_short_links" USING "btree" ("expires_at") WHERE ("expires_at" IS NOT NULL);
+
+
+
+CREATE INDEX "idx_outreach_short_links_utm_triplet" ON "public"."outreach_short_links" USING "btree" ("utm_campaign", "utm_source", "utm_medium");
+
+
+
 CREATE INDEX "idx_personal_items_home_source_entry" ON "public"."gratitude_wall_personal_items" USING "btree" ("home_id", "source_entry_id");
 
 
@@ -18801,6 +19281,14 @@ CREATE UNIQUE INDEX "uq_outreach_event_logs_client_event_id" ON "public"."outrea
 
 
 
+CREATE UNIQUE INDEX "uq_outreach_short_links_destination_fingerprint" ON "public"."outreach_short_links" USING "btree" ("destination_fingerprint");
+
+
+
+CREATE UNIQUE INDEX "uq_outreach_short_links_short_code" ON "public"."outreach_short_links" USING "btree" ("short_code");
+
+
+
 CREATE UNIQUE INDEX "uq_profiles_username" ON "public"."profiles" USING "btree" ("username");
 
 
@@ -18906,6 +19394,10 @@ CREATE OR REPLACE TRIGGER "trg_leads_touch_updated_at" BEFORE UPDATE ON "public"
 
 
 CREATE OR REPLACE TRIGGER "trg_outreach_aliases_protect_unknown" BEFORE DELETE OR UPDATE ON "public"."outreach_source_aliases" FOR EACH ROW EXECUTE FUNCTION "public"."_outreach_aliases_protect_unknown"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_outreach_short_links_before_write" BEFORE INSERT OR UPDATE ON "public"."outreach_short_links" FOR EACH ROW EXECUTE FUNCTION "public"."_outreach_short_links_before_write"();
 
 
 
@@ -19085,6 +19577,11 @@ ALTER TABLE ONLY "public"."notification_sends"
 
 ALTER TABLE ONLY "public"."outreach_event_logs"
     ADD CONSTRAINT "fk_outreach_event_logs_source_resolved" FOREIGN KEY ("source_id_resolved") REFERENCES "public"."outreach_sources"("source_id");
+
+
+
+ALTER TABLE ONLY "public"."outreach_short_links"
+    ADD CONSTRAINT "fk_outreach_short_links_source_resolved" FOREIGN KEY ("source_id_resolved") REFERENCES "public"."outreach_sources"("source_id");
 
 
 
@@ -19438,11 +19935,6 @@ ALTER TABLE ONLY "public"."share_events"
 
 
 
-ALTER TABLE ONLY "public"."shared_preferences"
-    ADD CONSTRAINT "shared_preferences_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."profiles"("id") ON DELETE CASCADE;
-
-
-
 ALTER TABLE ONLY "public"."shopping_list_items"
     ADD CONSTRAINT "shopping_list_items_archived_by_user_id_fkey" FOREIGN KEY ("archived_by_user_id") REFERENCES "public"."profiles"("id") ON DELETE SET NULL;
 
@@ -19629,6 +20121,9 @@ ALTER TABLE "public"."outreach_event_logs" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "public"."outreach_rate_limits" ENABLE ROW LEVEL SECURITY;
 
 
+ALTER TABLE "public"."outreach_short_links" ENABLE ROW LEVEL SECURITY;
+
+
 ALTER TABLE "public"."outreach_source_aliases" ENABLE ROW LEVEL SECURITY;
 
 
@@ -19705,6 +20200,10 @@ CREATE POLICY "service_role_all_outreach_rate_limits" ON "public"."outreach_rate
 
 
 
+CREATE POLICY "service_role_all_outreach_short_links" ON "public"."outreach_short_links" TO "service_role" USING (true) WITH CHECK (true);
+
+
+
 CREATE POLICY "service_role_all_outreach_sources" ON "public"."outreach_sources" TO "service_role" USING (true) WITH CHECK (true);
 
 
@@ -19714,9 +20213,6 @@ CREATE POLICY "service_role_read_outreach_event_logs" ON "public"."outreach_even
 
 
 ALTER TABLE "public"."share_events" ENABLE ROW LEVEL SECURITY;
-
-
-ALTER TABLE "public"."shared_preferences" ENABLE ROW LEVEL SECURITY;
 
 
 ALTER TABLE "public"."shopping_list_items" ENABLE ROW LEVEL SECURITY;
@@ -20309,6 +20805,34 @@ GRANT ALL ON FUNCTION "public"."_outreach_aliases_protect_unknown"() TO "service
 GRANT ALL ON FUNCTION "public"."_outreach_rate_limit_bucketed"("p_key" "text", "p_bucket_start" timestamp with time zone, "p_limit" integer) TO "anon";
 GRANT ALL ON FUNCTION "public"."_outreach_rate_limit_bucketed"("p_key" "text", "p_bucket_start" timestamp with time zone, "p_limit" integer) TO "authenticated";
 GRANT ALL ON FUNCTION "public"."_outreach_rate_limit_bucketed"("p_key" "text", "p_bucket_start" timestamp with time zone, "p_limit" integer) TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_outreach_short_links_before_write"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_outreach_short_links_before_write"() TO "anon";
+GRANT ALL ON FUNCTION "public"."_outreach_short_links_before_write"() TO "authenticated";
+GRANT ALL ON FUNCTION "public"."_outreach_short_links_before_write"() TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_outreach_short_links_fingerprint"("p_target_path" "text", "p_target_query" "jsonb", "p_utm_campaign" "text", "p_utm_source" "text", "p_utm_medium" "text", "p_app_key" "text", "p_page_key" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_outreach_short_links_fingerprint"("p_target_path" "text", "p_target_query" "jsonb", "p_utm_campaign" "text", "p_utm_source" "text", "p_utm_medium" "text", "p_app_key" "text", "p_page_key" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."_outreach_short_links_fingerprint"("p_target_path" "text", "p_target_query" "jsonb", "p_utm_campaign" "text", "p_utm_source" "text", "p_utm_medium" "text", "p_app_key" "text", "p_page_key" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."_outreach_short_links_fingerprint"("p_target_path" "text", "p_target_query" "jsonb", "p_utm_campaign" "text", "p_utm_source" "text", "p_utm_medium" "text", "p_app_key" "text", "p_page_key" "text") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_outreach_short_links_generate_code"("p_len" integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_outreach_short_links_generate_code"("p_len" integer) TO "anon";
+GRANT ALL ON FUNCTION "public"."_outreach_short_links_generate_code"("p_len" integer) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."_outreach_short_links_generate_code"("p_len" integer) TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_outreach_short_links_resolve_source"("p_utm_source" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_outreach_short_links_resolve_source"("p_utm_source" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."_outreach_short_links_resolve_source"("p_utm_source" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."_outreach_short_links_resolve_source"("p_utm_source" "text") TO "service_role";
 
 
 
@@ -22408,6 +22932,20 @@ GRANT ALL ON FUNCTION "public"."outreach_rate_limits_cleanup"("p_keep" interval)
 
 
 
+REVOKE ALL ON FUNCTION "public"."outreach_short_links_disable"("p_short_code" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."outreach_short_links_disable"("p_short_code" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."outreach_short_links_disable"("p_short_code" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."outreach_short_links_disable"("p_short_code" "text") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."outreach_short_links_get_or_create"("p_short_code" "text", "p_target_path" "text", "p_target_query" "jsonb", "p_utm_campaign" "text", "p_utm_source" "text", "p_utm_medium" "text", "p_app_key" "text", "p_page_key" "text", "p_expires_at" timestamp with time zone) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."outreach_short_links_get_or_create"("p_short_code" "text", "p_target_path" "text", "p_target_query" "jsonb", "p_utm_campaign" "text", "p_utm_source" "text", "p_utm_medium" "text", "p_app_key" "text", "p_page_key" "text", "p_expires_at" timestamp with time zone) TO "anon";
+GRANT ALL ON FUNCTION "public"."outreach_short_links_get_or_create"("p_short_code" "text", "p_target_path" "text", "p_target_query" "jsonb", "p_utm_campaign" "text", "p_utm_source" "text", "p_utm_medium" "text", "p_app_key" "text", "p_page_key" "text", "p_expires_at" timestamp with time zone) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."outreach_short_links_get_or_create"("p_short_code" "text", "p_target_path" "text", "p_target_query" "jsonb", "p_utm_campaign" "text", "p_utm_source" "text", "p_utm_medium" "text", "p_app_key" "text", "p_page_key" "text", "p_expires_at" timestamp with time zone) TO "service_role";
+
+
+
 REVOKE ALL ON FUNCTION "public"."paywall_log_event"("p_home_id" "uuid", "p_event_type" "text", "p_source" "text") FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."paywall_log_event"("p_home_id" "uuid", "p_event_type" "text", "p_source" "text") TO "anon";
 GRANT ALL ON FUNCTION "public"."paywall_log_event"("p_home_id" "uuid", "p_event_type" "text", "p_source" "text") TO "authenticated";
@@ -23009,6 +23547,16 @@ GRANT ALL ON TABLE "public"."outreach_rate_limits" TO "service_role";
 
 
 
+GRANT ALL ON TABLE "public"."outreach_short_links" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."outreach_short_links_effective" TO "anon";
+GRANT ALL ON TABLE "public"."outreach_short_links_effective" TO "authenticated";
+GRANT ALL ON TABLE "public"."outreach_short_links_effective" TO "service_role";
+
+
+
 GRANT ALL ON TABLE "public"."outreach_source_aliases" TO "service_role";
 
 
@@ -23101,10 +23649,6 @@ GRANT ALL ON TABLE "public"."rewrite_requests" TO "service_role";
 
 GRANT ALL ON TABLE "public"."share_events" TO "anon";
 GRANT ALL ON TABLE "public"."share_events" TO "service_role";
-
-
-
-GRANT ALL ON TABLE "public"."shared_preferences" TO "service_role";
 
 
 

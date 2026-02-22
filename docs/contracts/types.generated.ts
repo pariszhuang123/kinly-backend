@@ -2073,6 +2073,71 @@ export type Database = {
         }
         Relationships: []
       }
+      outreach_short_links: {
+        Row: {
+          active: boolean
+          app_key: string
+          created_at: string
+          created_by: string | null
+          destination_fingerprint: string
+          expires_at: string | null
+          id: string
+          page_key: string
+          short_code: string
+          source_id_resolved: string
+          target_path: string
+          target_query: Json
+          updated_at: string
+          utm_campaign: string
+          utm_medium: string
+          utm_source: string
+        }
+        Insert: {
+          active?: boolean
+          app_key?: string
+          created_at?: string
+          created_by?: string | null
+          destination_fingerprint: string
+          expires_at?: string | null
+          id?: string
+          page_key: string
+          short_code: string
+          source_id_resolved?: string
+          target_path: string
+          target_query?: Json
+          updated_at?: string
+          utm_campaign: string
+          utm_medium: string
+          utm_source: string
+        }
+        Update: {
+          active?: boolean
+          app_key?: string
+          created_at?: string
+          created_by?: string | null
+          destination_fingerprint?: string
+          expires_at?: string | null
+          id?: string
+          page_key?: string
+          short_code?: string
+          source_id_resolved?: string
+          target_path?: string
+          target_query?: Json
+          updated_at?: string
+          utm_campaign?: string
+          utm_medium?: string
+          utm_source?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "fk_outreach_short_links_source_resolved"
+            columns: ["source_id_resolved"]
+            isOneToOne: false
+            referencedRelation: "outreach_sources"
+            referencedColumns: ["source_id"]
+          },
+        ]
+      }
       outreach_source_aliases: {
         Row: {
           active: boolean
@@ -3024,38 +3089,6 @@ export type Database = {
           },
         ]
       }
-      shared_preferences: {
-        Row: {
-          created_at: string
-          pref_key: string
-          pref_value: Json
-          updated_at: string
-          user_id: string
-        }
-        Insert: {
-          created_at?: string
-          pref_key: string
-          pref_value?: Json
-          updated_at?: string
-          user_id: string
-        }
-        Update: {
-          created_at?: string
-          pref_key?: string
-          pref_value?: Json
-          updated_at?: string
-          user_id?: string
-        }
-        Relationships: [
-          {
-            foreignKeyName: "shared_preferences_user_id_fkey"
-            columns: ["user_id"]
-            isOneToOne: false
-            referencedRelation: "profiles"
-            referencedColumns: ["id"]
-          },
-        ]
-      }
       shopping_list_items: {
         Row: {
           archived_at: string | null
@@ -3279,6 +3312,74 @@ export type Database = {
       }
     }
     Views: {
+      outreach_short_links_effective: {
+        Row: {
+          active: boolean | null
+          app_key: string | null
+          created_at: string | null
+          created_by: string | null
+          destination_fingerprint: string | null
+          effective_active: boolean | null
+          expires_at: string | null
+          id: string | null
+          page_key: string | null
+          short_code: string | null
+          source_id_resolved: string | null
+          target_path: string | null
+          target_query: Json | null
+          updated_at: string | null
+          utm_campaign: string | null
+          utm_medium: string | null
+          utm_source: string | null
+        }
+        Insert: {
+          active?: boolean | null
+          app_key?: string | null
+          created_at?: string | null
+          created_by?: string | null
+          destination_fingerprint?: string | null
+          effective_active?: never
+          expires_at?: string | null
+          id?: string | null
+          page_key?: string | null
+          short_code?: string | null
+          source_id_resolved?: string | null
+          target_path?: string | null
+          target_query?: Json | null
+          updated_at?: string | null
+          utm_campaign?: string | null
+          utm_medium?: string | null
+          utm_source?: string | null
+        }
+        Update: {
+          active?: boolean | null
+          app_key?: string | null
+          created_at?: string | null
+          created_by?: string | null
+          destination_fingerprint?: string | null
+          effective_active?: never
+          expires_at?: string | null
+          id?: string | null
+          page_key?: string | null
+          short_code?: string | null
+          source_id_resolved?: string | null
+          target_path?: string | null
+          target_query?: Json | null
+          updated_at?: string | null
+          utm_campaign?: string | null
+          utm_medium?: string | null
+          utm_source?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "fk_outreach_short_links_source_resolved"
+            columns: ["source_id_resolved"]
+            isOneToOne: false
+            referencedRelation: "outreach_sources"
+            referencedColumns: ["source_id"]
+          },
+        ]
+      }
       preference_taxonomy_active_defs: {
         Row: {
           aggregation: string | null
@@ -3504,6 +3605,26 @@ export type Database = {
       _outreach_rate_limit_bucketed: {
         Args: { p_bucket_start: string; p_key: string; p_limit: number }
         Returns: boolean
+      }
+      _outreach_short_links_fingerprint: {
+        Args: {
+          p_app_key: string
+          p_page_key: string
+          p_target_path: string
+          p_target_query: Json
+          p_utm_campaign: string
+          p_utm_medium: string
+          p_utm_source: string
+        }
+        Returns: string
+      }
+      _outreach_short_links_generate_code: {
+        Args: { p_len?: number }
+        Returns: string
+      }
+      _outreach_short_links_resolve_source: {
+        Args: { p_utm_source: string }
+        Returns: string
       }
       _preference_report_to_value_map: {
         Args: { p_report: Json }
@@ -4750,6 +4871,24 @@ export type Database = {
       outreach_rate_limits_cleanup: {
         Args: { p_keep?: string }
         Returns: number
+      }
+      outreach_short_links_disable: {
+        Args: { p_short_code: string }
+        Returns: Json
+      }
+      outreach_short_links_get_or_create: {
+        Args: {
+          p_app_key?: string
+          p_expires_at?: string
+          p_page_key?: string
+          p_short_code?: string
+          p_target_path?: string
+          p_target_query?: Json
+          p_utm_campaign?: string
+          p_utm_medium?: string
+          p_utm_source?: string
+        }
+        Returns: Json
       }
       paywall_log_event: {
         Args: { p_event_type: string; p_home_id: string; p_source?: string }
