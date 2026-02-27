@@ -13775,122 +13775,523 @@ CREATE OR REPLACE FUNCTION "public"."outreach_log_event"("p_event" "text", "p_ap
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO ''
     AS $_$
-DECLARE
+declare
   v_event text := lower(trim(p_event));
   v_app_key text := trim(p_app_key);
   v_page_key text := trim(p_page_key);
 
-  -- Default blanks to 'unknown'
-  v_utm_campaign text := COALESCE(NULLIF(trim(p_utm_campaign), ''), 'unknown');
-  v_utm_source   text := COALESCE(NULLIF(lower(trim(p_utm_source)), ''), 'unknown');
-  v_utm_medium   text := COALESCE(NULLIF(lower(trim(p_utm_medium)), ''), 'unknown');
+  v_utm_campaign text := coalesce(nullif(trim(p_utm_campaign), ''), 'unknown');
+  v_utm_source   text := coalesce(nullif(lower(trim(p_utm_source)), ''), 'unknown');
+  v_utm_medium   text := coalesce(nullif(lower(trim(p_utm_medium)), ''), 'unknown');
 
-  -- store is non-null in table; normalize to 'unknown' if omitted/blank
-  v_store text := COALESCE(NULLIF(lower(trim(p_store)), ''), 'unknown');
+  v_store text := coalesce(nullif(lower(trim(p_store)), ''), 'unknown');
 
   v_session_id text := trim(p_session_id);
-  v_country text := NULLIF(upper(trim(p_country)), '');
-  v_ui_locale text := NULLIF(trim(p_ui_locale), '');
+  v_country text := nullif(upper(trim(p_country)), '');
+  v_ui_locale text := nullif(trim(p_ui_locale), '');
 
   v_resolved text := 'unknown';
   v_id uuid;
 
   v_global_bucket timestamptz := date_trunc('minute', now());
   v_session_bucket timestamptz := date_trunc('hour', now());
-BEGIN
-  PERFORM public.api_assert(v_session_id ~ '^anon_[A-Za-z0-9_-]{16,32}$', 'INVALID_SESSION', 'session_id format invalid', '22023');
-  PERFORM public.api_assert(v_event IN ('page_view', 'cta_click'), 'INVALID_EVENT', 'event must be page_view or cta_click', '22023');
-  PERFORM public.api_assert(v_store IN ('web', 'ios_app_store', 'google_play', 'unknown'), 'INVALID_STORE', 'store must be web, ios_app_store, google_play, or unknown', '22023');
+begin
+  perform public.api_assert(
+    v_session_id ~ '^anon_[A-Za-z0-9_-]{16,32}$',
+    'INVALID_SESSION',
+    'session_id format invalid',
+    '22023'
+  );
+  perform public.api_assert(
+    v_event in ('page_view', 'cta_click', 'poll_page_view', 'poll_vote', 'poll_results_view'),
+    'INVALID_EVENT',
+    'event must be page_view, cta_click, poll_page_view, poll_vote, or poll_results_view',
+    '22023'
+  );
+  perform public.api_assert(
+    v_store in ('web', 'ios_app_store', 'google_play', 'unknown'),
+    'INVALID_STORE',
+    'store must be web, ios_app_store, google_play, or unknown',
+    '22023'
+  );
 
-  PERFORM public.api_assert(v_app_key IS NOT NULL AND v_app_key <> '' AND char_length(v_app_key) <= 40, 'INVALID_INPUT', 'app_key is required', '22023');
-  PERFORM public.api_assert(v_page_key IS NOT NULL AND v_page_key <> '' AND char_length(v_page_key) <= 80, 'INVALID_INPUT', 'page_key is required', '22023');
+  perform public.api_assert(
+    v_app_key is not null and v_app_key <> '' and char_length(v_app_key) <= 40,
+    'INVALID_INPUT',
+    'app_key is required',
+    '22023'
+  );
+  perform public.api_assert(
+    v_page_key is not null and v_page_key <> '' and char_length(v_page_key) <= 80,
+    'INVALID_INPUT',
+    'page_key is required',
+    '22023'
+  );
 
-  -- UTMs are always at least 'unknown', so enforce max length only
-  PERFORM public.api_assert(char_length(v_utm_campaign) <= 128, 'INVALID_INPUT', 'utm_campaign too long', '22023');
-  PERFORM public.api_assert(char_length(v_utm_source)   <= 128, 'INVALID_INPUT', 'utm_source too long', '22023');
-  PERFORM public.api_assert(char_length(v_utm_medium)   <= 128, 'INVALID_INPUT', 'utm_medium too long', '22023');
+  perform public.api_assert(char_length(v_utm_campaign) <= 128, 'INVALID_INPUT', 'utm_campaign too long', '22023');
+  perform public.api_assert(char_length(v_utm_source)   <= 128, 'INVALID_INPUT', 'utm_source too long', '22023');
+  perform public.api_assert(char_length(v_utm_medium)   <= 128, 'INVALID_INPUT', 'utm_medium too long', '22023');
+  perform public.api_assert(
+    v_session_id is not null and v_session_id <> '' and char_length(v_session_id) <= 40,
+    'INVALID_INPUT',
+    'session_id is required',
+    '22023'
+  );
 
-  PERFORM public.api_assert(v_session_id IS NOT NULL AND v_session_id <> '' AND char_length(v_session_id) <= 40, 'INVALID_INPUT', 'session_id is required', '22023');
+  if v_country is not null and v_country !~ '^[A-Z]{2}$' then
+    v_country := null;
+  end if;
 
-  -- Normalize best-effort country + locale
-  IF v_country IS NOT NULL AND v_country !~ '^[A-Z]{2}$' THEN
-    v_country := NULL;
-  END IF;
+  if v_ui_locale is not null and (length(v_ui_locale) < 2 or length(v_ui_locale) > 35 or v_ui_locale ~ '\s') then
+    v_ui_locale := null;
+  end if;
 
-  IF v_ui_locale IS NOT NULL AND (length(v_ui_locale) < 2 OR length(v_ui_locale) > 35 OR v_ui_locale ~ '\s') THEN
-    v_ui_locale := NULL;
-  END IF;
-
-  -- Rate limits: stable keys; bucket_start defines the window
-  PERFORM public.api_assert(
+  perform public.api_assert(
     public._outreach_rate_limit_bucketed('global', v_global_bucket, 500),
     'RATE_LIMIT_GLOBAL',
     'Global outreach logging rate limit exceeded',
     '42901'
   );
 
-  PERFORM public.api_assert(
+  perform public.api_assert(
     public._outreach_rate_limit_bucketed('session:' || v_session_id, v_session_bucket, 100),
     'RATE_LIMIT_SESSION',
     'Session outreach logging rate limit exceeded',
     '42901'
   );
 
-  -- Resolve canonical source: direct match (active) then alias (alias active + source active), else unknown
-  SELECT s.source_id
-    INTO v_resolved
-    FROM public.outreach_sources s
-   WHERE s.source_id = v_utm_source
-     AND s.active = TRUE
-   LIMIT 1;
+  select s.source_id
+    into v_resolved
+    from public.outreach_sources s
+   where s.source_id = v_utm_source
+     and s.active = true
+   limit 1;
 
-  IF v_resolved IS NULL THEN
-    SELECT s.source_id
-      INTO v_resolved
-      FROM public.outreach_source_aliases a
-      JOIN public.outreach_sources s ON s.source_id = a.source_id
-     WHERE a.alias = v_utm_source
-       AND a.active = TRUE
-       AND s.active = TRUE
-     LIMIT 1;
-  END IF;
+  if v_resolved is null then
+    select s.source_id
+      into v_resolved
+      from public.outreach_source_aliases a
+      join public.outreach_sources s on s.source_id = a.source_id
+     where a.alias = v_utm_source
+       and a.active = true
+       and s.active = true
+     limit 1;
+  end if;
 
-  IF v_resolved IS NULL THEN
+  if v_resolved is null then
     v_resolved := 'unknown';
-  END IF;
+  end if;
 
-  -- Idempotency: insert; if another request inserted same client_event_id concurrently, return that row
-  BEGIN
-    INSERT INTO public.outreach_event_logs (
+  begin
+    insert into public.outreach_event_logs (
       event, app_key, page_key, utm_campaign, utm_source, utm_medium,
       source_id_resolved, store, session_id, country, ui_locale, client_event_id
-    ) VALUES (
+    ) values (
       v_event, v_app_key, v_page_key, v_utm_campaign, v_utm_source, v_utm_medium,
       v_resolved, v_store, v_session_id, v_country, v_ui_locale, p_client_event_id
     )
-    RETURNING id INTO v_id;
+    returning id into v_id;
+  exception when unique_violation then
+    if p_client_event_id is not null then
+      select id
+        into v_id
+        from public.outreach_event_logs
+       where client_event_id = p_client_event_id
+       limit 1;
 
-  EXCEPTION WHEN unique_violation THEN
-    IF p_client_event_id IS NOT NULL THEN
-      SELECT id INTO v_id
-        FROM public.outreach_event_logs
-       WHERE client_event_id = p_client_event_id
-       LIMIT 1;
+      if v_id is not null then
+        return jsonb_build_object('ok', true, 'id', v_id);
+      end if;
+    end if;
 
-      IF v_id IS NOT NULL THEN
-        RETURN jsonb_build_object('ok', true, 'id', v_id);
-      END IF;
-    END IF;
+    raise;
+  end;
 
-    RAISE;
-  END;
-
-  RETURN jsonb_build_object('ok', true, 'id', v_id);
-END;
+  return jsonb_build_object('ok', true, 'id', v_id);
+end;
 $_$;
 
 
 ALTER FUNCTION "public"."outreach_log_event"("p_event" "text", "p_app_key" "text", "p_page_key" "text", "p_utm_campaign" "text", "p_utm_source" "text", "p_utm_medium" "text", "p_session_id" "text", "p_store" "text", "p_country" "text", "p_ui_locale" "text", "p_client_event_id" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."outreach_poll_get_v1"("p_app_key" "text", "p_page_key" "text") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+declare
+  v_app_key text := trim(coalesce(p_app_key, ''));
+  v_page_key text := trim(coalesce(p_page_key, ''));
+  v_poll public.outreach_polls%rowtype;
+  v_options jsonb;
+begin
+  perform public.api_assert(
+    v_app_key <> '' and char_length(v_app_key) <= 40,
+    'INVALID_INPUT',
+    'app_key is required',
+    '22023'
+  );
+
+  perform public.api_assert(
+    v_page_key <> '' and char_length(v_page_key) <= 80,
+    'INVALID_INPUT',
+    'page_key is required',
+    '22023'
+  );
+
+  select *
+    into v_poll
+    from public.outreach_polls p
+   where p.app_key = v_app_key
+     and p.page_key = v_page_key
+     and p.active = true
+   limit 1;
+
+  if not found then
+    return jsonb_build_object('ok', false, 'error', 'POLL_NOT_FOUND');
+  end if;
+
+  select coalesce(
+           jsonb_agg(
+             jsonb_build_object(
+               'id', o.id,
+               'option_key', o.option_key,
+               'label', o.label,
+               'position', o.position
+             )
+             order by o.position asc, o.id asc
+           ),
+           '[]'::jsonb
+         )
+    into v_options
+    from public.outreach_poll_options o
+   where o.poll_id = v_poll.id
+     and o.active = true;
+
+  return jsonb_build_object(
+    'ok', true,
+    'poll', jsonb_build_object(
+      'id', v_poll.id,
+      'app_key', v_poll.app_key,
+      'page_key', v_poll.page_key,
+      'title', v_poll.title,
+      'question', v_poll.question,
+      'description', v_poll.description
+    ),
+    'options', v_options
+  );
+end;
+$$;
+
+
+ALTER FUNCTION "public"."outreach_poll_get_v1"("p_app_key" "text", "p_page_key" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."outreach_poll_vote_submit_v1"("p_short_code" "text", "p_option_key" "text", "p_session_id" "text", "p_store" "text" DEFAULT 'unknown'::"text", "p_client_vote_id" "uuid" DEFAULT NULL::"uuid", "p_country" "text" DEFAULT NULL::"text", "p_ui_locale" "text" DEFAULT NULL::"text") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $_$
+declare
+  v_short_code text := lower(trim(coalesce(p_short_code, '')));
+  v_option_key text := lower(trim(coalesce(p_option_key, '')));
+  v_session_id text := trim(coalesce(p_session_id, ''));
+  v_store text := coalesce(nullif(lower(trim(p_store)), ''), 'unknown');
+  v_country text := nullif(upper(trim(p_country)), '');
+  v_ui_locale text := nullif(trim(p_ui_locale), '');
+
+  v_short_link public.outreach_short_links%rowtype;
+  v_poll public.outreach_polls%rowtype;
+  v_option public.outreach_poll_options%rowtype;
+  v_vote public.outreach_poll_votes%rowtype;
+  v_existing_vote public.outreach_poll_votes%rowtype;
+  v_counts jsonb;
+  v_total_votes bigint;
+begin
+  perform public.api_assert(
+    v_short_code ~ '^[a-z0-9_-]{4,24}$',
+    'INVALID_SHORT_CODE',
+    'short_code must match ^[a-z0-9_-]{4,24}$',
+    '22023'
+  );
+
+  perform public.api_assert(
+    v_option_key ~ '^[a-z0-9_]{1,40}$',
+    'INVALID_OPTION',
+    'option_key format invalid',
+    '22023'
+  );
+
+  perform public.api_assert(
+    v_session_id ~ '^anon_[A-Za-z0-9_-]{16,32}$',
+    'INVALID_SESSION',
+    'session_id format invalid',
+    '22023'
+  );
+
+  perform public.api_assert(
+    v_store in ('web', 'ios_app_store', 'google_play', 'unknown'),
+    'INVALID_STORE',
+    'store must be web, ios_app_store, google_play, or unknown',
+    '22023'
+  );
+
+  if v_country is not null and v_country !~ '^[A-Z]{2}$' then
+    v_country := null;
+  end if;
+
+  if v_ui_locale is not null and (length(v_ui_locale) < 2 or length(v_ui_locale) > 35 or v_ui_locale ~ '\s') then
+    v_ui_locale := null;
+  end if;
+
+  if p_client_vote_id is not null then
+    select *
+      into v_existing_vote
+      from public.outreach_poll_votes v
+     where v.client_vote_id = p_client_vote_id
+     limit 1;
+
+    if found then
+      select o.option_key
+        into v_option_key
+        from public.outreach_poll_options o
+       where o.id = v_existing_vote.option_id
+       limit 1;
+
+      select
+        coalesce(sum(x.vote_count), 0)::bigint,
+        coalesce(
+          jsonb_agg(
+            jsonb_build_object('option_key', x.option_key, 'vote_count', x.vote_count)
+            order by x.position asc, x.option_id asc
+          ),
+          '[]'::jsonb
+        )
+      into v_total_votes, v_counts
+      from (
+        select
+          o.id as option_id,
+          o.option_key,
+          o.position,
+          count(v.id)::bigint as vote_count
+        from public.outreach_poll_options o
+        left join public.outreach_poll_votes v
+          on v.option_id = o.id
+         and v.poll_id = v_existing_vote.poll_id
+        where o.poll_id = v_existing_vote.poll_id
+          and o.active = true
+        group by o.id, o.option_key, o.position
+      ) x;
+
+      return jsonb_build_object(
+        'ok', true,
+        'poll_id', v_existing_vote.poll_id,
+        'selected_option_key', v_option_key,
+        'results', jsonb_build_object(
+          'total_votes', v_total_votes,
+          'option_counts', v_counts
+        )
+      );
+    end if;
+  end if;
+
+  select s.*
+    into v_short_link
+    from public.outreach_short_links s
+    join public.outreach_short_links_effective l on l.id = s.id
+   where l.short_code = v_short_code::public.citext
+     and l.effective_active = true
+   limit 1;
+
+  if not found then
+    select l.*
+      into v_short_link
+      from public.outreach_short_links l
+     where l.short_code = v_short_code::public.citext
+     limit 1;
+
+    if not found then
+      perform public.api_error('SHORT_CODE_NOT_FOUND', 'short_code was not found', 'P0002');
+    else
+      perform public.api_error('SHORT_CODE_INACTIVE', 'short_code is inactive or expired', 'P0001');
+    end if;
+  end if;
+
+  select p.*
+    into v_poll
+    from public.outreach_polls p
+   where p.app_key = v_short_link.app_key
+     and p.page_key = v_short_link.page_key
+     and p.active = true
+   limit 1;
+
+  if not found then
+    perform public.api_error('POLL_NOT_FOUND', 'No active poll found for short_code destination', 'P0002');
+  end if;
+
+  select o.*
+    into v_option
+    from public.outreach_poll_options o
+   where o.poll_id = v_poll.id
+     and o.option_key = v_option_key
+     and o.active = true
+   limit 1;
+
+  if not found then
+    perform public.api_error('INVALID_OPTION', 'option_key is not valid for poll', '22023');
+  end if;
+
+  begin
+    insert into public.outreach_poll_votes (
+      poll_id,
+      option_id,
+      session_id,
+      client_vote_id,
+      short_link_id,
+      page_key,
+      source_id_resolved,
+      utm_campaign,
+      utm_source,
+      utm_medium,
+      store,
+      country,
+      ui_locale
+    ) values (
+      v_poll.id,
+      v_option.id,
+      v_session_id,
+      p_client_vote_id,
+      v_short_link.id,
+      v_short_link.page_key,
+      v_short_link.source_id_resolved,
+      v_short_link.utm_campaign,
+      v_short_link.utm_source,
+      v_short_link.utm_medium,
+      v_store,
+      v_country,
+      v_ui_locale
+    )
+    on conflict (poll_id, session_id) do update
+      set option_id = excluded.option_id,
+          client_vote_id = coalesce(public.outreach_poll_votes.client_vote_id, excluded.client_vote_id),
+          short_link_id = excluded.short_link_id,
+          page_key = excluded.page_key,
+          source_id_resolved = excluded.source_id_resolved,
+          utm_campaign = excluded.utm_campaign,
+          utm_source = excluded.utm_source,
+          utm_medium = excluded.utm_medium,
+          store = excluded.store,
+          country = excluded.country,
+          ui_locale = excluded.ui_locale,
+          updated_at = now()
+    returning * into v_vote;
+  exception when unique_violation then
+    if p_client_vote_id is not null then
+      select *
+        into v_vote
+        from public.outreach_poll_votes v
+       where v.client_vote_id = p_client_vote_id
+       limit 1;
+
+      if found then
+        select o.option_key
+          into v_option_key
+          from public.outreach_poll_options o
+         where o.id = v_vote.option_id
+         limit 1;
+
+        select
+          coalesce(sum(x.vote_count), 0)::bigint,
+          coalesce(
+            jsonb_agg(
+              jsonb_build_object('option_key', x.option_key, 'vote_count', x.vote_count)
+              order by x.position asc, x.option_id asc
+            ),
+            '[]'::jsonb
+          )
+        into v_total_votes, v_counts
+        from (
+          select
+            o.id as option_id,
+            o.option_key,
+            o.position,
+            count(v2.id)::bigint as vote_count
+          from public.outreach_poll_options o
+          left join public.outreach_poll_votes v2
+            on v2.option_id = o.id
+           and v2.poll_id = v_vote.poll_id
+          where o.poll_id = v_vote.poll_id
+            and o.active = true
+          group by o.id, o.option_key, o.position
+        ) x;
+
+        return jsonb_build_object(
+          'ok', true,
+          'poll_id', v_vote.poll_id,
+          'selected_option_key', v_option_key,
+          'results', jsonb_build_object(
+            'total_votes', v_total_votes,
+            'option_counts', v_counts
+          )
+        );
+      end if;
+    end if;
+
+    raise;
+  end;
+
+  perform public.outreach_log_event(
+    'poll_vote',
+    v_short_link.app_key,
+    v_short_link.page_key,
+    v_short_link.utm_campaign,
+    v_short_link.utm_source,
+    v_short_link.utm_medium,
+    v_session_id,
+    v_store,
+    v_country,
+    v_ui_locale,
+    null
+  );
+
+  select
+    coalesce(sum(x.vote_count), 0)::bigint,
+    coalesce(
+      jsonb_agg(
+        jsonb_build_object('option_key', x.option_key, 'vote_count', x.vote_count)
+        order by x.position asc, x.option_id asc
+      ),
+      '[]'::jsonb
+    )
+  into v_total_votes, v_counts
+  from (
+    select
+      o.id as option_id,
+      o.option_key,
+      o.position,
+      count(v.id)::bigint as vote_count
+    from public.outreach_poll_options o
+    left join public.outreach_poll_votes v
+      on v.option_id = o.id
+     and v.poll_id = v_poll.id
+    where o.poll_id = v_poll.id
+      and o.active = true
+    group by o.id, o.option_key, o.position
+  ) x;
+
+  return jsonb_build_object(
+    'ok', true,
+    'poll_id', v_poll.id,
+    'selected_option_key', v_option.option_key,
+    'results', jsonb_build_object(
+      'total_votes', v_total_votes,
+      'option_counts', v_counts
+    )
+  );
+end;
+$_$;
+
+
+ALTER FUNCTION "public"."outreach_poll_vote_submit_v1"("p_short_code" "text", "p_option_key" "text", "p_session_id" "text", "p_store" "text", "p_client_vote_id" "uuid", "p_country" "text", "p_ui_locale" "text") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."outreach_rate_limits_cleanup"("p_keep" interval DEFAULT '14 days'::interval) RETURNS integer
@@ -17841,7 +18242,7 @@ CREATE TABLE IF NOT EXISTS "public"."outreach_event_logs" (
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     CONSTRAINT "chk_outreach_app_key" CHECK ((("char_length"("app_key") >= 1) AND ("char_length"("app_key") <= 40))),
     CONSTRAINT "chk_outreach_campaign" CHECK ((("char_length"("utm_campaign") >= 1) AND ("char_length"("utm_campaign") <= 128))),
-    CONSTRAINT "chk_outreach_event_type" CHECK (("event" = ANY (ARRAY['page_view'::"text", 'cta_click'::"text"]))),
+    CONSTRAINT "chk_outreach_event_type" CHECK (("event" = ANY (ARRAY['page_view'::"text", 'cta_click'::"text", 'poll_page_view'::"text", 'poll_vote'::"text", 'poll_results_view'::"text"]))),
     CONSTRAINT "chk_outreach_medium" CHECK ((("char_length"("utm_medium") >= 1) AND ("char_length"("utm_medium") <= 128))),
     CONSTRAINT "chk_outreach_page_key" CHECK ((("char_length"("page_key") >= 1) AND ("char_length"("page_key") <= 80))),
     CONSTRAINT "chk_outreach_session" CHECK ((("char_length"("session_id") >= 1) AND ("char_length"("session_id") <= 40))),
@@ -17857,7 +18258,7 @@ COMMENT ON TABLE "public"."outreach_event_logs" IS 'Append-only outreach events 
 
 
 
-COMMENT ON COLUMN "public"."outreach_event_logs"."event" IS 'Allowed: page_view, cta_click.';
+COMMENT ON COLUMN "public"."outreach_event_logs"."event" IS 'Allowed: page_view, cta_click, poll_page_view, poll_vote, poll_results_view.';
 
 
 
@@ -17899,6 +18300,170 @@ COMMENT ON COLUMN "public"."outreach_event_logs"."country" IS 'Optional ISO 3166
 
 COMMENT ON COLUMN "public"."outreach_event_logs"."ui_locale" IS 'Optional BCP-47 locale.';
 
+
+
+CREATE TABLE IF NOT EXISTS "public"."outreach_poll_options" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "poll_id" "uuid" NOT NULL,
+    "option_key" "text" NOT NULL,
+    "label" "text" NOT NULL,
+    "position" integer NOT NULL,
+    "active" boolean DEFAULT true NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "chk_outreach_poll_options_label_len" CHECK ((("char_length"(TRIM(BOTH FROM "label")) >= 1) AND ("char_length"(TRIM(BOTH FROM "label")) <= 120))),
+    CONSTRAINT "chk_outreach_poll_options_option_key" CHECK (("option_key" ~ '^[a-z0-9_]{1,40}$'::"text")),
+    CONSTRAINT "chk_outreach_poll_options_position" CHECK (("position" >= 1))
+);
+
+
+ALTER TABLE "public"."outreach_poll_options" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."outreach_poll_options" IS 'Poll options with deterministic ordering by position.';
+
+
+
+CREATE TABLE IF NOT EXISTS "public"."outreach_poll_votes" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "poll_id" "uuid" NOT NULL,
+    "option_id" "uuid" NOT NULL,
+    "session_id" "text" NOT NULL,
+    "client_vote_id" "uuid",
+    "short_link_id" "uuid" NOT NULL,
+    "page_key" "text" NOT NULL,
+    "source_id_resolved" "text" NOT NULL,
+    "utm_campaign" "text" NOT NULL,
+    "utm_source" "text" NOT NULL,
+    "utm_medium" "text" NOT NULL,
+    "store" "text" NOT NULL,
+    "country" "text",
+    "ui_locale" "text",
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "chk_outreach_poll_votes_campaign_len" CHECK ((("char_length"(TRIM(BOTH FROM "utm_campaign")) >= 1) AND ("char_length"(TRIM(BOTH FROM "utm_campaign")) <= 128))),
+    CONSTRAINT "chk_outreach_poll_votes_country" CHECK ((("country" IS NULL) OR ("country" ~ '^[A-Z]{2}$'::"text"))),
+    CONSTRAINT "chk_outreach_poll_votes_medium_len" CHECK ((("char_length"(TRIM(BOTH FROM "utm_medium")) >= 1) AND ("char_length"(TRIM(BOTH FROM "utm_medium")) <= 128))),
+    CONSTRAINT "chk_outreach_poll_votes_page_key_len" CHECK ((("char_length"(TRIM(BOTH FROM "page_key")) >= 1) AND ("char_length"(TRIM(BOTH FROM "page_key")) <= 80))),
+    CONSTRAINT "chk_outreach_poll_votes_session" CHECK (("session_id" ~ '^anon_[A-Za-z0-9_-]{16,32}$'::"text")),
+    CONSTRAINT "chk_outreach_poll_votes_source_len" CHECK ((("char_length"(TRIM(BOTH FROM "utm_source")) >= 1) AND ("char_length"(TRIM(BOTH FROM "utm_source")) <= 128))),
+    CONSTRAINT "chk_outreach_poll_votes_store" CHECK (("store" = ANY (ARRAY['web'::"text", 'ios_app_store'::"text", 'google_play'::"text", 'unknown'::"text"]))),
+    CONSTRAINT "chk_outreach_poll_votes_ui_locale" CHECK ((("ui_locale" IS NULL) OR ((("length"("ui_locale") >= 2) AND ("length"("ui_locale") <= 35)) AND ("ui_locale" !~ '\s'::"text"))))
+);
+
+
+ALTER TABLE "public"."outreach_poll_votes" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."outreach_poll_votes" IS 'One-net-vote-per-session poll votes with short-link attribution snapshot.';
+
+
+
+CREATE TABLE IF NOT EXISTS "public"."outreach_polls" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "app_key" "text" NOT NULL,
+    "page_key" "text" NOT NULL,
+    "title" "text" NOT NULL,
+    "question" "text" NOT NULL,
+    "description" "text",
+    "active" boolean DEFAULT true NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "chk_outreach_polls_app_key_len" CHECK ((("char_length"(TRIM(BOTH FROM "app_key")) >= 1) AND ("char_length"(TRIM(BOTH FROM "app_key")) <= 40))),
+    CONSTRAINT "chk_outreach_polls_page_key_len" CHECK ((("char_length"(TRIM(BOTH FROM "page_key")) >= 1) AND ("char_length"(TRIM(BOTH FROM "page_key")) <= 80))),
+    CONSTRAINT "chk_outreach_polls_question_len" CHECK ((("char_length"(TRIM(BOTH FROM "question")) >= 1) AND ("char_length"(TRIM(BOTH FROM "question")) <= 400))),
+    CONSTRAINT "chk_outreach_polls_title_len" CHECK ((("char_length"(TRIM(BOTH FROM "title")) >= 1) AND ("char_length"(TRIM(BOTH FROM "title")) <= 160)))
+);
+
+
+ALTER TABLE "public"."outreach_polls" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."outreach_polls" IS 'Poll definitions keyed by app_key + page_key.';
+
+
+
+CREATE OR REPLACE VIEW "public"."outreach_poll_results_uc_v1" AS
+ WITH "base" AS (
+         SELECT "p"."id" AS "poll_id",
+            "p"."page_key",
+            "o"."id" AS "option_id",
+            "o"."option_key",
+            "o"."position"
+           FROM ("public"."outreach_polls" "p"
+             JOIN "public"."outreach_poll_options" "o" ON (("o"."poll_id" = "p"."id")))
+          WHERE (("p"."active" = true) AND ("o"."active" = true))
+        ), "uc_counts" AS (
+         SELECT "v"."poll_id",
+            "v"."option_id",
+            "count"(*) AS "vote_count"
+           FROM "public"."outreach_poll_votes" "v"
+          WHERE ("v"."source_id_resolved" = 'uc'::"text")
+          GROUP BY "v"."poll_id", "v"."option_id"
+        ), "uc_totals" AS (
+         SELECT "v"."poll_id",
+            "count"(*) AS "total_votes"
+           FROM "public"."outreach_poll_votes" "v"
+          WHERE ("v"."source_id_resolved" = 'uc'::"text")
+          GROUP BY "v"."poll_id"
+        )
+ SELECT "b"."page_key",
+    "b"."option_key",
+    COALESCE("c"."vote_count", (0)::bigint) AS "vote_count",
+    COALESCE("t"."total_votes", (0)::bigint) AS "total_votes"
+   FROM (("base" "b"
+     LEFT JOIN "uc_counts" "c" ON ((("c"."poll_id" = "b"."poll_id") AND ("c"."option_id" = "b"."option_id"))))
+     LEFT JOIN "uc_totals" "t" ON (("t"."poll_id" = "b"."poll_id")))
+  ORDER BY "b"."page_key", "b"."position", "b"."option_id";
+
+
+ALTER VIEW "public"."outreach_poll_results_uc_v1" OWNER TO "postgres";
+
+
+CREATE OR REPLACE VIEW "public"."outreach_poll_totals_uc_v1" AS
+ SELECT "p"."page_key",
+    "count"("v"."id") AS "total_votes",
+    "max"("v"."created_at") AS "last_vote_at"
+   FROM ("public"."outreach_polls" "p"
+     LEFT JOIN "public"."outreach_poll_votes" "v" ON ((("v"."poll_id" = "p"."id") AND ("v"."source_id_resolved" = 'uc'::"text"))))
+  WHERE ("p"."active" = true)
+  GROUP BY "p"."page_key";
+
+
+ALTER VIEW "public"."outreach_poll_totals_uc_v1" OWNER TO "postgres";
+
+
+CREATE OR REPLACE VIEW "public"."outreach_polls_overview_v1" AS
+ WITH "all_votes" AS (
+         SELECT "v"."poll_id",
+            "count"(*) AS "total_votes_all",
+            "max"("v"."created_at") AS "last_vote_at_all"
+           FROM "public"."outreach_poll_votes" "v"
+          GROUP BY "v"."poll_id"
+        ), "uc_votes" AS (
+         SELECT "v"."poll_id",
+            "count"(*) AS "total_votes_uc",
+            "max"("v"."created_at") AS "last_vote_at_uc"
+           FROM "public"."outreach_poll_votes" "v"
+          WHERE ("v"."source_id_resolved" = 'uc'::"text")
+          GROUP BY "v"."poll_id"
+        )
+ SELECT "p"."id",
+    "p"."app_key",
+    "p"."page_key",
+    "p"."title",
+    "p"."question",
+    "p"."description",
+    "p"."active",
+    COALESCE("a"."total_votes_all", (0)::bigint) AS "total_votes_all",
+    COALESCE("u"."total_votes_uc", (0)::bigint) AS "total_votes_uc",
+    GREATEST(COALESCE("a"."last_vote_at_all", "p"."updated_at"), COALESCE("u"."last_vote_at_uc", "p"."updated_at")) AS "last_activity_at"
+   FROM (("public"."outreach_polls" "p"
+     LEFT JOIN "all_votes" "a" ON (("a"."poll_id" = "p"."id")))
+     LEFT JOIN "uc_votes" "u" ON (("u"."poll_id" = "p"."id")));
+
+
+ALTER VIEW "public"."outreach_polls_overview_v1" OWNER TO "postgres";
 
 
 CREATE TABLE IF NOT EXISTS "public"."outreach_rate_limits" (
@@ -18725,6 +19290,21 @@ ALTER TABLE ONLY "public"."outreach_event_logs"
 
 
 
+ALTER TABLE ONLY "public"."outreach_poll_options"
+    ADD CONSTRAINT "outreach_poll_options_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."outreach_poll_votes"
+    ADD CONSTRAINT "outreach_poll_votes_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."outreach_polls"
+    ADD CONSTRAINT "outreach_polls_pkey" PRIMARY KEY ("id");
+
+
+
 ALTER TABLE ONLY "public"."outreach_short_links"
     ADD CONSTRAINT "outreach_short_links_pkey" PRIMARY KEY ("id");
 
@@ -18917,6 +19497,31 @@ ALTER TABLE ONLY "public"."device_tokens"
 
 ALTER TABLE ONLY "public"."home_mood_entries"
     ADD CONSTRAINT "uq_home_mood_entries_user_week" UNIQUE ("user_id", "iso_week_year", "iso_week");
+
+
+
+ALTER TABLE ONLY "public"."outreach_poll_options"
+    ADD CONSTRAINT "uq_outreach_poll_options_poll_id_id" UNIQUE ("poll_id", "id");
+
+
+
+ALTER TABLE ONLY "public"."outreach_poll_options"
+    ADD CONSTRAINT "uq_outreach_poll_options_poll_option_key" UNIQUE ("poll_id", "option_key");
+
+
+
+ALTER TABLE ONLY "public"."outreach_poll_options"
+    ADD CONSTRAINT "uq_outreach_poll_options_poll_position" UNIQUE ("poll_id", "position");
+
+
+
+ALTER TABLE ONLY "public"."outreach_poll_votes"
+    ADD CONSTRAINT "uq_outreach_poll_votes_poll_session" UNIQUE ("poll_id", "session_id");
+
+
+
+ALTER TABLE ONLY "public"."outreach_polls"
+    ADD CONSTRAINT "uq_outreach_polls_app_page" UNIQUE ("app_key", "page_key");
 
 
 
@@ -19117,6 +19722,22 @@ CREATE INDEX "idx_outreach_event_logs_source_resolved_created_at" ON "public"."o
 
 
 
+CREATE INDEX "idx_outreach_poll_votes_option_id" ON "public"."outreach_poll_votes" USING "btree" ("option_id");
+
+
+
+CREATE INDEX "idx_outreach_poll_votes_page_key_created_at" ON "public"."outreach_poll_votes" USING "btree" ("page_key", "created_at" DESC);
+
+
+
+CREATE INDEX "idx_outreach_poll_votes_poll_id" ON "public"."outreach_poll_votes" USING "btree" ("poll_id");
+
+
+
+CREATE INDEX "idx_outreach_poll_votes_source_resolved_created_at" ON "public"."outreach_poll_votes" USING "btree" ("source_id_resolved", "created_at" DESC);
+
+
+
 CREATE INDEX "idx_outreach_rate_limits_bucket" ON "public"."outreach_rate_limits" USING "btree" ("bucket_start");
 
 
@@ -19281,6 +19902,10 @@ CREATE UNIQUE INDEX "uq_outreach_event_logs_client_event_id" ON "public"."outrea
 
 
 
+CREATE UNIQUE INDEX "uq_outreach_poll_votes_client_vote_id" ON "public"."outreach_poll_votes" USING "btree" ("client_vote_id") WHERE ("client_vote_id" IS NOT NULL);
+
+
+
 CREATE UNIQUE INDEX "uq_outreach_short_links_destination_fingerprint" ON "public"."outreach_short_links" USING "btree" ("destination_fingerprint");
 
 
@@ -19394,6 +20019,18 @@ CREATE OR REPLACE TRIGGER "trg_leads_touch_updated_at" BEFORE UPDATE ON "public"
 
 
 CREATE OR REPLACE TRIGGER "trg_outreach_aliases_protect_unknown" BEFORE DELETE OR UPDATE ON "public"."outreach_source_aliases" FOR EACH ROW EXECUTE FUNCTION "public"."_outreach_aliases_protect_unknown"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_outreach_poll_options_touch_updated_at" BEFORE UPDATE ON "public"."outreach_poll_options" FOR EACH ROW EXECUTE FUNCTION "public"."_touch_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_outreach_poll_votes_touch_updated_at" BEFORE UPDATE ON "public"."outreach_poll_votes" FOR EACH ROW EXECUTE FUNCTION "public"."_touch_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_outreach_polls_touch_updated_at" BEFORE UPDATE ON "public"."outreach_polls" FOR EACH ROW EXECUTE FUNCTION "public"."_touch_updated_at"();
 
 
 
@@ -19577,6 +20214,11 @@ ALTER TABLE ONLY "public"."notification_sends"
 
 ALTER TABLE ONLY "public"."outreach_event_logs"
     ADD CONSTRAINT "fk_outreach_event_logs_source_resolved" FOREIGN KEY ("source_id_resolved") REFERENCES "public"."outreach_sources"("source_id");
+
+
+
+ALTER TABLE ONLY "public"."outreach_poll_votes"
+    ADD CONSTRAINT "fk_outreach_poll_votes_poll_option_membership" FOREIGN KEY ("poll_id", "option_id") REFERENCES "public"."outreach_poll_options"("poll_id", "id");
 
 
 
@@ -19827,6 +20469,26 @@ ALTER TABLE ONLY "public"."notification_preferences"
 
 ALTER TABLE ONLY "public"."notification_sends"
     ADD CONSTRAINT "notification_sends_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."profiles"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."outreach_poll_options"
+    ADD CONSTRAINT "outreach_poll_options_poll_id_fkey" FOREIGN KEY ("poll_id") REFERENCES "public"."outreach_polls"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."outreach_poll_votes"
+    ADD CONSTRAINT "outreach_poll_votes_poll_id_fkey" FOREIGN KEY ("poll_id") REFERENCES "public"."outreach_polls"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."outreach_poll_votes"
+    ADD CONSTRAINT "outreach_poll_votes_short_link_id_fkey" FOREIGN KEY ("short_link_id") REFERENCES "public"."outreach_short_links"("id");
+
+
+
+ALTER TABLE ONLY "public"."outreach_poll_votes"
+    ADD CONSTRAINT "outreach_poll_votes_source_id_resolved_fkey" FOREIGN KEY ("source_id_resolved") REFERENCES "public"."outreach_sources"("source_id");
 
 
 
@@ -20118,6 +20780,15 @@ ALTER TABLE "public"."notification_sends" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "public"."outreach_event_logs" ENABLE ROW LEVEL SECURITY;
 
 
+ALTER TABLE "public"."outreach_poll_options" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."outreach_poll_votes" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."outreach_polls" ENABLE ROW LEVEL SECURITY;
+
+
 ALTER TABLE "public"."outreach_rate_limits" ENABLE ROW LEVEL SECURITY;
 
 
@@ -20193,6 +20864,18 @@ ALTER TABLE "public"."rewrite_requests" ENABLE ROW LEVEL SECURITY;
 
 
 CREATE POLICY "service_role_all_outreach_aliases" ON "public"."outreach_source_aliases" TO "service_role" USING (true) WITH CHECK (true);
+
+
+
+CREATE POLICY "service_role_all_outreach_poll_options" ON "public"."outreach_poll_options" TO "service_role" USING (true) WITH CHECK (true);
+
+
+
+CREATE POLICY "service_role_all_outreach_poll_votes" ON "public"."outreach_poll_votes" TO "service_role" USING (true) WITH CHECK (true);
+
+
+
+CREATE POLICY "service_role_all_outreach_polls" ON "public"."outreach_polls" TO "service_role" USING (true) WITH CHECK (true);
 
 
 
@@ -22925,6 +23608,20 @@ GRANT ALL ON FUNCTION "public"."outreach_log_event"("p_event" "text", "p_app_key
 
 
 
+REVOKE ALL ON FUNCTION "public"."outreach_poll_get_v1"("p_app_key" "text", "p_page_key" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."outreach_poll_get_v1"("p_app_key" "text", "p_page_key" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."outreach_poll_get_v1"("p_app_key" "text", "p_page_key" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."outreach_poll_get_v1"("p_app_key" "text", "p_page_key" "text") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."outreach_poll_vote_submit_v1"("p_short_code" "text", "p_option_key" "text", "p_session_id" "text", "p_store" "text", "p_client_vote_id" "uuid", "p_country" "text", "p_ui_locale" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."outreach_poll_vote_submit_v1"("p_short_code" "text", "p_option_key" "text", "p_session_id" "text", "p_store" "text", "p_client_vote_id" "uuid", "p_country" "text", "p_ui_locale" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."outreach_poll_vote_submit_v1"("p_short_code" "text", "p_option_key" "text", "p_session_id" "text", "p_store" "text", "p_client_vote_id" "uuid", "p_country" "text", "p_ui_locale" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."outreach_poll_vote_submit_v1"("p_short_code" "text", "p_option_key" "text", "p_session_id" "text", "p_store" "text", "p_client_vote_id" "uuid", "p_country" "text", "p_ui_locale" "text") TO "service_role";
+
+
+
 REVOKE ALL ON FUNCTION "public"."outreach_rate_limits_cleanup"("p_keep" interval) FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."outreach_rate_limits_cleanup"("p_keep" interval) TO "anon";
 GRANT ALL ON FUNCTION "public"."outreach_rate_limits_cleanup"("p_keep" interval) TO "authenticated";
@@ -23540,6 +24237,36 @@ GRANT ALL ON TABLE "public"."notification_sends" TO "service_role";
 
 
 GRANT ALL ON TABLE "public"."outreach_event_logs" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."outreach_poll_options" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."outreach_poll_votes" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."outreach_polls" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."outreach_poll_results_uc_v1" TO "anon";
+GRANT ALL ON TABLE "public"."outreach_poll_results_uc_v1" TO "authenticated";
+GRANT ALL ON TABLE "public"."outreach_poll_results_uc_v1" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."outreach_poll_totals_uc_v1" TO "anon";
+GRANT ALL ON TABLE "public"."outreach_poll_totals_uc_v1" TO "authenticated";
+GRANT ALL ON TABLE "public"."outreach_poll_totals_uc_v1" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."outreach_polls_overview_v1" TO "anon";
+GRANT ALL ON TABLE "public"."outreach_polls_overview_v1" TO "authenticated";
+GRANT ALL ON TABLE "public"."outreach_polls_overview_v1" TO "service_role";
 
 
 

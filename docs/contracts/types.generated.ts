@@ -2052,6 +2052,190 @@ export type Database = {
           },
         ]
       }
+      outreach_poll_options: {
+        Row: {
+          active: boolean
+          created_at: string
+          id: string
+          label: string
+          option_key: string
+          poll_id: string
+          position: number
+          updated_at: string
+        }
+        Insert: {
+          active?: boolean
+          created_at?: string
+          id?: string
+          label: string
+          option_key: string
+          poll_id: string
+          position: number
+          updated_at?: string
+        }
+        Update: {
+          active?: boolean
+          created_at?: string
+          id?: string
+          label?: string
+          option_key?: string
+          poll_id?: string
+          position?: number
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "outreach_poll_options_poll_id_fkey"
+            columns: ["poll_id"]
+            isOneToOne: false
+            referencedRelation: "outreach_polls"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "outreach_poll_options_poll_id_fkey"
+            columns: ["poll_id"]
+            isOneToOne: false
+            referencedRelation: "outreach_polls_overview_v1"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      outreach_poll_votes: {
+        Row: {
+          client_vote_id: string | null
+          country: string | null
+          created_at: string
+          id: string
+          option_id: string
+          page_key: string
+          poll_id: string
+          session_id: string
+          short_link_id: string
+          source_id_resolved: string
+          store: string
+          ui_locale: string | null
+          updated_at: string
+          utm_campaign: string
+          utm_medium: string
+          utm_source: string
+        }
+        Insert: {
+          client_vote_id?: string | null
+          country?: string | null
+          created_at?: string
+          id?: string
+          option_id: string
+          page_key: string
+          poll_id: string
+          session_id: string
+          short_link_id: string
+          source_id_resolved: string
+          store: string
+          ui_locale?: string | null
+          updated_at?: string
+          utm_campaign: string
+          utm_medium: string
+          utm_source: string
+        }
+        Update: {
+          client_vote_id?: string | null
+          country?: string | null
+          created_at?: string
+          id?: string
+          option_id?: string
+          page_key?: string
+          poll_id?: string
+          session_id?: string
+          short_link_id?: string
+          source_id_resolved?: string
+          store?: string
+          ui_locale?: string | null
+          updated_at?: string
+          utm_campaign?: string
+          utm_medium?: string
+          utm_source?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "fk_outreach_poll_votes_poll_option_membership"
+            columns: ["poll_id", "option_id"]
+            isOneToOne: false
+            referencedRelation: "outreach_poll_options"
+            referencedColumns: ["poll_id", "id"]
+          },
+          {
+            foreignKeyName: "outreach_poll_votes_poll_id_fkey"
+            columns: ["poll_id"]
+            isOneToOne: false
+            referencedRelation: "outreach_polls"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "outreach_poll_votes_poll_id_fkey"
+            columns: ["poll_id"]
+            isOneToOne: false
+            referencedRelation: "outreach_polls_overview_v1"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "outreach_poll_votes_short_link_id_fkey"
+            columns: ["short_link_id"]
+            isOneToOne: false
+            referencedRelation: "outreach_short_links"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "outreach_poll_votes_short_link_id_fkey"
+            columns: ["short_link_id"]
+            isOneToOne: false
+            referencedRelation: "outreach_short_links_effective"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "outreach_poll_votes_source_id_resolved_fkey"
+            columns: ["source_id_resolved"]
+            isOneToOne: false
+            referencedRelation: "outreach_sources"
+            referencedColumns: ["source_id"]
+          },
+        ]
+      }
+      outreach_polls: {
+        Row: {
+          active: boolean
+          app_key: string
+          created_at: string
+          description: string | null
+          id: string
+          page_key: string
+          question: string
+          title: string
+          updated_at: string
+        }
+        Insert: {
+          active?: boolean
+          app_key: string
+          created_at?: string
+          description?: string | null
+          id?: string
+          page_key: string
+          question: string
+          title: string
+          updated_at?: string
+        }
+        Update: {
+          active?: boolean
+          app_key?: string
+          created_at?: string
+          description?: string | null
+          id?: string
+          page_key?: string
+          question?: string
+          title?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
       outreach_rate_limits: {
         Row: {
           bucket_start: string
@@ -3312,6 +3496,38 @@ export type Database = {
       }
     }
     Views: {
+      outreach_poll_results_uc_v1: {
+        Row: {
+          option_key: string | null
+          page_key: string | null
+          total_votes: number | null
+          vote_count: number | null
+        }
+        Relationships: []
+      }
+      outreach_poll_totals_uc_v1: {
+        Row: {
+          last_vote_at: string | null
+          page_key: string | null
+          total_votes: number | null
+        }
+        Relationships: []
+      }
+      outreach_polls_overview_v1: {
+        Row: {
+          active: boolean | null
+          app_key: string | null
+          description: string | null
+          id: string | null
+          last_activity_at: string | null
+          page_key: string | null
+          question: string | null
+          title: string | null
+          total_votes_all: number | null
+          total_votes_uc: number | null
+        }
+        Relationships: []
+      }
       outreach_short_links_effective: {
         Row: {
           active: boolean | null
@@ -4865,6 +5081,22 @@ export type Database = {
           p_utm_campaign: string
           p_utm_medium: string
           p_utm_source: string
+        }
+        Returns: Json
+      }
+      outreach_poll_get_v1: {
+        Args: { p_app_key: string; p_page_key: string }
+        Returns: Json
+      }
+      outreach_poll_vote_submit_v1: {
+        Args: {
+          p_client_vote_id?: string
+          p_country?: string
+          p_option_key: string
+          p_session_id: string
+          p_short_code: string
+          p_store?: string
+          p_ui_locale?: string
         }
         Returns: Json
       }
