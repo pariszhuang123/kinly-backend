@@ -2100,6 +2100,81 @@ export type Database = {
           },
         ]
       }
+      outreach_poll_result_messages: {
+        Row: {
+          active: boolean
+          created_at: string
+          cta_label: string
+          id: string
+          option_id: string
+          poll_id: string
+          primary_message: string
+          source_id_resolved: string | null
+          updated_at: string
+          utm_campaign: string | null
+        }
+        Insert: {
+          active?: boolean
+          created_at?: string
+          cta_label: string
+          id?: string
+          option_id: string
+          poll_id: string
+          primary_message: string
+          source_id_resolved?: string | null
+          updated_at?: string
+          utm_campaign?: string | null
+        }
+        Update: {
+          active?: boolean
+          created_at?: string
+          cta_label?: string
+          id?: string
+          option_id?: string
+          poll_id?: string
+          primary_message?: string
+          source_id_resolved?: string | null
+          updated_at?: string
+          utm_campaign?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "fk_outreach_poll_result_messages_poll_option"
+            columns: ["poll_id", "option_id"]
+            isOneToOne: false
+            referencedRelation: "outreach_poll_options"
+            referencedColumns: ["poll_id", "id"]
+          },
+          {
+            foreignKeyName: "outreach_poll_result_messages_option_id_fkey"
+            columns: ["option_id"]
+            isOneToOne: false
+            referencedRelation: "outreach_poll_options"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "outreach_poll_result_messages_poll_id_fkey"
+            columns: ["poll_id"]
+            isOneToOne: false
+            referencedRelation: "outreach_polls"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "outreach_poll_result_messages_poll_id_fkey"
+            columns: ["poll_id"]
+            isOneToOne: false
+            referencedRelation: "outreach_polls_overview_v1"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "outreach_poll_result_messages_source_id_resolved_fkey"
+            columns: ["source_id_resolved"]
+            isOneToOne: false
+            referencedRelation: "outreach_sources"
+            referencedColumns: ["source_id"]
+          },
+        ]
+      }
       outreach_poll_votes: {
         Row: {
           client_vote_id: string | null

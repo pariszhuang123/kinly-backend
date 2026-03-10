@@ -2317,13 +2317,32 @@ CREATE OR REPLACE FUNCTION "public"."_house_vibes_mark_out_of_date"("p_home_id" 
     AS $$
 DECLARE
   v_total int;
-  v_mapping_version text := 'v1';
+  v_active_mapping_version text;
 BEGIN
   SELECT COUNT(*)
     INTO v_total
-    FROM public.memberships m
-   WHERE m.home_id = p_home_id
-     AND m.is_current = true;
+  FROM public.memberships m
+  WHERE m.home_id = p_home_id
+    AND m.is_current = true;
+
+  SELECT hv.mapping_version
+    INTO v_active_mapping_version
+  FROM public.house_vibe_versions hv
+  WHERE hv.status = 'active'
+  ORDER BY hv.created_at DESC
+  LIMIT 1;
+
+  IF v_active_mapping_version IS NULL THEN
+    v_active_mapping_version := 'v1';
+  END IF;
+
+  UPDATE public.house_vibes
+  SET
+    out_of_date = true,
+    invalidated_at = now(),
+    computed_at = now(),
+    coverage_total = COALESCE(v_total, 0)
+  WHERE home_id = p_home_id;
 
   INSERT INTO public.house_vibes (
     home_id,
@@ -2339,7 +2358,7 @@ BEGIN
   )
   VALUES (
     p_home_id,
-    v_mapping_version,
+    v_active_mapping_version,
     'insufficient_data',
     0,
     0,
@@ -2351,7 +2370,6 @@ BEGIN
   )
   ON CONFLICT (home_id, mapping_version) DO UPDATE
     SET out_of_date       = true,
-        mapping_version   = EXCLUDED.mapping_version,
         label_id          = EXCLUDED.label_id,
         confidence        = EXCLUDED.confidence,
         coverage_answered = EXCLUDED.coverage_answered,
@@ -9548,6 +9566,7 @@ BEGIN
   -- 5) Seed starter draft chores for quick household setup (weekly recurrence)
   PERFORM public.chores_create_v2(
     p_home_id => v_home.id,
+    p_assignee_user_id => v_user,
     p_name => 'Take out trash',
     p_recurrence_every => 1,
     p_recurrence_unit => 'week',
@@ -9576,15 +9595,15 @@ BEGIN
   -- 6) Seed starter draft bill templates
   PERFORM public.expenses_create_v3(
     p_home_id => v_home.id,
-    p_description => 'Internet bills'
+    p_description => 'Internet bill'
   );
   PERFORM public.expenses_create_v3(
     p_home_id => v_home.id,
-    p_description => 'Electric bills'
+    p_description => 'Electric bill'
   );
   PERFORM public.expenses_create_v3(
     p_home_id => v_home.id,
-    p_description => 'Water bills'
+    p_description => 'Water bill'
   );
   PERFORM public.expenses_create_v3(
     p_home_id => v_home.id,
@@ -18324,6 +18343,32 @@ COMMENT ON TABLE "public"."outreach_poll_options" IS 'Poll options with determin
 
 
 
+CREATE TABLE IF NOT EXISTS "public"."outreach_poll_result_messages" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "poll_id" "uuid" NOT NULL,
+    "option_id" "uuid" NOT NULL,
+    "primary_message" "text" NOT NULL,
+    "cta_label" "text" NOT NULL,
+    "source_id_resolved" "text",
+    "utm_campaign" "text",
+    "active" boolean DEFAULT true NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "chk_outreach_poll_result_messages_campaign_len" CHECK ((("utm_campaign" IS NULL) OR (("char_length"(TRIM(BOTH FROM "utm_campaign")) >= 1) AND ("char_length"(TRIM(BOTH FROM "utm_campaign")) <= 128)))),
+    CONSTRAINT "chk_outreach_poll_result_messages_campaign_not_blank" CHECK ((("utm_campaign" IS NULL) OR (TRIM(BOTH FROM "utm_campaign") <> ''::"text"))),
+    CONSTRAINT "chk_outreach_poll_result_messages_cta_label_len" CHECK ((("char_length"(TRIM(BOTH FROM "cta_label")) >= 1) AND ("char_length"(TRIM(BOTH FROM "cta_label")) <= 60))),
+    CONSTRAINT "chk_outreach_poll_result_messages_primary_message_len" CHECK ((("char_length"(TRIM(BOTH FROM "primary_message")) >= 1) AND ("char_length"(TRIM(BOTH FROM "primary_message")) <= 280))),
+    CONSTRAINT "chk_outreach_poll_result_messages_target_pairing" CHECK ((("utm_campaign" IS NULL) OR ("source_id_resolved" IS NOT NULL)))
+);
+
+
+ALTER TABLE "public"."outreach_poll_result_messages" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."outreach_poll_result_messages" IS 'Result message variants for outreach polls, with optional source/campaign targeting.';
+
+
+
 CREATE TABLE IF NOT EXISTS "public"."outreach_poll_votes" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "poll_id" "uuid" NOT NULL,
@@ -19295,6 +19340,11 @@ ALTER TABLE ONLY "public"."outreach_poll_options"
 
 
 
+ALTER TABLE ONLY "public"."outreach_poll_result_messages"
+    ADD CONSTRAINT "outreach_poll_result_messages_pkey" PRIMARY KEY ("id");
+
+
+
 ALTER TABLE ONLY "public"."outreach_poll_votes"
     ADD CONSTRAINT "outreach_poll_votes_pkey" PRIMARY KEY ("id");
 
@@ -19578,6 +19628,10 @@ CREATE INDEX "house_vibe_preference_responses_user_pref_opt_idx" ON "public"."pr
 
 
 
+CREATE UNIQUE INDEX "house_vibe_versions_one_active_idx" ON "public"."house_vibe_versions" USING "btree" ("status") WHERE ("status" = 'active'::"text");
+
+
+
 CREATE INDEX "idx_analytics_events_home_event_time" ON "public"."analytics_events" USING "btree" ("home_id", "event_type", "occurred_at");
 
 
@@ -19719,6 +19773,10 @@ CREATE INDEX "idx_outreach_event_logs_session_id" ON "public"."outreach_event_lo
 
 
 CREATE INDEX "idx_outreach_event_logs_source_resolved_created_at" ON "public"."outreach_event_logs" USING "btree" ("source_id_resolved", "created_at");
+
+
+
+CREATE INDEX "idx_outreach_poll_result_messages_lookup" ON "public"."outreach_poll_result_messages" USING "btree" ("poll_id", "option_id", "active", "source_id_resolved", "utm_campaign");
 
 
 
@@ -19902,6 +19960,10 @@ CREATE UNIQUE INDEX "uq_outreach_event_logs_client_event_id" ON "public"."outrea
 
 
 
+CREATE UNIQUE INDEX "uq_outreach_poll_result_messages_target_tuple" ON "public"."outreach_poll_result_messages" USING "btree" ("poll_id", "option_id", "source_id_resolved", "utm_campaign") NULLS NOT DISTINCT;
+
+
+
 CREATE UNIQUE INDEX "uq_outreach_poll_votes_client_vote_id" ON "public"."outreach_poll_votes" USING "btree" ("client_vote_id") WHERE ("client_vote_id" IS NOT NULL);
 
 
@@ -20023,6 +20085,10 @@ CREATE OR REPLACE TRIGGER "trg_outreach_aliases_protect_unknown" BEFORE DELETE O
 
 
 CREATE OR REPLACE TRIGGER "trg_outreach_poll_options_touch_updated_at" BEFORE UPDATE ON "public"."outreach_poll_options" FOR EACH ROW EXECUTE FUNCTION "public"."_touch_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_outreach_poll_result_messages_touch_updated_at" BEFORE UPDATE ON "public"."outreach_poll_result_messages" FOR EACH ROW EXECUTE FUNCTION "public"."_touch_updated_at"();
 
 
 
@@ -20214,6 +20280,11 @@ ALTER TABLE ONLY "public"."notification_sends"
 
 ALTER TABLE ONLY "public"."outreach_event_logs"
     ADD CONSTRAINT "fk_outreach_event_logs_source_resolved" FOREIGN KEY ("source_id_resolved") REFERENCES "public"."outreach_sources"("source_id");
+
+
+
+ALTER TABLE ONLY "public"."outreach_poll_result_messages"
+    ADD CONSTRAINT "fk_outreach_poll_result_messages_poll_option" FOREIGN KEY ("poll_id", "option_id") REFERENCES "public"."outreach_poll_options"("poll_id", "id") ON DELETE CASCADE;
 
 
 
@@ -20474,6 +20545,21 @@ ALTER TABLE ONLY "public"."notification_sends"
 
 ALTER TABLE ONLY "public"."outreach_poll_options"
     ADD CONSTRAINT "outreach_poll_options_poll_id_fkey" FOREIGN KEY ("poll_id") REFERENCES "public"."outreach_polls"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."outreach_poll_result_messages"
+    ADD CONSTRAINT "outreach_poll_result_messages_option_id_fkey" FOREIGN KEY ("option_id") REFERENCES "public"."outreach_poll_options"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."outreach_poll_result_messages"
+    ADD CONSTRAINT "outreach_poll_result_messages_poll_id_fkey" FOREIGN KEY ("poll_id") REFERENCES "public"."outreach_polls"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."outreach_poll_result_messages"
+    ADD CONSTRAINT "outreach_poll_result_messages_source_id_resolved_fkey" FOREIGN KEY ("source_id_resolved") REFERENCES "public"."outreach_sources"("source_id");
 
 
 
@@ -20783,6 +20869,9 @@ ALTER TABLE "public"."outreach_event_logs" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "public"."outreach_poll_options" ENABLE ROW LEVEL SECURITY;
 
 
+ALTER TABLE "public"."outreach_poll_result_messages" ENABLE ROW LEVEL SECURITY;
+
+
 ALTER TABLE "public"."outreach_poll_votes" ENABLE ROW LEVEL SECURITY;
 
 
@@ -20836,6 +20925,10 @@ COMMENT ON POLICY "profiles_select_authenticated" ON "public"."profiles" IS 'All
 
 
 
+CREATE POLICY "public_read_active_outreach_poll_result_messages" ON "public"."outreach_poll_result_messages" FOR SELECT TO "authenticated", "anon" USING (("active" = true));
+
+
+
 ALTER TABLE "public"."recipient_preference_snapshots" ENABLE ROW LEVEL SECURITY;
 
 
@@ -20868,6 +20961,10 @@ CREATE POLICY "service_role_all_outreach_aliases" ON "public"."outreach_source_a
 
 
 CREATE POLICY "service_role_all_outreach_poll_options" ON "public"."outreach_poll_options" TO "service_role" USING (true) WITH CHECK (true);
+
+
+
+CREATE POLICY "service_role_all_outreach_poll_result_messages" ON "public"."outreach_poll_result_messages" TO "service_role" USING (true) WITH CHECK (true);
 
 
 
@@ -24241,6 +24338,12 @@ GRANT ALL ON TABLE "public"."outreach_event_logs" TO "service_role";
 
 
 GRANT ALL ON TABLE "public"."outreach_poll_options" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."outreach_poll_result_messages" TO "service_role";
+GRANT SELECT ON TABLE "public"."outreach_poll_result_messages" TO "anon";
+GRANT SELECT ON TABLE "public"."outreach_poll_result_messages" TO "authenticated";
 
 
 

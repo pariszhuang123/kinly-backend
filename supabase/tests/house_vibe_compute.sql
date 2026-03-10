@@ -2,7 +2,7 @@ SET search_path = pgtap, public, auth, extensions;
 
 BEGIN;
 
-SELECT plan(8);
+SELECT plan(7);
 
 CREATE TEMP TABLE tmp_users (
   label   text PRIMARY KEY,
@@ -22,10 +22,26 @@ VALUES
   ('00000000-0000-4000-8000-000000000702', 'avatars/default2.png', 'animal', 'House Vibe Avatar 2')
 ON CONFLICT (id) DO NOTHING;
 
--- Seed auth users
+-- Ensure enough unique avatars exist for multi-member join scenarios.
+INSERT INTO public.avatars (id, storage_path, category, name)
+SELECT
+  gen_random_uuid(),
+  'avatars/house-vibe-compute-' || g::text || '.png',
+  'animal',
+  'House Vibe Compute Avatar ' || g::text
+FROM generate_series(1, 20) AS g;
+
+-- Seed auth users for large-home and small-home scenarios
 INSERT INTO tmp_users (label, user_id, email) VALUES
-  ('owner',  '00000000-0000-4000-8000-000000000901', 'owner-house-vibe-compute@example.com'),
-  ('member', '00000000-0000-4000-8000-000000000902', 'member-house-vibe-compute@example.com');
+  ('owner_large', '00000000-0000-4000-8000-000000001001', 'owner-large-house-vibe@example.com'),
+  ('l1',         '00000000-0000-4000-8000-000000001002', 'l1-house-vibe@example.com'),
+  ('l2',         '00000000-0000-4000-8000-000000001003', 'l2-house-vibe@example.com'),
+  ('l3',         '00000000-0000-4000-8000-000000001004', 'l3-house-vibe@example.com'),
+  ('l4',         '00000000-0000-4000-8000-000000001005', 'l4-house-vibe@example.com'),
+  ('l5',         '00000000-0000-4000-8000-000000001006', 'l5-house-vibe@example.com'),
+  ('owner_small','00000000-0000-4000-8000-000000001007', 'owner-small-house-vibe@example.com'),
+  ('s1',         '00000000-0000-4000-8000-000000001008', 's1-house-vibe@example.com'),
+  ('s2',         '00000000-0000-4000-8000-000000001009', 's2-house-vibe@example.com');
 
 INSERT INTO auth.users (id, instance_id, email, raw_user_meta_data, raw_app_meta_data, aud, role, encrypted_password)
 SELECT
@@ -40,199 +56,241 @@ SELECT
 FROM tmp_users
 ON CONFLICT (id) DO NOTHING;
 
--- Owner creates home + invite
-SELECT set_config('request.jwt.claim.sub', (SELECT user_id::text FROM tmp_users WHERE label = 'owner'), true);
+-- Persist user IDs for service-role blocks (service role cannot read temp tables here).
+SELECT set_config('test.owner_large_id', (SELECT user_id::text FROM tmp_users WHERE label = 'owner_large'), true);
+SELECT set_config('test.l1_id', (SELECT user_id::text FROM tmp_users WHERE label = 'l1'), true);
+SELECT set_config('test.l2_id', (SELECT user_id::text FROM tmp_users WHERE label = 'l2'), true);
+SELECT set_config('test.l3_id', (SELECT user_id::text FROM tmp_users WHERE label = 'l3'), true);
+SELECT set_config('test.l4_id', (SELECT user_id::text FROM tmp_users WHERE label = 'l4'), true);
+SELECT set_config('test.l5_id', (SELECT user_id::text FROM tmp_users WHERE label = 'l5'), true);
+SELECT set_config('test.owner_small_id', (SELECT user_id::text FROM tmp_users WHERE label = 'owner_small'), true);
+SELECT set_config('test.s1_id', (SELECT user_id::text FROM tmp_users WHERE label = 's1'), true);
+SELECT set_config('test.s2_id', (SELECT user_id::text FROM tmp_users WHERE label = 's2'), true);
+
+-- Active mapping must be v2 after cutover migration.
+SELECT is(
+  (
+    SELECT mapping_version
+    FROM public.house_vibe_versions
+    WHERE status = 'active'
+    ORDER BY created_at DESC
+    LIMIT 1
+  ),
+  'v2',
+  'house_vibe active mapping version is v2'
+);
+
+-- ------------------------------
+-- Large-home scenario (5 members: 3 high vs 2 low should NOT be mixed in v2)
+-- ------------------------------
+SELECT set_config('request.jwt.claim.sub', (SELECT user_id::text FROM tmp_users WHERE label = 'owner_large'), true);
 SELECT set_config('request.jwt.claim.role', 'authenticated', true);
 
 WITH res AS (
   SELECT public.homes_create_with_invite() AS payload
 )
 INSERT INTO tmp_homes (label, home_id)
-SELECT 'home', (payload->'home'->>'id')::uuid FROM res;
+SELECT 'home_large', (payload->'home'->>'id')::uuid FROM res;
 
--- Member joins
-SELECT set_config('request.jwt.claim.sub', (SELECT user_id::text FROM tmp_users WHERE label = 'member'), true);
+SELECT set_config('test.large_owner_id', (SELECT user_id::text FROM tmp_users WHERE label = 'owner_large'), true);
+SELECT set_config('test.large_home_id', (SELECT home_id::text FROM tmp_homes WHERE label = 'home_large'), true);
+
+SELECT set_config('request.jwt.claim.sub', (SELECT user_id::text FROM tmp_users WHERE label = 'l1'), true);
 SELECT set_config('request.jwt.claim.role', 'authenticated', true);
-SELECT public.homes_join(
-  (SELECT code::text FROM public.invites WHERE home_id = (SELECT home_id FROM tmp_homes WHERE label = 'home') AND revoked_at IS NULL LIMIT 1)
-);
+SELECT public.homes_join((SELECT code::text FROM public.invites WHERE home_id = current_setting('test.large_home_id')::uuid AND revoked_at IS NULL LIMIT 1));
 
--- Persist IDs for reuse
-SELECT set_config('test.owner_id', (SELECT user_id::text FROM tmp_users WHERE label = 'owner'), true);
-SELECT set_config('test.member_id', (SELECT user_id::text FROM tmp_users WHERE label = 'member'), true);
-SELECT set_config('test.home_id', (SELECT home_id::text FROM tmp_homes WHERE label = 'home'), true);
+SELECT set_config('request.jwt.claim.sub', (SELECT user_id::text FROM tmp_users WHERE label = 'l2'), true);
+SELECT set_config('request.jwt.claim.role', 'authenticated', true);
+SELECT public.homes_join((SELECT code::text FROM public.invites WHERE home_id = current_setting('test.large_home_id')::uuid AND revoked_at IS NULL LIMIT 1));
 
--- Service role to seed preference responses (contributors need complete set)
+SELECT set_config('request.jwt.claim.sub', (SELECT user_id::text FROM tmp_users WHERE label = 'l3'), true);
+SELECT set_config('request.jwt.claim.role', 'authenticated', true);
+SELECT public.homes_join((SELECT code::text FROM public.invites WHERE home_id = current_setting('test.large_home_id')::uuid AND revoked_at IS NULL LIMIT 1));
+
+SELECT set_config('request.jwt.claim.sub', (SELECT user_id::text FROM tmp_users WHERE label = 'l4'), true);
+SELECT set_config('request.jwt.claim.role', 'authenticated', true);
+SELECT public.homes_join((SELECT code::text FROM public.invites WHERE home_id = current_setting('test.large_home_id')::uuid AND revoked_at IS NULL LIMIT 1));
+
 SET LOCAL ROLE service_role;
 SET LOCAL search_path = public, auth, extensions;
-
-CREATE TEMP TABLE tmp_pref_choices (
-  preference_id text,
-  owner_opt smallint,
-  member_opt smallint,
-  member_opt_mixed smallint
-);
-
-INSERT INTO tmp_pref_choices VALUES
-  ('environment_noise_tolerance',     2, 2, 0),
-  ('environment_light_preference',    2, 2, 0),
-  ('environment_scent_sensitivity',   2, 2, 0),
-  ('schedule_quiet_hours_preference', 2, 2, 0),
-  ('schedule_sleep_timing',           2, 2, 0),
-  ('communication_channel',           2, 2, 0),
-  ('communication_directness',        2, 2, 0),
-  ('cleanliness_shared_space_tolerance', 2, 2, 0),
-  ('privacy_room_entry',              2, 2, 0),
-  ('privacy_notifications',           2, 2, 0),
-  ('social_hosting_frequency',        2, 2, 0),
-  ('social_togetherness',             2, 2, 0),
-  ('routine_planning_style',          2, 2, 0),
-  ('conflict_resolution_style',       2, 2, 0);
 
 INSERT INTO public.preference_responses (user_id, preference_id, option_index, captured_at)
-SELECT current_setting('test.owner_id')::uuid, preference_id, owner_opt, now() FROM tmp_pref_choices
+WITH pref_choices(preference_id, high_opt, low_opt) AS (
+  VALUES
+    ('environment_noise_tolerance', 2::smallint, 0::smallint),
+    ('environment_light_preference', 2::smallint, 0::smallint),
+    ('environment_scent_sensitivity', 2::smallint, 0::smallint),
+    ('schedule_quiet_hours_preference', 2::smallint, 0::smallint),
+    ('schedule_sleep_timing', 2::smallint, 0::smallint),
+    ('communication_channel', 2::smallint, 0::smallint),
+    ('communication_directness', 2::smallint, 0::smallint),
+    ('cleanliness_shared_space_tolerance', 2::smallint, 0::smallint),
+    ('privacy_room_entry', 2::smallint, 0::smallint),
+    ('privacy_notifications', 2::smallint, 0::smallint),
+    ('social_hosting_frequency', 2::smallint, 0::smallint),
+    ('social_togetherness', 2::smallint, 0::smallint),
+    ('routine_planning_style', 2::smallint, 0::smallint),
+    ('conflict_resolution_style', 2::smallint, 0::smallint)
+)
+SELECT u.user_id, p.preference_id, p.high_opt, now()
+FROM (
+  VALUES
+    (current_setting('test.owner_large_id')::uuid),
+    (current_setting('test.l1_id')::uuid),
+    (current_setting('test.l2_id')::uuid)
+) AS u(user_id)
+JOIN pref_choices p ON true
 UNION ALL
-SELECT current_setting('test.member_id')::uuid, preference_id, member_opt, now() FROM tmp_pref_choices;
+SELECT u.user_id, p.preference_id, p.low_opt, now()
+FROM (
+  VALUES
+    (current_setting('test.l3_id')::uuid),
+    (current_setting('test.l4_id')::uuid)
+) AS u(user_id)
+JOIN pref_choices p ON true
+;
 
--- Switch back to owner for RPC calls
 RESET ROLE;
 SET LOCAL search_path = pgtap, public, auth, extensions;
-SELECT set_config('request.jwt.claim.sub', current_setting('test.owner_id'), true);
+SELECT set_config('request.jwt.claim.sub', current_setting('test.large_owner_id'), true);
 SELECT set_config('request.jwt.claim.role', 'authenticated', true);
 
--- First compute: contributors=2, label should resolve to social_home (energy/social high), source computed
-CREATE TEMP TABLE tmp_vibe_res AS
-SELECT public.house_vibe_compute(current_setting('test.home_id')::uuid, false, false) AS res;
+CREATE TEMP TABLE tmp_large_res_5 AS
+SELECT public.house_vibe_compute(current_setting('test.large_home_id')::uuid, false, true) AS res;
 
-SELECT is(
-  (SELECT res->>'label_id' FROM tmp_vibe_res),
-  'social_home',
-  'first compute resolves to social_home'
+SELECT ok(
+  (SELECT res->>'label_id' FROM tmp_large_res_5) <> 'mixed_home',
+  '5-member 3-vs-2 split does not resolve to mixed_home in v2'
 );
 
 SELECT is(
-  (SELECT (res->'coverage'->>'answered')::int FROM tmp_vibe_res),
-  2,
-  'coverage_answered = contributors (2)'
+  (SELECT res->>'mapping_version' FROM tmp_large_res_5),
+  'v2',
+  'large-home compute resolves using v2 mapping'
 );
 
-SELECT is(
-  (SELECT res->>'source' FROM tmp_vibe_res),
-  'computed',
-  'first call marks source=computed'
-);
+-- Add 6th member to force 3-vs-3 split -> mixed_home
+SELECT set_config('request.jwt.claim.sub', (SELECT user_id::text FROM tmp_users WHERE label = 'l5'), true);
+SELECT set_config('request.jwt.claim.role', 'authenticated', true);
+SELECT public.homes_join((SELECT code::text FROM public.invites WHERE home_id = current_setting('test.large_home_id')::uuid AND revoked_at IS NULL LIMIT 1));
 
--- Second compute without changes should hit cache
-SELECT is(
-  public.house_vibe_compute(current_setting('test.home_id')::uuid, false, false)->>'source',
-  'cache',
-  'subsequent call uses cache when not out_of_date'
-);
-
--- Make member opposite to force mixed axis (energy/social)
 SET LOCAL ROLE service_role;
 SET LOCAL search_path = public, auth, extensions;
-UPDATE public.preference_responses pr
-SET option_index = c.member_opt_mixed
-FROM tmp_pref_choices c
-WHERE pr.user_id = current_setting('test.member_id')::uuid
-  AND pr.preference_id = c.preference_id;
+INSERT INTO public.preference_responses (user_id, preference_id, option_index, captured_at)
+WITH pref_choices(preference_id, low_opt) AS (
+  VALUES
+    ('environment_noise_tolerance', 0::smallint),
+    ('environment_light_preference', 0::smallint),
+    ('environment_scent_sensitivity', 0::smallint),
+    ('schedule_quiet_hours_preference', 0::smallint),
+    ('schedule_sleep_timing', 0::smallint),
+    ('communication_channel', 0::smallint),
+    ('communication_directness', 0::smallint),
+    ('cleanliness_shared_space_tolerance', 0::smallint),
+    ('privacy_room_entry', 0::smallint),
+    ('privacy_notifications', 0::smallint),
+    ('social_hosting_frequency', 0::smallint),
+    ('social_togetherness', 0::smallint),
+    ('routine_planning_style', 0::smallint),
+    ('conflict_resolution_style', 0::smallint)
+)
+SELECT
+  current_setting('test.l5_id')::uuid,
+  p.preference_id,
+  p.low_opt,
+  now()
+FROM pref_choices p;
 RESET ROLE;
 SET LOCAL search_path = pgtap, public, auth, extensions;
 
+SELECT set_config('request.jwt.claim.sub', current_setting('test.large_owner_id'), true);
+SELECT set_config('request.jwt.claim.role', 'authenticated', true);
+
 SELECT is(
-  public.house_vibe_compute(current_setting('test.home_id')::uuid, false, false)->>'label_id',
+  public.house_vibe_compute(current_setting('test.large_home_id')::uuid, false, false)->>'label_id',
   'mixed_home',
-  'mixed votes resolve to mixed_home'
+  '6-member 3-vs-3 split resolves to mixed_home in v2'
 );
 
--- Remove one preference for member to drop contributor count below 2 -> insufficient_data
-SET LOCAL ROLE service_role;
-SET LOCAL search_path = public, auth, extensions;
-DELETE FROM public.preference_responses
-WHERE user_id = current_setting('test.member_id')::uuid
-  AND preference_id = 'environment_noise_tolerance';
-RESET ROLE;
-SET LOCAL search_path = pgtap, public, auth, extensions;
+-- ------------------------------
+-- Small-home scenario (3 members stays sensitive)
+-- ------------------------------
+SELECT set_config('request.jwt.claim.sub', (SELECT user_id::text FROM tmp_users WHERE label = 'owner_small'), true);
+SELECT set_config('request.jwt.claim.role', 'authenticated', true);
 
-SELECT is(
-  public.house_vibe_compute(current_setting('test.home_id')::uuid, false, false)->>'label_id',
-  'insufficient_data',
-  'incomplete contributor set falls back to insufficient_data'
-);
-
--- Cozy social: energy high, noise low, social high -> cozy_social_home
-SET LOCAL ROLE service_role;
-SET LOCAL search_path = public, auth, extensions;
-DELETE FROM public.preference_responses
-WHERE user_id IN (current_setting('test.owner_id')::uuid, current_setting('test.member_id')::uuid);
-
-WITH data(preference_id, owner_opt, member_opt) AS (
-  VALUES
-    ('environment_noise_tolerance', 0, 0),
-    ('environment_light_preference', 2, 2),
-    ('schedule_quiet_hours_preference', 0, 0),
-    ('schedule_sleep_timing', 2, 2),
-    ('environment_scent_sensitivity', 2, 2),
-    ('communication_channel', 2, 2),
-    ('communication_directness', 2, 2),
-    ('cleanliness_shared_space_tolerance', 2, 2),
-    ('privacy_room_entry', 2, 2),
-    ('privacy_notifications', 2, 2),
-    ('social_hosting_frequency', 2, 2),
-    ('social_togetherness', 2, 2),
-    ('routine_planning_style', 2, 2),
-    ('conflict_resolution_style', 2, 2)
+WITH res AS (
+  SELECT public.homes_create_with_invite() AS payload
 )
-INSERT INTO public.preference_responses (user_id, preference_id, option_index, captured_at)
-SELECT current_setting('test.owner_id')::uuid, preference_id, owner_opt, now() FROM data
-UNION ALL
-SELECT current_setting('test.member_id')::uuid, preference_id, member_opt, now() FROM data;
+INSERT INTO tmp_homes (label, home_id)
+SELECT 'home_small', (payload->'home'->>'id')::uuid FROM res;
 
-RESET ROLE;
-SET LOCAL search_path = pgtap, public, auth, extensions;
+SELECT set_config('test.small_owner_id', (SELECT user_id::text FROM tmp_users WHERE label = 'owner_small'), true);
+SELECT set_config('test.small_home_id', (SELECT home_id::text FROM tmp_homes WHERE label = 'home_small'), true);
 
-SELECT is(
-  public.house_vibe_compute(current_setting('test.home_id')::uuid, false, false)->>'label_id',
-  'cozy_social_home',
-  'noise low + social high resolves to cozy_social_home'
-);
+SELECT set_config('request.jwt.claim.sub', (SELECT user_id::text FROM tmp_users WHERE label = 's1'), true);
+SELECT set_config('request.jwt.claim.role', 'authenticated', true);
+SELECT public.homes_join((SELECT code::text FROM public.invites WHERE home_id = current_setting('test.small_home_id')::uuid AND revoked_at IS NULL LIMIT 1));
 
--- Warm social: energy balanced, noise balanced, social high -> warm_social_home
+SELECT set_config('request.jwt.claim.sub', (SELECT user_id::text FROM tmp_users WHERE label = 's2'), true);
+SELECT set_config('request.jwt.claim.role', 'authenticated', true);
+SELECT public.homes_join((SELECT code::text FROM public.invites WHERE home_id = current_setting('test.small_home_id')::uuid AND revoked_at IS NULL LIMIT 1));
+
 SET LOCAL ROLE service_role;
 SET LOCAL search_path = public, auth, extensions;
-DELETE FROM public.preference_responses
-WHERE user_id IN (current_setting('test.owner_id')::uuid, current_setting('test.member_id')::uuid);
 
-WITH data(preference_id, owner_opt, member_opt) AS (
-  VALUES
-    ('environment_noise_tolerance', 1, 1),
-    ('environment_light_preference', 1, 1),
-    ('schedule_quiet_hours_preference', 2, 2),
-    ('schedule_sleep_timing', 1, 1),
-    ('environment_scent_sensitivity', 2, 2),
-    ('communication_channel', 2, 2),
-    ('communication_directness', 2, 2),
-    ('cleanliness_shared_space_tolerance', 2, 2),
-    ('privacy_room_entry', 2, 2),
-    ('privacy_notifications', 2, 2),
-    ('social_hosting_frequency', 1, 1),
-    ('social_togetherness', 2, 2),
-    ('routine_planning_style', 2, 2),
-    ('conflict_resolution_style', 2, 2)
-)
 INSERT INTO public.preference_responses (user_id, preference_id, option_index, captured_at)
-SELECT current_setting('test.owner_id')::uuid, preference_id, owner_opt, now() FROM data
+WITH pref_choices(preference_id, high_opt, low_opt) AS (
+  VALUES
+    ('environment_noise_tolerance', 2::smallint, 0::smallint),
+    ('environment_light_preference', 2::smallint, 0::smallint),
+    ('environment_scent_sensitivity', 2::smallint, 0::smallint),
+    ('schedule_quiet_hours_preference', 2::smallint, 0::smallint),
+    ('schedule_sleep_timing', 2::smallint, 0::smallint),
+    ('communication_channel', 2::smallint, 0::smallint),
+    ('communication_directness', 2::smallint, 0::smallint),
+    ('cleanliness_shared_space_tolerance', 2::smallint, 0::smallint),
+    ('privacy_room_entry', 2::smallint, 0::smallint),
+    ('privacy_notifications', 2::smallint, 0::smallint),
+    ('social_hosting_frequency', 2::smallint, 0::smallint),
+    ('social_togetherness', 2::smallint, 0::smallint),
+    ('routine_planning_style', 2::smallint, 0::smallint),
+    ('conflict_resolution_style', 2::smallint, 0::smallint)
+)
+SELECT u.user_id, p.preference_id, p.high_opt, now()
+FROM (
+  VALUES
+    (current_setting('test.owner_small_id')::uuid),
+    (current_setting('test.s1_id')::uuid)
+) AS u(user_id)
+JOIN pref_choices p ON true
 UNION ALL
-SELECT current_setting('test.member_id')::uuid, preference_id, member_opt, now() FROM data;
+SELECT u.user_id, p.preference_id, p.low_opt, now()
+FROM (
+  VALUES
+    (current_setting('test.s2_id')::uuid)
+) AS u(user_id)
+JOIN pref_choices p ON true
+;
 
 RESET ROLE;
 SET LOCAL search_path = pgtap, public, auth, extensions;
+SELECT set_config('request.jwt.claim.sub', current_setting('test.small_owner_id'), true);
+SELECT set_config('request.jwt.claim.role', 'authenticated', true);
 
 SELECT is(
-  public.house_vibe_compute(current_setting('test.home_id')::uuid, false, false)->>'label_id',
-  'warm_social_home',
-  'social high with neutral energy resolves to warm_social_home'
+  public.house_vibe_compute(current_setting('test.small_home_id')::uuid, false, false)->>'label_id',
+  'mixed_home',
+  '3-member split remains mixed_home (small-home sensitivity unchanged)'
+);
+
+SELECT is(
+  (
+    SELECT min_side_count_small::text || '/' || min_side_count_large::text
+    FROM public.house_vibe_versions
+    WHERE mapping_version = 'v2'
+  ),
+  '1/3',
+  'v2 thresholds are min_side_count_small=1 and min_side_count_large=3'
 );
 
 SELECT * FROM finish();

@@ -2,7 +2,7 @@ SET search_path = pgtap, public, auth, extensions;
 
 BEGIN;
 
-SELECT plan(7);
+SELECT plan(9);
 
 CREATE TEMP TABLE tmp_users (
   label   text PRIMARY KEY,
@@ -74,8 +74,10 @@ SET LOCAL search_path = public, auth, extensions;
 -- Seed checks
 CREATE TEMP TABLE tmp_vibe_seed_counts AS
 SELECT
-  (SELECT count(*) FROM public.house_vibe_labels WHERE mapping_version = 'v1')::bigint AS labels_count,
-  (SELECT count(*) FROM public.house_vibe_mapping_effects WHERE mapping_version = 'v1')::bigint AS mapping_effects_count;
+  (SELECT count(*) FROM public.house_vibe_labels WHERE mapping_version = 'v1')::bigint AS labels_count_v1,
+  (SELECT count(*) FROM public.house_vibe_labels WHERE mapping_version = 'v2')::bigint AS labels_count_v2,
+  (SELECT count(*) FROM public.house_vibe_mapping_effects WHERE mapping_version = 'v1')::bigint AS mapping_effects_count_v1,
+  (SELECT count(*) FROM public.house_vibe_mapping_effects WHERE mapping_version = 'v2')::bigint AS mapping_effects_count_v2;
 
 -- share_events allows feature = house_vibe
 INSERT INTO public.share_events (user_id, home_id, feature, channel)
@@ -100,6 +102,7 @@ SELECT
     SELECT 1
     FROM public.house_vibes
     WHERE home_id = current_setting('test.home_id')::uuid
+      AND mapping_version = 'v2'
       AND out_of_date = true
       AND invalidated_at IS NOT NULL
       AND coverage_total = 2
@@ -113,7 +116,8 @@ WHERE home_id = current_setting('test.home_id')::uuid;
 CREATE TEMP TABLE hv_snapshot AS
 SELECT invalidated_at AS prev_inv
 FROM public.house_vibes
-WHERE home_id = current_setting('test.home_id')::uuid;
+WHERE home_id = current_setting('test.home_id')::uuid
+  AND mapping_version = 'v2';
 
 -- Preference update triggers invalidation bump
 INSERT INTO public.preference_responses (user_id, preference_id, option_index, captured_at)
@@ -126,21 +130,43 @@ VALUES (
 
 CREATE TEMP TABLE tmp_vibe_invalidation_after AS
 SELECT
-  (SELECT invalidated_at FROM public.house_vibes WHERE home_id = current_setting('test.home_id')::uuid) AS curr_inv,
-  (SELECT out_of_date FROM public.house_vibes WHERE home_id = current_setting('test.home_id')::uuid) AS out_of_date_after;
+  (
+    SELECT invalidated_at
+    FROM public.house_vibes
+    WHERE home_id = current_setting('test.home_id')::uuid
+      AND mapping_version = 'v2'
+  ) AS curr_inv,
+  (
+    SELECT out_of_date
+    FROM public.house_vibes
+    WHERE home_id = current_setting('test.home_id')::uuid
+      AND mapping_version = 'v2'
+  ) AS out_of_date_after;
 
 RESET ROLE;
 SET LOCAL search_path = pgtap, public, auth, extensions;
 
 SELECT ok(
-  (SELECT labels_count FROM tmp_vibe_seed_counts) >= 8,
+  (SELECT labels_count_v1 FROM tmp_vibe_seed_counts) >= 8,
   'house_vibe_labels v1 seeded'
 );
 
 SELECT is(
-  (SELECT mapping_effects_count FROM tmp_vibe_seed_counts),
+  (SELECT mapping_effects_count_v1 FROM tmp_vibe_seed_counts),
   39::bigint,
   'house_vibe_mapping_effects v1 seeded with 39 rows'
+);
+
+SELECT is(
+  (SELECT labels_count_v2 FROM tmp_vibe_seed_counts),
+  (SELECT labels_count_v1 FROM tmp_vibe_seed_counts),
+  'house_vibe_labels v2 seeded from v1'
+);
+
+SELECT is(
+  (SELECT mapping_effects_count_v2 FROM tmp_vibe_seed_counts),
+  (SELECT mapping_effects_count_v1 FROM tmp_vibe_seed_counts),
+  'house_vibe_mapping_effects v2 seeded from v1'
 );
 
 SELECT is(
