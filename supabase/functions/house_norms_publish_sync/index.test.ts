@@ -165,6 +165,7 @@ Deno.test("callRevalidate returns ok on 2xx response", async () => {
     assertEquals(body.path, "/kinly/norms/abcd1234");
     const headers = new Headers(init?.headers);
     assertEquals(headers.get("x-revalidate-secret"), "secret");
+    assert(init?.signal instanceof AbortSignal);
     return Promise.resolve(
       new Response(JSON.stringify({ ok: true }), { status: 200 }),
     );
@@ -197,6 +198,31 @@ Deno.test("callRevalidate maps non-2xx response to error", async () => {
     assert(!out.ok);
     if (!out.ok) {
       assert(out.error.includes("status=503"));
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (prevUrl === undefined) Deno.env.delete("VERCEL_REVALIDATE_URL");
+    else Deno.env.set("VERCEL_REVALIDATE_URL", prevUrl);
+    if (prevSecret === undefined) Deno.env.delete("VERCEL_REVALIDATE_SECRET");
+    else Deno.env.set("VERCEL_REVALIDATE_SECRET", prevSecret);
+  }
+});
+
+Deno.test("callRevalidate maps fetch timeout/abort to error", async () => {
+  const prevUrl = Deno.env.get("VERCEL_REVALIDATE_URL");
+  const prevSecret = Deno.env.get("VERCEL_REVALIDATE_SECRET");
+  const originalFetch = globalThis.fetch;
+
+  Deno.env.set("VERCEL_REVALIDATE_URL", "https://example.test/revalidate");
+  Deno.env.set("VERCEL_REVALIDATE_SECRET", "secret");
+  globalThis.fetch = () => Promise.reject(new Error("AbortError: timed out"));
+
+  try {
+    const out = await callRevalidate("/kinly/norms/abcd1234");
+    assert(!out.ok);
+    if (!out.ok) {
+      assert(out.error.includes("status=599"));
+      assert(out.error.includes("AbortError"));
     }
   } finally {
     globalThis.fetch = originalFetch;

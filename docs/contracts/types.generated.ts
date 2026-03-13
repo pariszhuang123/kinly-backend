@@ -948,6 +948,303 @@ export type Database = {
           },
         ]
       }
+      home_directory_links: {
+        Row: {
+          archived_at: string | null
+          created_at: string
+          created_by_user_id: string
+          custom_tag: string | null
+          end_date: string | null
+          home_id: string
+          id: string
+          start_date: string | null
+          tag: string
+          title: string
+          updated_at: string
+          updated_by_user_id: string
+          url: string
+        }
+        Insert: {
+          archived_at?: string | null
+          created_at?: string
+          created_by_user_id: string
+          custom_tag?: string | null
+          end_date?: string | null
+          home_id: string
+          id?: string
+          start_date?: string | null
+          tag: string
+          title: string
+          updated_at?: string
+          updated_by_user_id: string
+          url: string
+        }
+        Update: {
+          archived_at?: string | null
+          created_at?: string
+          created_by_user_id?: string
+          custom_tag?: string | null
+          end_date?: string | null
+          home_id?: string
+          id?: string
+          start_date?: string | null
+          tag?: string
+          title?: string
+          updated_at?: string
+          updated_by_user_id?: string
+          url?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "home_directory_links_created_by_user_id_fkey"
+            columns: ["created_by_user_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "home_directory_links_home_id_fkey"
+            columns: ["home_id"]
+            isOneToOne: false
+            referencedRelation: "homes"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "home_directory_links_updated_by_user_id_fkey"
+            columns: ["updated_by_user_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      home_directory_service_reminder_acknowledgements: {
+        Row: {
+          acknowledged_at: string
+          reminder_id: string
+          user_id: string
+        }
+        Insert: {
+          acknowledged_at?: string
+          reminder_id: string
+          user_id: string
+        }
+        Update: {
+          acknowledged_at?: string
+          reminder_id?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "home_directory_service_reminder_acknowledgemen_reminder_id_fkey"
+            columns: ["reminder_id"]
+            isOneToOne: false
+            referencedRelation: "home_directory_service_reminders"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "home_directory_service_reminder_acknowledgements_user_id_fkey"
+            columns: ["user_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      home_directory_service_reminders: {
+        Row: {
+          created_at: string
+          dismissed_at: string | null
+          dismissed_by_user_id: string | null
+          due_at: string
+          id: string
+          reminder_kind: string
+          service_id: string
+          status: string
+          term_end_date: string
+          term_start_date: string
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          dismissed_at?: string | null
+          dismissed_by_user_id?: string | null
+          due_at: string
+          id?: string
+          reminder_kind: string
+          service_id: string
+          status?: string
+          term_end_date: string
+          term_start_date: string
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          dismissed_at?: string | null
+          dismissed_by_user_id?: string | null
+          due_at?: string
+          id?: string
+          reminder_kind?: string
+          service_id?: string
+          status?: string
+          term_end_date?: string
+          term_start_date?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "home_directory_service_reminders_dismissed_by_user_id_fkey"
+            columns: ["dismissed_by_user_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "home_directory_service_reminders_service_id_fkey"
+            columns: ["service_id"]
+            isOneToOne: false
+            referencedRelation: "home_directory_services"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      home_directory_services: {
+        Row: {
+          account_reference: string | null
+          archived_at: string | null
+          created_at: string
+          created_by_user_id: string
+          custom_label: string | null
+          home_id: string
+          id: string
+          link_url: string | null
+          notes: string | null
+          provider_name: string
+          renewal_reminder_offset_unit: string | null
+          renewal_reminder_offset_value: number | null
+          service_type: string
+          term_end_date: string | null
+          term_start_date: string | null
+          updated_at: string
+          updated_by_user_id: string
+        }
+        Insert: {
+          account_reference?: string | null
+          archived_at?: string | null
+          created_at?: string
+          created_by_user_id: string
+          custom_label?: string | null
+          home_id: string
+          id?: string
+          link_url?: string | null
+          notes?: string | null
+          provider_name: string
+          renewal_reminder_offset_unit?: string | null
+          renewal_reminder_offset_value?: number | null
+          service_type: string
+          term_end_date?: string | null
+          term_start_date?: string | null
+          updated_at?: string
+          updated_by_user_id: string
+        }
+        Update: {
+          account_reference?: string | null
+          archived_at?: string | null
+          created_at?: string
+          created_by_user_id?: string
+          custom_label?: string | null
+          home_id?: string
+          id?: string
+          link_url?: string | null
+          notes?: string | null
+          provider_name?: string
+          renewal_reminder_offset_unit?: string | null
+          renewal_reminder_offset_value?: number | null
+          service_type?: string
+          term_end_date?: string | null
+          term_start_date?: string | null
+          updated_at?: string
+          updated_by_user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "home_directory_services_created_by_user_id_fkey"
+            columns: ["created_by_user_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "home_directory_services_home_id_fkey"
+            columns: ["home_id"]
+            isOneToOne: false
+            referencedRelation: "homes"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "home_directory_services_updated_by_user_id_fkey"
+            columns: ["updated_by_user_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      home_directory_wifi: {
+        Row: {
+          created_at: string
+          created_by_user_id: string
+          home_id: string
+          id: string
+          password: string | null
+          ssid: string
+          updated_at: string
+          updated_by_user_id: string
+        }
+        Insert: {
+          created_at?: string
+          created_by_user_id: string
+          home_id: string
+          id?: string
+          password?: string | null
+          ssid: string
+          updated_at?: string
+          updated_by_user_id: string
+        }
+        Update: {
+          created_at?: string
+          created_by_user_id?: string
+          home_id?: string
+          id?: string
+          password?: string | null
+          ssid?: string
+          updated_at?: string
+          updated_by_user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "home_directory_wifi_created_by_user_id_fkey"
+            columns: ["created_by_user_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "home_directory_wifi_home_id_fkey"
+            columns: ["home_id"]
+            isOneToOne: true
+            referencedRelation: "homes"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "home_directory_wifi_updated_by_user_id_fkey"
+            columns: ["updated_by_user_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       home_entitlements: {
         Row: {
           created_at: string
@@ -3814,6 +4111,45 @@ export type Database = {
           isSetofReturn: false
         }
       }
+      _house_directory_assert_owner: {
+        Args: { p_home_id: string }
+        Returns: undefined
+      }
+      _house_directory_assert_valid_reminder_offset: {
+        Args: {
+          p_offset_unit: string
+          p_offset_value: number
+          p_term_end_date: string
+          p_term_start_date: string
+        }
+        Returns: undefined
+      }
+      _house_directory_build_wifi_qr: {
+        Args: { p_password: string; p_ssid: string }
+        Returns: string
+      }
+      _house_directory_compute_renewal_due_at: {
+        Args: {
+          p_offset_unit: string
+          p_offset_value: number
+          p_term_end_date: string
+          p_term_start_date: string
+        }
+        Returns: string
+      }
+      _house_directory_due_reminders_json: {
+        Args: { p_home_id: string; p_user_id: string }
+        Returns: Json
+      }
+      _house_directory_escape_qr_part: {
+        Args: { p_value: string }
+        Returns: string
+      }
+      _house_directory_reconcile_service_reminder: {
+        Args: { p_service_id: string }
+        Returns: undefined
+      }
+      _house_directory_today_utc: { Args: never; Returns: string }
       _house_norms_assert_owner: {
         Args: { p_home_id: string }
         Returns: undefined
@@ -3852,6 +4188,10 @@ export type Database = {
       _house_vibe_confidence_kind: {
         Args: { p_label_id: string }
         Returns: string
+      }
+      _house_vibes_invalidate: {
+        Args: { p_home_id: string }
+        Returns: undefined
       }
       _house_vibes_mark_out_of_date: {
         Args: { p_home_id: string }
@@ -3949,6 +4289,10 @@ export type Database = {
         }
       }
       _to_iso_utc_ms: { Args: { p_ts: string }; Returns: string }
+      acknowledge_home_directory_reminder: {
+        Args: { p_home_id: string; p_reminder_id: string }
+        Returns: Json
+      }
       api_assert: {
         Args: {
           p_code: string
@@ -3969,6 +4313,14 @@ export type Database = {
           p_sqlstate?: string
         }
         Returns: undefined
+      }
+      archive_home_directory_link: {
+        Args: { p_home_id: string; p_link_id: string }
+        Returns: Json
+      }
+      archive_home_directory_service: {
+        Args: { p_home_id: string; p_service_id: string }
+        Returns: Json
       }
       avatars_list_for_home: {
         Args: { p_home_id: string }
@@ -4347,6 +4699,10 @@ export type Database = {
           p_target_locale: string
         }
         Returns: undefined
+      }
+      dismiss_home_directory_reminder: {
+        Args: { p_home_id: string; p_reminder_id: string }
+        Returns: Json
       }
       expense_plans_generate_due_cycles: { Args: never; Returns: undefined }
       expense_plans_terminate: {
@@ -4764,6 +5120,8 @@ export type Database = {
         Args: { p_error: string; p_job_id: string }
         Returns: undefined
       }
+      get_home_directory_content: { Args: { p_home_id: string }; Returns: Json }
+      get_home_directory_wifi: { Args: { p_home_id: string }; Returns: Json }
       get_plan_status: { Args: never; Returns: Json }
       gratitude_wall_list: {
         Args: {
@@ -4992,6 +5350,10 @@ export type Database = {
           p_source?: string
           p_ui_locale: string
         }
+        Returns: Json
+      }
+      list_due_home_directory_reminders: {
+        Args: { p_home_id: string }
         Returns: Json
       }
       locale_base: { Args: { p_locale: string }; Returns: string }
@@ -5487,6 +5849,40 @@ export type Database = {
         Returns: boolean
       }
       today_onboarding_hints: { Args: never; Returns: Json }
+      upsert_home_directory_link: {
+        Args: {
+          p_custom_tag?: string
+          p_end_date?: string
+          p_home_id: string
+          p_link_id?: string
+          p_start_date?: string
+          p_tag?: string
+          p_title?: string
+          p_url?: string
+        }
+        Returns: Json
+      }
+      upsert_home_directory_service: {
+        Args: {
+          p_account_reference?: string
+          p_custom_label?: string
+          p_home_id: string
+          p_link_url?: string
+          p_notes?: string
+          p_provider_name?: string
+          p_renewal_reminder_offset_unit?: string
+          p_renewal_reminder_offset_value?: number
+          p_service_id?: string
+          p_service_type?: string
+          p_term_end_date?: string
+          p_term_start_date?: string
+        }
+        Returns: Json
+      }
+      upsert_home_directory_wifi: {
+        Args: { p_home_id: string; p_password?: string; p_ssid: string }
+        Returns: Json
+      }
       user_context_v1: {
         Args: never
         Returns: {

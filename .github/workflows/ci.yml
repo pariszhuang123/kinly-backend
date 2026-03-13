@@ -126,7 +126,7 @@ jobs:
             SUPABASE_URL="${{ secrets.SUPABASE_URL }}" \
             SUPABASE_SERVICE_ROLE_KEY="${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
             ORCHESTRATOR_FUNCTION_URL="${{ secrets.ORCHESTRATOR_FUNCTION_URL }}" \
-            ORCHESTRATOR_SHARED_SECRET="${{ secrets.DEV_ORCHESTRATOR_SHARED_SECRET }}" \
+            ORCHESTRATOR_SHARED_SECRET="${{ secrets.ORCHESTRATOR_SHARED_SECRET }}" \
             RUNNER_SHARED_SECRET="${{ secrets.DEV_RUNNER_SHARED_SECRET }}" \
             OPENAI_CLASSIFIER_API_KEY="${{ secrets.OPENAI_CLASSIFIER_API_KEY }}" \
             OPENAI_REWRITE_API_KEY="${{ secrets.OPENAI_REWRITE_API_KEY }}" \
@@ -177,7 +177,7 @@ jobs:
         env:
           INTERNAL_WORKER_SECRET: ${{ secrets.WORKER_SHARED_SECRET }}
           INTERNAL_RUNNER_SECRET: ${{ secrets.DEV_RUNNER_SHARED_SECRET }}
-          INTERNAL_ORCHESTRATOR_SECRET: ${{ secrets.DEV_ORCHESTRATOR_SHARED_SECRET }}
+          INTERNAL_ORCHESTRATOR_SECRET: ${{ secrets.ORCHESTRATOR_SHARED_SECRET }}
         run: |
           set -euo pipefail
 
@@ -240,7 +240,7 @@ jobs:
             SUPABASE_URL="${{ secrets.SUPABASE_URL }}" \
             SUPABASE_SERVICE_ROLE_KEY="${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
             ORCHESTRATOR_FUNCTION_URL="${{ secrets.ORCHESTRATOR_FUNCTION_URL }}" \
-            ORCHESTRATOR_SHARED_SECRET="${{ secrets.PROD_ORCHESTRATOR_SHARED_SECRET }}" \
+            ORCHESTRATOR_SHARED_SECRET="${{ secrets.ORCHESTRATOR_SHARED_SECRET }}" \
             RUNNER_SHARED_SECRET="${{ secrets.PROD_RUNNER_SHARED_SECRET }}" \
             OPENAI_CLASSIFIER_API_KEY="${{ secrets.OPENAI_CLASSIFIER_API_KEY }}" \
             OPENAI_REWRITE_API_KEY="${{ secrets.OPENAI_REWRITE_API_KEY }}" \
@@ -288,7 +288,7 @@ jobs:
         env:
           INTERNAL_WORKER_SECRET: ${{ secrets.WORKER_SHARED_SECRET }}
           INTERNAL_RUNNER_SECRET: ${{ secrets.PROD_RUNNER_SHARED_SECRET }}
-          INTERNAL_ORCHESTRATOR_SECRET: ${{ secrets.PROD_ORCHESTRATOR_SHARED_SECRET }}
+          INTERNAL_ORCHESTRATOR_SECRET: ${{ secrets.ORCHESTRATOR_SHARED_SECRET }}
         run: |
           set -euo pipefail
 

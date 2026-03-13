@@ -1,5 +1,7 @@
 import { createClient } from "npm:@supabase/supabase-js@2.48.0";
 
+const REVALIDATE_TIMEOUT_MS = 3000;
+
 type PublishPayload = {
   home_public_id: string;
   published_at: string; // must be exact ISO (toISOString)
@@ -45,15 +47,21 @@ if (import.meta.main) {
   Deno.serve(async (req) => {
     const requestId = req.headers.get("x-request-id")?.trim() ||
       crypto.randomUUID();
+    let stage = "start";
+    let snapshotUploadMs: number | null = null;
+    let manifestUploadMs: number | null = null;
+    let revalidateMs: number | null = null;
 
     try {
       requireInternalSecret(req);
+      stage = "auth_checked";
 
       if (req.method !== "POST") {
         throw new AppError("invalid_method", 405);
       }
 
       const payload = await parsePayload(req);
+      stage = "payload_parsed";
 
       const supabase = serviceClient();
 
@@ -93,6 +101,8 @@ if (import.meta.main) {
         type: "application/json; charset=utf-8",
       });
 
+      stage = "snapshot_upload";
+      const snapshotStart = Date.now();
       const { error: snapshotErr } = await supabase.storage
         .from("households")
         .upload(snapshotPath, snapshotBlob, {
@@ -101,6 +111,7 @@ if (import.meta.main) {
           // Versioned snapshots can be long-cached IF you never mutate old versions.
           cacheControl: "public, max-age=31536000, immutable",
         });
+      snapshotUploadMs = Date.now() - snapshotStart;
 
       if (snapshotErr) {
         throw new AppError("artifact_failed", 502, snapshotErr.message);
@@ -117,6 +128,8 @@ if (import.meta.main) {
         type: "application/json; charset=utf-8",
       });
 
+      stage = "manifest_upload";
+      const manifestStart = Date.now();
       const { error: manifestErr } = await supabase.storage
         .from("households")
         .upload(manifestPath, manifestBlob, {
@@ -125,6 +138,7 @@ if (import.meta.main) {
           // Manifest should never be cached.
           cacheControl: "no-store",
         });
+      manifestUploadMs = Date.now() - manifestStart;
 
       if (manifestErr) {
         throw new AppError("artifact_failed", 502, manifestErr.message);
@@ -132,12 +146,16 @@ if (import.meta.main) {
 
       const revalidatePath = payload.public_url_path ||
         `/kinly/norms/${homePublicId}`;
+      stage = "revalidate";
+      const revalidateStart = Date.now();
       const revalidated = await callRevalidate(revalidatePath);
+      revalidateMs = Date.now() - revalidateStart;
 
       if (!revalidated.ok) {
         throw new AppError("revalidate_failed", 502, revalidated.error);
       }
 
+      stage = "done";
       console.log(JSON.stringify({
         level: "info",
         msg: "house_norms_publish_sync_ok",
@@ -147,6 +165,9 @@ if (import.meta.main) {
         snapshot_path: snapshotPath,
         manifest_path: manifestPath,
         revalidate_path: revalidatePath,
+        snapshot_upload_ms: snapshotUploadMs,
+        manifest_upload_ms: manifestUploadMs,
+        revalidate_ms: revalidateMs,
       }));
 
       return json(
@@ -166,8 +187,12 @@ if (import.meta.main) {
         level: appErr.status >= 500 ? "error" : "warn",
         msg: "house_norms_publish_sync_failed",
         request_id: requestId,
+        stage,
         error_code: appErr.code,
         details: appErr.details,
+        snapshot_upload_ms: snapshotUploadMs,
+        manifest_upload_ms: manifestUploadMs,
+        revalidate_ms: revalidateMs,
       }));
 
       return json(
@@ -303,6 +328,7 @@ async function callRevalidate(
 
   const response = await fetch(url, {
     method: "POST",
+    signal: AbortSignal.timeout(REVALIDATE_TIMEOUT_MS),
     headers: {
       "Content-Type": "application/json; charset=utf-8",
       "x-revalidate-secret": secret, // single header only
