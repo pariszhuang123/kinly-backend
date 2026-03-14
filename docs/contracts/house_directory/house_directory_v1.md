@@ -13,7 +13,7 @@ Version: v1.0
 Status: Proposed
 
 Scope: Shared home operational reference data for wifi access, home services,
-home links, and due renewal reminders derived from service terms.
+house notes, and due renewal reminders derived from service terms.
 
 Audience: Product, design, engineering, AI agents.
 
@@ -30,14 +30,15 @@ operations.
 House Directory MUST support:
 - wifi access details
 - home service references
-- home-related external links
+- simple shared house notes
 - due renewal reminders for time-bound services
 
 ## 2. Scope and boundaries
 
 In scope:
 - shared home operations, not person-specific records
-- URL references, not file hosting
+- optional URL references attached to service or house-note records
+- one optional photo attachment per house note
 - reminder timing derived from service term windows and configured offsets
 - per-member acknowledgement of due reminders
 
@@ -45,7 +46,6 @@ Out of scope:
 - House Norms content and workflows
 - standalone House Rules policy workflows
 - personal bank/emergency/document records
-- binary document upload and hosting
 - enterprise/hidden-network wifi QR variants
 
 ## 3. Core entities
@@ -71,21 +71,30 @@ Out of scope:
   optional `link_url`, optional term dates, optional reminder offset, and
   optional notes.
 - `rent` MUST include both `term_start_date` and `term_end_date`.
-- Services and links are soft-archived with `archived_at`.
+- Services and notes are soft-archived with `archived_at`.
 - Active service uniqueness is enforced for:
   - one active `rent` per home
   - one active `internet` per home
   - one active `electricity` per home
 
-### 3.3 Home link
-- Represents a curated external home link with tags:
-  - `rent`
-  - `bond`
-  - `utilities`
-  - `other`
-- Tag `other` requires `custom_tag`.
-- Link rows are URL references only.
-- Links are soft-archived with `archived_at`.
+### 3.3 House note
+- Represents simple free-form home reference information that does not fit a
+  service row.
+- Each note includes:
+  - `title`
+  - `details`
+  - optional `reference_url`
+  - optional `photo_path`
+- Notes are intended for household context such as move-in instructions,
+  parking details, appliance tips, alarm steps, or access guidance.
+- If `reference_url` is present it MUST be a valid `http` or `https` URL.
+- `photo_path` is a storage reference under `households/%`, not a public CDN URL.
+- A note MAY exist without a URL or photo.
+- Notes are soft-archived with `archived_at`.
+- At most one photo is attached per active note row in v1.
+- Adding the first photo to a note enforces a paywall-limited usage metric for non-premium homes.
+- Replacing an existing photo MUST NOT increment photo usage again.
+- Clearing or archiving a note photo does not decrement that usage metric.
 
 ### 3.4 Renewal reminder
 - Renewal reminders are derived, not user-authored.
@@ -127,7 +136,7 @@ Out of scope:
   - directory content read: current home members on active homes
   - due reminders read: current home members on active homes
 - Write access:
-  - wifi/service/link create-update-archive: current home owner only
+  - wifi/service/note create-update-archive: current home owner only
   - reminder dismiss: current home owner only
   - reminder acknowledge: current home members
 - Wifi password is sensitive operational data:
@@ -145,21 +154,26 @@ Out of scope:
 
 ## 7. Contract test scenarios
 
-- Non-owner cannot mutate wifi, services, links, or dismiss reminders.
+- Non-owner cannot mutate wifi, services, notes, or dismiss reminders.
 - Member can read wifi/content and acknowledge due reminders.
 - Wifi read returns `ssid` and `qr_payload` but not raw password.
 - Rent service creation without term dates is rejected.
+- House note creation without `title` or `details` is rejected.
+- House note URL must be valid when present.
+- First note photo add enforces the note-photo paywall limit on non-premium homes; replacement does not
+  add a second usage charge.
+- Clearing or archiving a note photo does not free prior note-photo usage.
 - Invalid reminder offset pair or out-of-range offset is rejected.
 - A due reminder appears when current UTC date is on or after `due_at`.
 - Member acknowledgement hides the reminder only for that member.
 - Owner dismissal removes the reminder from due-reminder results.
 - Archiving a service retires its reminder and removes it from content reads.
-- Archived links are excluded from content reads.
+- Archived notes are excluded from content reads.
 
 ## 8. References
 
-- [House Directory API v1](./house_directory_api_v1.md)
-- [Homes v2](../homes_v2.md)
+- [House Directory API v1](../../../api/kinly/homes/house_directory_api_v1.md)
+- [Homes v2](../../../api/kinly/homes/homes_v2.md)
 
 ```contracts-json
 {
@@ -168,7 +182,7 @@ Out of scope:
   "entities": {
     "WifiProfile": {},
     "HomeService": {},
-    "HomeLink": {},
+    "HouseNote": {},
     "HomeServiceReminder": {},
     "HomeServiceReminderAcknowledgement": {}
   },

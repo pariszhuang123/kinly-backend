@@ -9,6 +9,9 @@ import {
   AppError,
   callRevalidate,
   env,
+  markJobFailed,
+  markJobProcessing,
+  markJobSucceeded,
   normalizeError,
   parsePayload,
   requireInternalSecret,
@@ -23,6 +26,7 @@ function validPayload(overrides: Record<string, unknown> = {}) {
     template_key: "house_norms_v1",
     locale_base: "en",
     published_content: { title: "Clean kitchen after use" },
+    publish_job_id: "11111111-1111-4111-8111-111111111111",
     ...overrides,
   };
 }
@@ -39,6 +43,7 @@ Deno.test("parsePayload accepts valid payload", async () => {
   assertEquals(out.home_public_id, "abcd1234");
   assertEquals(out.published_version, "v123456");
   assertEquals(out.public_url_path, null);
+  assertEquals(out.publish_job_id, "11111111-1111-4111-8111-111111111111");
 });
 
 Deno.test("parsePayload rejects non-canonical published_at", async () => {
@@ -71,6 +76,16 @@ Deno.test("parsePayload rejects invalid published_version", async () => {
     AppError,
     "invalid_published_version",
   );
+});
+
+Deno.test("parsePayload rejects invalid publish_job_id", async () => {
+  const req = new Request("http://localhost", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(validPayload({ publish_job_id: "not-a-uuid" })),
+  });
+
+  await assertRejects(() => parsePayload(req), AppError, "invalid_payload");
 });
 
 Deno.test("parsePayload rejects array published_content", async () => {
@@ -244,4 +259,96 @@ Deno.test("normalizeError preserves missing_env code from plain Error", () => {
   const out = normalizeError(new Error("missing_env:WORKER_SHARED_SECRET"));
   assertEquals(out.code, "missing_env:WORKER_SHARED_SECRET");
   assertEquals(out.status, 500);
+});
+
+Deno.test("markJobProcessing calls publish job processing RPC", async () => {
+  const calls: Array<{ fn: string; args?: Record<string, unknown> }> = [];
+  const supabase = {
+    rpc(fn: string, args?: Record<string, unknown>) {
+      calls.push({ fn, args });
+      return Promise.resolve({ error: null });
+    },
+  };
+
+  await markJobProcessing(
+    supabase,
+    "11111111-1111-4111-8111-111111111111",
+    "req-1",
+    "processing",
+  );
+
+  assertEquals(calls, [{
+    fn: "house_norms_publish_job_mark_processing",
+    args: {
+      p_job_id: "11111111-1111-4111-8111-111111111111",
+      p_request_id: "req-1",
+      p_stage: "processing",
+    },
+  }]);
+});
+
+Deno.test("markJobSucceeded stores timing metrics via RPC", async () => {
+  const calls: Array<{ fn: string; args?: Record<string, unknown> }> = [];
+  const supabase = {
+    rpc(fn: string, args?: Record<string, unknown>) {
+      calls.push({ fn, args });
+      return Promise.resolve({ error: null });
+    },
+  };
+
+  await markJobSucceeded(
+    supabase,
+    "11111111-1111-4111-8111-111111111111",
+    "req-2",
+    12,
+    34,
+    56,
+  );
+
+  assertEquals(calls, [{
+    fn: "house_norms_publish_job_mark_succeeded",
+    args: {
+      p_job_id: "11111111-1111-4111-8111-111111111111",
+      p_request_id: "req-2",
+      p_snapshot_upload_ms: 12,
+      p_manifest_upload_ms: 34,
+      p_revalidate_ms: 56,
+    },
+  }]);
+});
+
+Deno.test("markJobFailed stores stage and error details via RPC", async () => {
+  const calls: Array<{ fn: string; args?: Record<string, unknown> }> = [];
+  const supabase = {
+    rpc(fn: string, args?: Record<string, unknown>) {
+      calls.push({ fn, args });
+      return Promise.resolve({ error: null });
+    },
+  };
+
+  await markJobFailed(
+    supabase,
+    "11111111-1111-4111-8111-111111111111",
+    "req-3",
+    "artifact_failed",
+    "storage upload failed",
+    "snapshot_upload",
+    21,
+    null,
+    null,
+  );
+
+  assertEquals(calls, [{
+    fn: "house_norms_publish_job_mark_failed",
+    args: {
+      p_job_id: "11111111-1111-4111-8111-111111111111",
+      p_request_id: "req-3",
+      p_error_code: "artifact_failed",
+      p_error: "storage upload failed",
+      p_stage: "snapshot_upload",
+      p_snapshot_upload_ms: 21,
+      p_manifest_upload_ms: null,
+      p_revalidate_ms: null,
+    },
+  }]);
 });

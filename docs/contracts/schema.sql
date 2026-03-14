@@ -166,7 +166,8 @@ CREATE TYPE "public"."home_usage_metric" AS ENUM (
     'active_members',
     'active_expenses',
     'shopping_item_photos',
-    'expense_photos'
+    'expense_photos',
+    'house_directory_note_photos'
 );
 
 
@@ -1250,12 +1251,13 @@ BEGIN
   WHERE home_id = p_home_id;
 
   IF NOT FOUND THEN
-    v_counters.active_chores        := 0;
-    v_counters.chore_photos         := 0;
-    v_counters.active_members       := 0;
-    v_counters.active_expenses      := 0;
-    v_counters.shopping_item_photos := 0;
-    v_counters.expense_photos       := 0;
+    v_counters.active_chores               := 0;
+    v_counters.chore_photos                := 0;
+    v_counters.active_members              := 0;
+    v_counters.active_expenses             := 0;
+    v_counters.shopping_item_photos        := 0;
+    v_counters.expense_photos              := 0;
+    v_counters.house_directory_note_photos := 0;
   END IF;
 
   FOR v_metric_key, v_raw_value IN
@@ -1292,12 +1294,13 @@ BEGIN
     END IF;
 
     v_current := CASE v_metric_enum
-      WHEN 'active_chores'        THEN COALESCE(v_counters.active_chores, 0)
-      WHEN 'chore_photos'         THEN COALESCE(v_counters.chore_photos, 0)
-      WHEN 'active_members'       THEN COALESCE(v_counters.active_members, 0)
-      WHEN 'active_expenses'      THEN COALESCE(v_counters.active_expenses, 0)
-      WHEN 'shopping_item_photos' THEN COALESCE(v_counters.shopping_item_photos, 0)
-      WHEN 'expense_photos'       THEN COALESCE(v_counters.expense_photos, 0)
+      WHEN 'active_chores'               THEN COALESCE(v_counters.active_chores, 0)
+      WHEN 'chore_photos'                THEN COALESCE(v_counters.chore_photos, 0)
+      WHEN 'active_members'              THEN COALESCE(v_counters.active_members, 0)
+      WHEN 'active_expenses'             THEN COALESCE(v_counters.active_expenses, 0)
+      WHEN 'shopping_item_photos'        THEN COALESCE(v_counters.shopping_item_photos, 0)
+      WHEN 'expense_photos'              THEN COALESCE(v_counters.expense_photos, 0)
+      WHEN 'house_directory_note_photos' THEN COALESCE(v_counters.house_directory_note_photos, 0)
     END;
 
     v_new := GREATEST(0, v_current + v_delta);
@@ -1418,11 +1421,13 @@ CREATE TABLE IF NOT EXISTS "public"."home_usage_counters" (
     "active_expenses" integer DEFAULT 0 NOT NULL,
     "shopping_item_photos" integer DEFAULT 0 NOT NULL,
     "expense_photos" integer DEFAULT 0 NOT NULL,
+    "house_directory_note_photos" integer DEFAULT 0 NOT NULL,
     CONSTRAINT "home_usage_counters_active_chores_check" CHECK (("active_chores" >= 0)),
     CONSTRAINT "home_usage_counters_active_expenses_check" CHECK (("active_expenses" >= 0)),
     CONSTRAINT "home_usage_counters_active_members_check" CHECK (("active_members" >= 0)),
     CONSTRAINT "home_usage_counters_chore_photos_check" CHECK (("chore_photos" >= 0)),
     CONSTRAINT "home_usage_counters_expense_photos_check" CHECK (("expense_photos" >= 0)),
+    CONSTRAINT "home_usage_counters_house_directory_note_photos_check" CHECK (("house_directory_note_photos" >= 0)),
     CONSTRAINT "home_usage_counters_shopping_item_photos_check" CHECK (("shopping_item_photos" >= 0))
 );
 
@@ -1450,20 +1455,25 @@ COMMENT ON COLUMN "public"."home_usage_counters"."active_expenses" IS 'Number of
 
 
 
+COMMENT ON COLUMN "public"."home_usage_counters"."house_directory_note_photos" IS 'Cumulative count of home-directory note photos added for the home. Replacements do not increment again.';
+
+
+
 CREATE OR REPLACE FUNCTION "public"."_home_usage_apply_delta"("p_home_id" "uuid", "p_deltas" "jsonb") RETURNS "public"."home_usage_counters"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO ''
     AS $$
 DECLARE
-  v_row                         public.home_usage_counters;
-  v_home_active                 boolean;
+  v_row                               public.home_usage_counters;
+  v_home_active                       boolean;
 
-  v_active_chores_delta         integer := 0;
-  v_chore_photos_delta          integer := 0;
-  v_active_members_delta        integer := 0;
-  v_active_expenses_delta       integer := 0;
-  v_shopping_item_photos_delta  integer := 0;
-  v_expense_photos_delta        integer := 0;
+  v_active_chores_delta               integer := 0;
+  v_chore_photos_delta                integer := 0;
+  v_active_members_delta              integer := 0;
+  v_active_expenses_delta             integer := 0;
+  v_shopping_item_photos_delta        integer := 0;
+  v_expense_photos_delta              integer := 0;
+  v_house_directory_note_photos_delta integer := 0;
 BEGIN
   IF p_home_id IS NULL THEN
     PERFORM public.api_error('INVALID_HOME', 'Home id is required.', '22023');
@@ -1512,16 +1522,21 @@ BEGIN
     IF jsonb_typeof(p_deltas->'expense_photos') = 'number' THEN
       v_expense_photos_delta := (p_deltas->>'expense_photos')::integer;
     END IF;
+
+    IF jsonb_typeof(p_deltas->'house_directory_note_photos') = 'number' THEN
+      v_house_directory_note_photos_delta := (p_deltas->>'house_directory_note_photos')::integer;
+    END IF;
   END IF;
 
   UPDATE public.home_usage_counters h
-     SET active_chores        = GREATEST(0, COALESCE(h.active_chores, 0) + v_active_chores_delta),
-         chore_photos         = GREATEST(0, COALESCE(h.chore_photos, 0) + v_chore_photos_delta),
-         active_members       = GREATEST(0, COALESCE(h.active_members, 0) + v_active_members_delta),
-         active_expenses      = GREATEST(0, COALESCE(h.active_expenses, 0) + v_active_expenses_delta),
-         shopping_item_photos = GREATEST(0, COALESCE(h.shopping_item_photos, 0) + v_shopping_item_photos_delta),
-         expense_photos       = GREATEST(0, COALESCE(h.expense_photos, 0) + v_expense_photos_delta),
-         updated_at           = now()
+     SET active_chores               = GREATEST(0, COALESCE(h.active_chores, 0) + v_active_chores_delta),
+         chore_photos                = GREATEST(0, COALESCE(h.chore_photos, 0) + v_chore_photos_delta),
+         active_members              = GREATEST(0, COALESCE(h.active_members, 0) + v_active_members_delta),
+         active_expenses             = GREATEST(0, COALESCE(h.active_expenses, 0) + v_active_expenses_delta),
+         shopping_item_photos        = GREATEST(0, COALESCE(h.shopping_item_photos, 0) + v_shopping_item_photos_delta),
+         expense_photos              = GREATEST(0, COALESCE(h.expense_photos, 0) + v_expense_photos_delta),
+         house_directory_note_photos = GREATEST(0, COALESCE(h.house_directory_note_photos, 0) + v_house_directory_note_photos_delta),
+         updated_at                  = now()
    WHERE h.home_id = p_home_id
    RETURNING * INTO v_row;
 
@@ -2370,6 +2385,150 @@ $_$;
 
 
 ALTER FUNCTION "public"."_house_norms_next_published_version"("p_prev" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_house_norms_publish_job_dispatch"("p_job_id" "uuid") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+DECLARE
+  v_job public.house_norms_publish_jobs%ROWTYPE;
+  v_supabase_url text;
+  v_secret text;
+  v_request_id bigint;
+BEGIN
+  SELECT *
+    INTO v_job
+  FROM public.house_norms_publish_jobs j
+  WHERE j.job_id = p_job_id;
+
+  IF v_job.job_id IS NULL THEN
+    RETURN jsonb_build_object(
+      'ok', false,
+      'reason', 'not_found',
+      'job_id', p_job_id
+    );
+  END IF;
+
+  IF v_job.status = 'succeeded' THEN
+    RETURN jsonb_build_object(
+      'ok', true,
+      'job_id', p_job_id,
+      'skipped', 'already_succeeded'
+    );
+  END IF;
+
+  IF v_job.status <> 'dispatching' THEN
+    RETURN jsonb_build_object(
+      'ok', false,
+      'job_id', p_job_id,
+      'reason', 'not_dispatching_state',
+      'status', v_job.status
+    );
+  END IF;
+
+  BEGIN
+    SELECT s.decrypted_secret
+      INTO v_supabase_url
+    FROM vault.decrypted_secrets s
+    WHERE s.name = 'SUPABASE_URL'
+    LIMIT 1;
+  EXCEPTION
+    WHEN undefined_table OR insufficient_privilege THEN
+      v_supabase_url := NULL;
+  END;
+
+  BEGIN
+    SELECT s.decrypted_secret
+      INTO v_secret
+    FROM vault.decrypted_secrets s
+    WHERE s.name = 'WORKER_SHARED_SECRET'
+    LIMIT 1;
+  EXCEPTION
+    WHEN undefined_table OR insufficient_privilege THEN
+      v_secret := NULL;
+  END;
+
+  IF v_supabase_url IS NULL OR btrim(v_supabase_url) = '' THEN
+    v_supabase_url := NULLIF(current_setting('app.settings.supabase_url', true), '');
+  END IF;
+
+  IF v_secret IS NULL OR btrim(v_secret) = '' THEN
+    v_secret := NULLIF(current_setting('app.settings.worker_shared_secret', true), '');
+  END IF;
+
+  IF v_supabase_url IS NULL OR v_secret IS NULL THEN
+    UPDATE public.house_norms_publish_jobs
+    SET status = 'failed',
+        current_stage = 'dispatch_config',
+        last_error_code = 'dispatch_config_missing',
+        last_error = 'Publish job dispatch missing SUPABASE_URL or WORKER_SHARED_SECRET.',
+        last_error_at = now(),
+        heartbeat_at = now(),
+        processed_at = now()
+    WHERE job_id = p_job_id
+      AND status = 'dispatching';
+
+    RETURN jsonb_build_object(
+      'ok', false,
+      'job_id', p_job_id,
+      'reason', 'dispatch_config_missing'
+    );
+  END IF;
+
+  BEGIN
+    SELECT net.http_post(
+      url := v_supabase_url || '/functions/v1/house_norms_publish_sync',
+      headers := jsonb_strip_nulls(jsonb_build_object(
+        'Content-Type', 'application/json',
+        'x-internal-secret', v_secret
+      )),
+      body := v_job.payload || jsonb_build_object(
+        'publish_job_id', v_job.job_id
+      )
+    )
+      INTO v_request_id;
+  EXCEPTION
+    WHEN OTHERS THEN
+      UPDATE public.house_norms_publish_jobs
+      SET status = 'failed',
+          current_stage = 'dispatch_enqueue',
+          last_error_code = SQLSTATE,
+          last_error = left(SQLERRM, 1000),
+          last_error_at = now(),
+          heartbeat_at = now(),
+          processed_at = now()
+      WHERE job_id = p_job_id
+        AND status = 'dispatching';
+
+      RETURN jsonb_build_object(
+        'ok', false,
+        'job_id', p_job_id,
+        'reason', 'dispatch_enqueue_failed',
+        'sqlstate', SQLSTATE
+      );
+  END;
+
+  UPDATE public.house_norms_publish_jobs
+  SET current_stage = 'dispatch_queued',
+      last_request_id = v_request_id::text,
+      last_error_code = NULL,
+      last_error = NULL,
+      last_error_at = NULL,
+      heartbeat_at = now()
+  WHERE job_id = p_job_id
+    AND status = 'dispatching';
+
+  RETURN jsonb_build_object(
+    'ok', true,
+    'job_id', p_job_id,
+    'request_id', v_request_id
+  );
+END;
+$$;
+
+
+ALTER FUNCTION "public"."_house_norms_publish_job_dispatch"("p_job_id" "uuid") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."_house_norms_publish_sync_call"("p_home_public_id" "text", "p_published_at" timestamp with time zone, "p_published_version" "text", "p_template_key" "text", "p_locale_base" "text", "p_published_content" "jsonb", "p_public_url_path" "text" DEFAULT NULL::"text") RETURNS "void"
@@ -3661,74 +3820,70 @@ $$;
 ALTER FUNCTION "public"."api_error"("p_code" "text", "p_msg" "text", "p_sqlstate" "text", "p_details" "jsonb", "p_hint" "text") OWNER TO "postgres";
 
 
-CREATE OR REPLACE FUNCTION "public"."archive_home_directory_link"("p_home_id" "uuid", "p_link_id" "uuid") RETURNS "jsonb"
+CREATE OR REPLACE FUNCTION "public"."archive_home_directory_note"("p_home_id" "uuid", "p_note_id" "uuid") RETURNS "jsonb"
     LANGUAGE "plpgsql" SECURITY DEFINER
-    SET "search_path" TO 'pg_catalog', 'public'
+    SET "search_path" TO ''
     AS $$
 DECLARE
   v_user uuid := auth.uid();
-  v_link public.home_directory_links%ROWTYPE;
-  v_existing public.home_directory_links%ROWTYPE;
+  v_note public.home_directory_notes%ROWTYPE;
+  v_existing public.home_directory_notes%ROWTYPE;
 BEGIN
   PERFORM public._assert_authenticated();
   PERFORM public._assert_home_active(p_home_id);
   PERFORM public._house_directory_assert_owner(p_home_id);
 
-  UPDATE public.home_directory_links l
+  UPDATE public.home_directory_notes n
      SET archived_at = now(),
          updated_by_user_id = v_user
-   WHERE l.id = p_link_id
-     AND l.home_id = p_home_id
-     AND l.archived_at IS NULL
-  RETURNING * INTO v_link;
+   WHERE n.id = p_note_id
+     AND n.home_id = p_home_id
+     AND n.archived_at IS NULL
+  RETURNING * INTO v_note;
 
   IF FOUND THEN
     RETURN jsonb_build_object(
       'ok', true,
       'already_archived', false,
-      'link', jsonb_build_object(
-        'id', v_link.id,
-        'home_id', v_link.home_id,
-        'title', v_link.title,
-        'url', v_link.url,
-        'tag', v_link.tag,
-        'custom_tag', v_link.custom_tag,
-        'start_date', v_link.start_date,
-        'end_date', v_link.end_date,
-        'archived_at', v_link.archived_at,
-        'created_at', v_link.created_at,
-        'updated_at', v_link.updated_at
+      'note', jsonb_build_object(
+        'id', v_note.id,
+        'home_id', v_note.home_id,
+        'title', v_note.title,
+        'details', v_note.details,
+        'reference_url', v_note.reference_url,
+        'photo_path', v_note.photo_path,
+        'archived_at', v_note.archived_at,
+        'created_at', v_note.created_at,
+        'updated_at', v_note.updated_at
       )
     );
   END IF;
 
   SELECT *
     INTO v_existing
-  FROM public.home_directory_links l
-  WHERE l.id = p_link_id
-    AND l.home_id = p_home_id;
+  FROM public.home_directory_notes n
+  WHERE n.id = p_note_id
+    AND n.home_id = p_home_id;
 
   IF NOT FOUND THEN
     PERFORM public.api_error(
-      'HOUSE_DIRECTORY_LINK_NOT_FOUND',
-      'The link was not found for this home.',
+      'HOUSE_DIRECTORY_NOTE_NOT_FOUND',
+      'The note was not found for this home.',
       'P0002',
-      jsonb_build_object('home_id', p_home_id, 'link_id', p_link_id)
+      jsonb_build_object('home_id', p_home_id, 'note_id', p_note_id)
     );
   END IF;
 
   RETURN jsonb_build_object(
     'ok', true,
     'already_archived', true,
-    'link', jsonb_build_object(
+    'note', jsonb_build_object(
       'id', v_existing.id,
       'home_id', v_existing.home_id,
       'title', v_existing.title,
-      'url', v_existing.url,
-      'tag', v_existing.tag,
-      'custom_tag', v_existing.custom_tag,
-      'start_date', v_existing.start_date,
-      'end_date', v_existing.end_date,
+      'details', v_existing.details,
+      'reference_url', v_existing.reference_url,
+      'photo_path', v_existing.photo_path,
       'archived_at', v_existing.archived_at,
       'created_at', v_existing.created_at,
       'updated_at', v_existing.updated_at
@@ -3738,7 +3893,7 @@ END;
 $$;
 
 
-ALTER FUNCTION "public"."archive_home_directory_link"("p_home_id" "uuid", "p_link_id" "uuid") OWNER TO "postgres";
+ALTER FUNCTION "public"."archive_home_directory_note"("p_home_id" "uuid", "p_note_id" "uuid") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."archive_home_directory_service"("p_home_id" "uuid", "p_service_id" "uuid") RETURNS "jsonb"
@@ -5406,7 +5561,6 @@ begin
   perform public.api_assert(length(p_original_text) <= 500, 'TEXT_TOO_LONG', 'original_text max 500 chars.', '22023');
   perform public.api_assert(jsonb_typeof(p_preference_payload) = 'object', 'INVALID_PREF_PAYLOAD', 'preference_payload must be an object', '22023');
 
-  -- 1) Insert rewrite_request stub FIRST
   insert into public.rewrite_requests(
     rewrite_request_id, home_id, sender_user_id, recipient_user_id,
     surface, original_text, source_locale, target_locale, lane,
@@ -5426,7 +5580,6 @@ begin
 
   get diagnostics v_inserted_request = row_count;
 
-  -- 2) Build snapshots (idempotent)
   v_snap := public.complaint_build_recipient_snapshots(
     p_rewrite_request_id,
     p_home_id,
@@ -5440,14 +5593,12 @@ begin
   perform public.api_assert(v_recipient_snapshot_id is not null, 'SNAPSHOT_MISSING', 'recipient snapshot missing', '22023');
   perform public.api_assert(v_recipient_preference_snapshot_id is not null, 'PREF_SNAPSHOT_MISSING', 'recipient preference snapshot missing', '22023');
 
-  -- 3) Update request with snapshot FKs (nullable-at-insert pattern)
   update public.rewrite_requests r
      set recipient_snapshot_id = coalesce(r.recipient_snapshot_id, v_recipient_snapshot_id),
          recipient_preference_snapshot_id = coalesce(r.recipient_preference_snapshot_id, v_recipient_preference_snapshot_id),
          updated_at = now()
    where r.rewrite_request_id = p_rewrite_request_id;
 
-  -- 4) Insert job (idempotent)
   insert into public.rewrite_jobs(
     job_id,
     rewrite_request_id,
@@ -5481,7 +5632,7 @@ begin
 
   get diagnostics v_inserted_job = row_count;
 
-  if not v_inserted_job then
+  if v_inserted_job = 0 then
     select j.job_id into v_job_id
       from public.rewrite_jobs j
      where j.rewrite_request_id = p_rewrite_request_id
@@ -9733,11 +9884,11 @@ ALTER FUNCTION "public"."fail_complaint_rewrite_job"("p_job_id" "uuid", "p_error
 
 CREATE OR REPLACE FUNCTION "public"."get_home_directory_content"("p_home_id" "uuid") RETURNS "jsonb"
     LANGUAGE "plpgsql" SECURITY DEFINER
-    SET "search_path" TO 'pg_catalog', 'public'
+    SET "search_path" TO ''
     AS $$
 DECLARE
   v_services jsonb := '[]'::jsonb;
-  v_links jsonb := '[]'::jsonb;
+  v_notes jsonb := '[]'::jsonb;
 BEGIN
   PERFORM public._assert_authenticated();
   PERFORM public._assert_home_member(p_home_id);
@@ -9773,31 +9924,29 @@ BEGIN
   SELECT COALESCE(
            jsonb_agg(
              jsonb_build_object(
-               'id', l.id,
-               'home_id', l.home_id,
-               'title', l.title,
-               'url', l.url,
-               'tag', l.tag,
-               'custom_tag', l.custom_tag,
-               'start_date', l.start_date,
-               'end_date', l.end_date,
-               'created_at', l.created_at,
-               'updated_at', l.updated_at
+               'id', n.id,
+               'home_id', n.home_id,
+               'title', n.title,
+               'details', n.details,
+               'reference_url', n.reference_url,
+               'photo_path', n.photo_path,
+               'created_at', n.created_at,
+               'updated_at', n.updated_at
              )
-             ORDER BY lower(l.title), l.created_at DESC, l.id
+             ORDER BY lower(n.title), n.created_at DESC, n.id
            ),
            '[]'::jsonb
          )
-    INTO v_links
-  FROM public.home_directory_links l
-  WHERE l.home_id = p_home_id
-    AND l.archived_at IS NULL;
+    INTO v_notes
+  FROM public.home_directory_notes n
+  WHERE n.home_id = p_home_id
+    AND n.archived_at IS NULL;
 
   RETURN jsonb_build_object(
     'ok', true,
     'home_id', p_home_id,
     'services', v_services,
-    'links', v_links
+    'notes', v_notes
   );
 END;
 $$;
@@ -11444,14 +11593,19 @@ DECLARE
   v_row public.house_norms%ROWTYPE;
   v_requested_locale_base text;
   v_is_owner boolean := false;
-  v_norms_change_at timestamptz := NULL;
-  v_show_member_review_card boolean := false;
   v_show_publish_button boolean := false;
   v_show_republish_button boolean := false;
   v_show_public_url boolean := false;
   v_owner_meta jsonb := '{}'::jsonb;
-  v_member_meta jsonb := '{}'::jsonb;
-  v_member_viewed_at timestamptz := NULL;
+  v_publish_job_id uuid := NULL;
+  v_publish_job_stage text := NULL;
+  v_publish_job_attempt_count integer := NULL;
+  v_publish_job_status text := NULL;
+  v_publish_job_last_error_code text := NULL;
+  v_publish_job_last_error text := NULL;
+  v_publish_job_last_error_at timestamptz := NULL;
+  v_publish_sync_status text := NULL;
+  v_publish_sync_error jsonb := NULL;
 BEGIN
   PERFORM public._assert_authenticated();
   PERFORM public._assert_home_member(p_home_id);
@@ -11504,36 +11658,56 @@ BEGIN
       v_show_public_url := true;
     END IF;
 
-    v_owner_meta := jsonb_build_object(
+    IF v_row.published_version IS NOT NULL THEN
+      SELECT j.job_id,
+             j.current_stage,
+             j.attempt_count,
+             j.status,
+             j.last_error_code,
+             j.last_error,
+             j.last_error_at
+        INTO v_publish_job_id,
+             v_publish_job_stage,
+             v_publish_job_attempt_count,
+             v_publish_job_status,
+             v_publish_job_last_error_code,
+             v_publish_job_last_error,
+             v_publish_job_last_error_at
+      FROM public.house_norms_publish_jobs j
+      WHERE j.home_id = p_home_id
+        AND j.published_version = v_row.published_version
+      ORDER BY j.created_at DESC
+      LIMIT 1;
+
+      v_publish_sync_status := COALESCE(v_publish_job_status, 'unknown');
+
+      IF v_publish_sync_status = 'failed' THEN
+        v_publish_sync_error := jsonb_strip_nulls(jsonb_build_object(
+          'code', v_publish_job_last_error_code,
+          'message', v_publish_job_last_error,
+          'stage', v_publish_job_stage,
+          'at', v_publish_job_last_error_at
+        ));
+      END IF;
+    END IF;
+
+    v_owner_meta := jsonb_strip_nulls(jsonb_build_object(
       'home_public_id', v_row.home_public_id,
       'public_url',
         CASE
           WHEN v_row.home_public_id IS NULL THEN NULL
           ELSE public._house_norms_build_public_url(v_row.home_public_id::text)
         END,
+      'published_version', v_row.published_version,
       'show_publish_button', v_show_publish_button,
       'show_republish_button', v_show_republish_button,
-      'show_public_url', v_show_public_url
-    );
-  ELSE
-    SELECT mv.viewed_at
-      INTO v_member_viewed_at
-    FROM public.house_norms_member_views mv
-    WHERE mv.home_id = p_home_id
-      AND mv.user_id = auth.uid()
-    LIMIT 1;
-
-    v_norms_change_at := COALESCE(v_row.last_edited_at, v_row.generated_at);
-    v_show_member_review_card := (
-      v_norms_change_at IS NOT NULL
-      AND now() >= (v_norms_change_at + interval '24 hours')
-      AND (v_member_viewed_at IS NULL OR v_member_viewed_at < v_norms_change_at)
-    );
-
-    v_member_meta := jsonb_build_object(
-      'member_viewed_at', v_member_viewed_at,
-      'show_member_review_card', v_show_member_review_card
-    );
+      'show_public_url', v_show_public_url,
+      'publish_sync_status', v_publish_sync_status,
+      'publish_sync_error', v_publish_sync_error,
+      'publish_job_id', v_publish_job_id,
+      'publish_job_stage', v_publish_job_stage,
+      'publish_attempt_count', v_publish_job_attempt_count
+    ));
   END IF;
 
   RETURN jsonb_build_object(
@@ -11541,24 +11715,38 @@ BEGIN
     'home_id', p_home_id,
     'requested_locale_base', v_requested_locale_base,
     'doc_locale_base', v_row.locale_base,
-    'house_norms', jsonb_build_object(
-      'template_key', v_row.template_key,
-      'status', v_row.status,
-      'inputs', v_row.inputs,
-      -- Draft
-      'draft_content', v_row.generated_content,
-      'draft_updated_at', v_row.generated_at,
-      -- Published snapshot (web/share)
-      'published_content', v_row.published_content,
-      'published_at', v_row.published_at,
-      'published_version', v_row.published_version,
-      'is_published', (v_row.published_content IS NOT NULL),
-      'has_unpublished_changes',
-        (v_row.published_content IS NULL OR v_row.generated_content IS DISTINCT FROM v_row.published_content),
-      'show_member_review_card', false,
-      'last_edited_at', v_row.last_edited_at,
-      'last_edited_by', v_row.last_edited_by
-    ) || v_owner_meta || v_member_meta
+    'house_norms',
+      jsonb_strip_nulls(
+        jsonb_build_object(
+          'template_key', v_row.template_key,
+          'status', v_row.status,
+          'inputs', v_row.inputs,
+          'draft_content', v_row.generated_content,
+          'draft_updated_at', v_row.generated_at,
+          'published_content', v_row.published_content,
+          'published_at', v_row.published_at,
+          'published_version', v_row.published_version,
+          'is_published', (v_row.published_content IS NOT NULL),
+          'has_unpublished_changes',
+            (v_row.published_content IS NULL OR v_row.generated_content IS DISTINCT FROM v_row.published_content),
+          'last_edited_at', v_row.last_edited_at,
+          'last_edited_by', v_row.last_edited_by
+        )
+        || CASE
+             WHEN v_is_owner THEN v_owner_meta
+             ELSE jsonb_build_object(
+               'member_viewed_at',
+                 (
+                   SELECT v.viewed_at
+                   FROM public.house_norms_member_views v
+                   WHERE v.home_id = p_home_id
+                     AND v.user_id = auth.uid()
+                 ),
+               'show_member_review_card',
+                 public.house_norms_should_show_member_review(p_home_id)
+             )
+           END
+      )
   );
 END;
 $_$;
@@ -11652,6 +11840,11 @@ DECLARE
   v_next_published_version text;
   v_public_url text;
   v_public_url_path text;
+  v_publish_job_id uuid;
+  v_publish_payload jsonb;
+  v_publish_job record;
+  v_publish_sync_status text;
+  v_publish_sync_error jsonb := NULL;
 BEGIN
   PERFORM public._assert_authenticated();
   PERFORM public._assert_home_member(p_home_id);
@@ -11675,7 +11868,6 @@ BEGIN
     jsonb_build_object('locale_base', v_requested_locale_base)
   );
 
-  -- Concurrency: lock row to ensure publish copies a consistent draft snapshot
   SELECT *
     INTO v_row
   FROM public.house_norms hn
@@ -11691,6 +11883,30 @@ BEGIN
     );
   END IF;
 
+  PERFORM public.api_assert(
+    v_row.generated_content IS NOT NULL,
+    'HOUSE_NORMS_DRAFT_MISSING',
+    'Cannot publish because no generated draft content exists.',
+    '22023',
+    jsonb_build_object('home_id', p_home_id)
+  );
+
+  PERFORM public.api_assert(
+    v_row.template_key IS NOT NULL AND btrim(v_row.template_key) <> '',
+    'HOUSE_NORMS_TEMPLATE_KEY_REQUIRED',
+    'Cannot publish because template_key is missing.',
+    '22023',
+    jsonb_build_object('home_id', p_home_id)
+  );
+
+  PERFORM public.api_assert(
+    v_row.locale_base ~ '^[a-z]{2}$',
+    'HOUSE_NORMS_INVALID_DOC_LOCALE',
+    'Cannot publish because the document locale_base is invalid.',
+    '22023',
+    jsonb_build_object('locale_base', v_row.locale_base)
+  );
+
   v_home_public_id := COALESCE(v_row.home_public_id, public._house_norms_generate_public_id());
   v_next_published_version := public._house_norms_next_published_version(v_row.published_version);
   v_public_url_path := '/kinly/norms/' || v_home_public_id::text;
@@ -11703,19 +11919,76 @@ BEGIN
       home_public_id = v_home_public_id
   WHERE home_id = p_home_id
   RETURNING *
-  INTO v_row;
+    INTO v_row;
 
   v_public_url := public._house_norms_build_public_url(v_row.home_public_id::text);
 
-  PERFORM public._house_norms_publish_sync_call(
-    p_home_public_id => v_row.home_public_id::text,
-    p_published_at => v_row.published_at,
-    p_published_version => v_row.published_version,
-    p_template_key => v_row.template_key,
-    p_locale_base => v_row.locale_base,
-    p_published_content => v_row.published_content,
-    p_public_url_path => v_public_url_path
+  v_publish_payload := jsonb_build_object(
+    'home_public_id', v_row.home_public_id::text,
+    'published_at', public._to_iso_utc_ms(v_row.published_at),
+    'published_version', v_row.published_version,
+    'template_key', v_row.template_key,
+    'locale_base', v_row.locale_base,
+    'published_content', v_row.published_content,
+    'public_url_path', v_public_url_path
   );
+
+  INSERT INTO public.house_norms_publish_jobs (
+    home_id,
+    home_public_id,
+    published_version,
+    published_at,
+    template_key,
+    locale_base,
+    public_url_path,
+    payload,
+    status,
+    current_stage
+  )
+  VALUES (
+    p_home_id,
+    v_row.home_public_id,
+    v_row.published_version,
+    v_row.published_at,
+    v_row.template_key,
+    v_row.locale_base,
+    v_public_url_path,
+    v_publish_payload,
+    'queued',
+    'queued'
+  )
+  ON CONFLICT (home_id, published_version) DO UPDATE
+  SET home_public_id = EXCLUDED.home_public_id,
+      published_at = EXCLUDED.published_at,
+      template_key = EXCLUDED.template_key,
+      locale_base = EXCLUDED.locale_base,
+      public_url_path = EXCLUDED.public_url_path,
+      payload = EXCLUDED.payload
+  RETURNING job_id
+    INTO v_publish_job_id;
+
+  PERFORM public.house_norms_publish_job_redrive_v1(v_publish_job_id);
+
+  SELECT j.status,
+         j.last_error_code,
+         j.last_error,
+         j.last_error_at,
+         j.current_stage,
+         j.attempt_count
+    INTO v_publish_job
+  FROM public.house_norms_publish_jobs j
+  WHERE j.job_id = v_publish_job_id;
+
+  v_publish_sync_status := COALESCE(v_publish_job.status, 'unknown');
+
+  IF v_publish_sync_status = 'failed' THEN
+    v_publish_sync_error := jsonb_strip_nulls(jsonb_build_object(
+      'code', v_publish_job.last_error_code,
+      'message', v_publish_job.last_error,
+      'stage', v_publish_job.current_stage,
+      'at', v_publish_job.last_error_at
+    ));
+  END IF;
 
   RETURN jsonb_build_object(
     'ok', true,
@@ -11728,13 +12001,335 @@ BEGIN
     'published_version', v_row.published_version,
     'home_public_id', v_row.home_public_id,
     'public_url', v_public_url,
-    'has_unpublished_changes', false
+    'has_unpublished_changes', false,
+    'publish_sync_status', v_publish_sync_status,
+    'publish_sync_error', v_publish_sync_error,
+    'publish_job_id', v_publish_job_id,
+    'publish_job_stage', v_publish_job.current_stage,
+    'publish_attempt_count', v_publish_job.attempt_count
   );
 END;
 $_$;
 
 
 ALTER FUNCTION "public"."house_norms_publish_for_home"("p_home_id" "uuid", "p_locale" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."house_norms_publish_job_mark_failed"("p_job_id" "uuid", "p_request_id" "text" DEFAULT NULL::"text", "p_error_code" "text" DEFAULT NULL::"text", "p_error" "text" DEFAULT NULL::"text", "p_stage" "text" DEFAULT NULL::"text", "p_snapshot_upload_ms" integer DEFAULT NULL::integer, "p_manifest_upload_ms" integer DEFAULT NULL::integer, "p_revalidate_ms" integer DEFAULT NULL::integer) RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+DECLARE
+  v_row public.house_norms_publish_jobs%ROWTYPE;
+BEGIN
+  PERFORM public.api_assert(
+    p_snapshot_upload_ms IS NULL OR p_snapshot_upload_ms >= 0,
+    'INVALID_DURATION',
+    'snapshot_upload_ms must be null or >= 0.',
+    '22023'
+  );
+
+  PERFORM public.api_assert(
+    p_manifest_upload_ms IS NULL OR p_manifest_upload_ms >= 0,
+    'INVALID_DURATION',
+    'manifest_upload_ms must be null or >= 0.',
+    '22023'
+  );
+
+  PERFORM public.api_assert(
+    p_revalidate_ms IS NULL OR p_revalidate_ms >= 0,
+    'INVALID_DURATION',
+    'revalidate_ms must be null or >= 0.',
+    '22023'
+  );
+
+  UPDATE public.house_norms_publish_jobs
+  SET status = 'failed',
+      current_stage = COALESCE(NULLIF(btrim(p_stage), ''), current_stage, 'failed'),
+      last_request_id = COALESCE(NULLIF(btrim(p_request_id), ''), last_request_id),
+      last_error_code = NULLIF(btrim(p_error_code), ''),
+      last_error = CASE
+                     WHEN p_error IS NULL THEN NULL
+                     ELSE left(p_error, 1000)
+                   END,
+      last_error_at = now(),
+      snapshot_upload_ms = COALESCE(p_snapshot_upload_ms, snapshot_upload_ms),
+      manifest_upload_ms = COALESCE(p_manifest_upload_ms, manifest_upload_ms),
+      revalidate_ms = COALESCE(p_revalidate_ms, revalidate_ms),
+      heartbeat_at = now(),
+      processed_at = now()
+  WHERE job_id = p_job_id
+    AND status IN ('dispatching', 'processing')
+  RETURNING *
+    INTO v_row;
+
+  RETURN jsonb_build_object(
+    'ok', v_row.job_id IS NOT NULL,
+    'job_id', p_job_id,
+    'status', v_row.status,
+    'reason', CASE WHEN v_row.job_id IS NULL THEN 'invalid_transition' ELSE NULL END
+  );
+END;
+$$;
+
+
+ALTER FUNCTION "public"."house_norms_publish_job_mark_failed"("p_job_id" "uuid", "p_request_id" "text", "p_error_code" "text", "p_error" "text", "p_stage" "text", "p_snapshot_upload_ms" integer, "p_manifest_upload_ms" integer, "p_revalidate_ms" integer) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."house_norms_publish_job_mark_processing"("p_job_id" "uuid", "p_request_id" "text" DEFAULT NULL::"text", "p_stage" "text" DEFAULT 'processing'::"text") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+DECLARE
+  v_row public.house_norms_publish_jobs%ROWTYPE;
+BEGIN
+  UPDATE public.house_norms_publish_jobs
+  SET status = CASE
+                 WHEN status IN ('dispatching', 'processing') THEN 'processing'
+                 ELSE status
+               END,
+      current_stage = COALESCE(NULLIF(btrim(p_stage), ''), 'processing'),
+      last_request_id = COALESCE(NULLIF(btrim(p_request_id), ''), last_request_id),
+      processing_started_at = COALESCE(processing_started_at, now()),
+      heartbeat_at = now(),
+      last_error_code = CASE
+                          WHEN status IN ('dispatching', 'processing') THEN NULL
+                          ELSE last_error_code
+                        END,
+      last_error = CASE
+                     WHEN status IN ('dispatching', 'processing') THEN NULL
+                     ELSE last_error
+                   END,
+      last_error_at = CASE
+                        WHEN status IN ('dispatching', 'processing') THEN NULL
+                        ELSE last_error_at
+                      END,
+      processed_at = CASE
+                       WHEN status IN ('dispatching', 'processing') THEN NULL
+                       ELSE processed_at
+                     END
+  WHERE job_id = p_job_id
+    AND status IN ('dispatching', 'processing')
+  RETURNING *
+    INTO v_row;
+
+  RETURN jsonb_build_object(
+    'ok', v_row.job_id IS NOT NULL,
+    'job_id', p_job_id,
+    'status', v_row.status,
+    'reason', CASE WHEN v_row.job_id IS NULL THEN 'invalid_transition' ELSE NULL END
+  );
+END;
+$$;
+
+
+ALTER FUNCTION "public"."house_norms_publish_job_mark_processing"("p_job_id" "uuid", "p_request_id" "text", "p_stage" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."house_norms_publish_job_mark_succeeded"("p_job_id" "uuid", "p_request_id" "text" DEFAULT NULL::"text", "p_snapshot_upload_ms" integer DEFAULT NULL::integer, "p_manifest_upload_ms" integer DEFAULT NULL::integer, "p_revalidate_ms" integer DEFAULT NULL::integer) RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+DECLARE
+  v_row public.house_norms_publish_jobs%ROWTYPE;
+BEGIN
+  PERFORM public.api_assert(
+    p_snapshot_upload_ms IS NULL OR p_snapshot_upload_ms >= 0,
+    'INVALID_DURATION',
+    'snapshot_upload_ms must be null or >= 0.',
+    '22023'
+  );
+
+  PERFORM public.api_assert(
+    p_manifest_upload_ms IS NULL OR p_manifest_upload_ms >= 0,
+    'INVALID_DURATION',
+    'manifest_upload_ms must be null or >= 0.',
+    '22023'
+  );
+
+  PERFORM public.api_assert(
+    p_revalidate_ms IS NULL OR p_revalidate_ms >= 0,
+    'INVALID_DURATION',
+    'revalidate_ms must be null or >= 0.',
+    '22023'
+  );
+
+  UPDATE public.house_norms_publish_jobs
+  SET status = 'succeeded',
+      current_stage = 'done',
+      last_request_id = COALESCE(NULLIF(btrim(p_request_id), ''), last_request_id),
+      snapshot_upload_ms = p_snapshot_upload_ms,
+      manifest_upload_ms = p_manifest_upload_ms,
+      revalidate_ms = p_revalidate_ms,
+      last_error_code = NULL,
+      last_error = NULL,
+      last_error_at = NULL,
+      heartbeat_at = now(),
+      processed_at = now()
+  WHERE job_id = p_job_id
+    AND status IN ('dispatching', 'processing')
+  RETURNING *
+    INTO v_row;
+
+  RETURN jsonb_build_object(
+    'ok', v_row.job_id IS NOT NULL,
+    'job_id', p_job_id,
+    'status', v_row.status,
+    'reason', CASE WHEN v_row.job_id IS NULL THEN 'invalid_transition' ELSE NULL END
+  );
+END;
+$$;
+
+
+ALTER FUNCTION "public"."house_norms_publish_job_mark_succeeded"("p_job_id" "uuid", "p_request_id" "text", "p_snapshot_upload_ms" integer, "p_manifest_upload_ms" integer, "p_revalidate_ms" integer) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."house_norms_publish_job_redrive_v1"("p_job_id" "uuid") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+DECLARE
+  v_job public.house_norms_publish_jobs%ROWTYPE;
+BEGIN
+  UPDATE public.house_norms_publish_jobs
+  SET status = 'dispatching',
+      attempt_count = attempt_count + 1,
+      current_stage = 'dispatch_claimed',
+      claimed_at = now(),
+      dispatch_started_at = now(),
+      processing_started_at = NULL,
+      heartbeat_at = now(),
+      processed_at = NULL,
+      last_error_code = NULL,
+      last_error = NULL,
+      last_error_at = NULL
+  WHERE job_id = p_job_id
+    AND status IN ('failed', 'queued')
+  RETURNING *
+    INTO v_job;
+
+  IF v_job.job_id IS NULL THEN
+    RETURN jsonb_build_object(
+      'ok', false,
+      'job_id', p_job_id,
+      'reason', 'not_redrivable'
+    );
+  END IF;
+
+  RETURN public._house_norms_publish_job_dispatch(p_job_id);
+END;
+$$;
+
+
+ALTER FUNCTION "public"."house_norms_publish_job_redrive_v1"("p_job_id" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."house_norms_publish_jobs_dispatch_queued_v1"("p_limit" integer DEFAULT 25, "p_stale_for" interval DEFAULT '00:10:00'::interval) RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+DECLARE
+  v_limit integer := GREATEST(COALESCE(p_limit, 25), 1);
+  v_requeued_count integer := 0;
+  v_claimed_count integer := 0;
+  v_dispatched_count integer := 0;
+  v_job record;
+BEGIN
+  -- Requeue stale dispatching/processing jobs using a dedicated liveness timestamp.
+  WITH stale_jobs AS (
+    SELECT j.job_id
+    FROM public.house_norms_publish_jobs j
+    WHERE j.status IN ('dispatching', 'processing')
+      AND COALESCE(
+            j.heartbeat_at,
+            j.processing_started_at,
+            j.dispatch_started_at,
+            j.claimed_at,
+            j.updated_at
+          ) <= now() - COALESCE(p_stale_for, interval '10 minutes')
+    ORDER BY COALESCE(
+               j.heartbeat_at,
+               j.processing_started_at,
+               j.dispatch_started_at,
+               j.claimed_at,
+               j.updated_at
+             ) ASC,
+             j.job_id ASC
+    FOR UPDATE SKIP LOCKED
+    LIMIT v_limit
+  ),
+  requeued AS (
+    UPDATE public.house_norms_publish_jobs j
+    SET status = 'queued',
+        current_stage = 'queued',
+        last_error_code = 'stale_job_requeued',
+        last_error = 'Requeued stale publish job for retry.',
+        last_error_at = now(),
+        claimed_at = NULL,
+        dispatch_started_at = NULL,
+        processing_started_at = NULL,
+        heartbeat_at = NULL,
+        processed_at = NULL
+    WHERE j.job_id IN (SELECT job_id FROM stale_jobs)
+    RETURNING 1
+  )
+  SELECT count(*)::integer
+    INTO v_requeued_count
+  FROM requeued;
+
+  -- Claim queued jobs safely.
+  WITH jobs_to_claim AS (
+    SELECT j.job_id
+    FROM public.house_norms_publish_jobs j
+    WHERE j.status = 'queued'
+    ORDER BY j.created_at ASC, j.job_id ASC
+    FOR UPDATE SKIP LOCKED
+    LIMIT v_limit
+  ),
+  claimed AS (
+    UPDATE public.house_norms_publish_jobs j
+    SET status = 'dispatching',
+        attempt_count = j.attempt_count + 1,
+        current_stage = 'dispatch_claimed',
+        claimed_at = now(),
+        dispatch_started_at = now(),
+        processing_started_at = NULL,
+        heartbeat_at = now(),
+        processed_at = NULL,
+        last_error_code = NULL,
+        last_error = NULL,
+        last_error_at = NULL
+    WHERE j.job_id IN (SELECT job_id FROM jobs_to_claim)
+    RETURNING j.job_id
+  )
+  SELECT count(*)::integer
+    INTO v_claimed_count
+  FROM claimed;
+
+  FOR v_job IN
+    SELECT j.job_id
+    FROM public.house_norms_publish_jobs j
+    WHERE j.status = 'dispatching'
+      AND j.current_stage = 'dispatch_claimed'
+      AND j.dispatch_started_at IS NOT NULL
+    ORDER BY j.dispatch_started_at ASC, j.job_id ASC
+    LIMIT v_limit
+  LOOP
+    PERFORM public._house_norms_publish_job_dispatch(v_job.job_id);
+    v_dispatched_count := v_dispatched_count + 1;
+  END LOOP;
+
+  RETURN jsonb_build_object(
+    'ok', true,
+    'requeued_count', v_requeued_count,
+    'claimed_count', v_claimed_count,
+    'dispatched_count', v_dispatched_count
+  );
+END;
+$$;
+
+
+ALTER FUNCTION "public"."house_norms_publish_jobs_dispatch_queued_v1"("p_limit" integer, "p_stale_for" interval) OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."house_norms_record_view"("p_home_id" "uuid") RETURNS "jsonb"
@@ -11770,6 +12365,53 @@ $$;
 
 
 ALTER FUNCTION "public"."house_norms_record_view"("p_home_id" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."house_norms_should_show_member_review"("p_home_id" "uuid") RETURNS boolean
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+DECLARE
+  v_row public.house_norms%ROWTYPE;
+  v_member_viewed_at timestamptz := NULL;
+  v_norms_change_at timestamptz := NULL;
+BEGIN
+  PERFORM public._assert_authenticated();
+  PERFORM public._assert_home_member(p_home_id);
+  PERFORM public._assert_home_active(p_home_id);
+
+  IF public.is_home_owner(p_home_id, auth.uid()) THEN
+    RETURN false;
+  END IF;
+
+  SELECT *
+    INTO v_row
+  FROM public.house_norms hn
+  WHERE hn.home_id = p_home_id;
+
+  IF v_row.home_id IS NULL THEN
+    RETURN false;
+  END IF;
+
+  SELECT mv.viewed_at
+    INTO v_member_viewed_at
+  FROM public.house_norms_member_views mv
+  WHERE mv.home_id = p_home_id
+    AND mv.user_id = auth.uid()
+  LIMIT 1;
+
+  v_norms_change_at := COALESCE(v_row.last_edited_at, v_row.generated_at);
+
+  RETURN (
+    v_norms_change_at IS NOT NULL
+    AND now() >= (v_norms_change_at + interval '24 hours')
+    AND (v_member_viewed_at IS NULL OR v_member_viewed_at < v_norms_change_at)
+  );
+END;
+$$;
+
+
+ALTER FUNCTION "public"."house_norms_should_show_member_review"("p_home_id" "uuid") OWNER TO "postgres";
 
 
 CREATE TABLE IF NOT EXISTS "public"."house_pulse_weekly" (
@@ -18215,105 +18857,79 @@ $$;
 ALTER FUNCTION "public"."today_onboarding_hints"() OWNER TO "postgres";
 
 
-CREATE OR REPLACE FUNCTION "public"."upsert_home_directory_link"("p_home_id" "uuid", "p_link_id" "uuid" DEFAULT NULL::"uuid", "p_title" "text" DEFAULT NULL::"text", "p_url" "text" DEFAULT NULL::"text", "p_tag" "text" DEFAULT NULL::"text", "p_custom_tag" "text" DEFAULT NULL::"text", "p_start_date" "date" DEFAULT NULL::"date", "p_end_date" "date" DEFAULT NULL::"date") RETURNS "jsonb"
+CREATE OR REPLACE FUNCTION "public"."upsert_home_directory_note"("p_home_id" "uuid", "p_note_id" "uuid" DEFAULT NULL::"uuid", "p_title" "text" DEFAULT NULL::"text", "p_details" "text" DEFAULT NULL::"text", "p_reference_url" "text" DEFAULT NULL::"text", "p_photo_path" "text" DEFAULT NULL::"text") RETURNS "jsonb"
     LANGUAGE "plpgsql" SECURITY DEFINER
-    SET "search_path" TO 'pg_catalog', 'public'
+    SET "search_path" TO ''
     AS $$
 DECLARE
   v_user uuid := auth.uid();
-  v_link public.home_directory_links%ROWTYPE;
+  v_note public.home_directory_notes%ROWTYPE;
+  v_existing public.home_directory_notes%ROWTYPE;
   v_title text := nullif(btrim(p_title), '');
-  v_url text := nullif(btrim(p_url), '');
-  v_tag text := lower(nullif(btrim(p_tag), ''));
-  v_custom_tag text := nullif(btrim(p_custom_tag), '');
+  v_details text := nullif(btrim(p_details), '');
+  v_reference_url text := nullif(btrim(p_reference_url), '');
+  v_photo_path text := nullif(btrim(p_photo_path), '');
+  v_photo_delta integer := 0;
 BEGIN
-  -- Replace semantics: callers should send the full intended current state.
   PERFORM public._assert_authenticated();
   PERFORM public._assert_home_active(p_home_id);
   PERFORM public._house_directory_assert_owner(p_home_id);
 
   PERFORM public.api_assert(
-    v_title IS NOT NULL,
-    'HOUSE_DIRECTORY_INVALID_INPUT',
-    'title is required.',
+    v_title IS NOT NULL AND v_details IS NOT NULL,
+    'HOUSE_DIRECTORY_NOTE_REQUIRED_FIELDS',
+    'title and details are required.',
     '22023'
   );
 
   PERFORM public.api_assert(
     char_length(v_title) BETWEEN 1 AND 120,
-    'HOUSE_DIRECTORY_INVALID_INPUT',
+    'HOUSE_DIRECTORY_NOTE_REQUIRED_FIELDS',
     'title must be between 1 and 120 characters.',
     '22023'
   );
 
   PERFORM public.api_assert(
-    v_url IS NOT NULL,
-    'HOUSE_DIRECTORY_INVALID_INPUT',
-    'url is required.',
+    char_length(v_details) BETWEEN 1 AND 4000,
+    'HOUSE_DIRECTORY_NOTE_REQUIRED_FIELDS',
+    'details must be between 1 and 4000 characters.',
     '22023'
   );
 
   PERFORM public.api_assert(
-    char_length(v_url) <= 2048 AND v_url ~* '^https?://',
-    'HOUSE_DIRECTORY_INVALID_INPUT',
-    'url must be an http or https URL.',
+    v_reference_url IS NULL OR (char_length(v_reference_url) <= 2048 AND v_reference_url ~* '^https?://'),
+    'HOUSE_DIRECTORY_NOTE_INVALID_URL',
+    'reference_url must be null or an http/https URL.',
     '22023'
   );
 
   PERFORM public.api_assert(
-    v_tag IN ('rent', 'bond', 'utilities', 'other'),
-    'HOUSE_DIRECTORY_INVALID_ENUM',
-    'tag must be one of rent, bond, utilities, other.',
+    v_photo_path IS NULL
+    OR (
+      char_length(v_photo_path) <= 512
+      AND v_photo_path LIKE 'households/%'
+    ),
+    'HOUSE_DIRECTORY_INVALID_INPUT',
+    'photo_path must be a storage object path under households/.',
     '22023'
   );
 
-  IF v_tag = 'other' THEN
-    PERFORM public.api_assert(
-      v_custom_tag IS NOT NULL,
-      'HOUSE_DIRECTORY_OTHER_TAG_REQUIRED',
-      'custom_tag is required when tag is other.',
-      '22023'
-    );
-    PERFORM public.api_assert(
-      char_length(v_custom_tag) BETWEEN 1 AND 24,
-      'HOUSE_DIRECTORY_OTHER_TAG_REQUIRED',
-      'custom_tag must be between 1 and 24 characters.',
-      '22023'
-    );
-  ELSE
-    PERFORM public.api_assert(
-      v_custom_tag IS NULL,
-      'HOUSE_DIRECTORY_OTHER_TAG_FORBIDDEN',
-      'custom_tag must be null unless tag is other.',
-      '22023'
-    );
-  END IF;
+  IF p_note_id IS NULL THEN
+    v_photo_delta := CASE WHEN v_photo_path IS NOT NULL THEN 1 ELSE 0 END;
 
-  IF p_end_date IS NOT NULL AND p_start_date IS NULL THEN
-    PERFORM public.api_error(
-      'HOUSE_DIRECTORY_INVALID_DATE_RANGE',
-      'start_date is required when end_date is provided.',
-      '22023'
-    );
-  END IF;
+    IF v_photo_delta > 0 THEN
+      PERFORM public._home_assert_quota(
+        p_home_id,
+        jsonb_build_object('house_directory_note_photos', v_photo_delta)
+      );
+    END IF;
 
-  IF p_start_date IS NOT NULL AND p_end_date IS NOT NULL AND p_start_date > p_end_date THEN
-    PERFORM public.api_error(
-      'HOUSE_DIRECTORY_INVALID_DATE_RANGE',
-      'start_date must be on or before end_date.',
-      '22023'
-    );
-  END IF;
-
-  IF p_link_id IS NULL THEN
-    INSERT INTO public.home_directory_links (
+    INSERT INTO public.home_directory_notes (
       home_id,
       title,
-      url,
-      tag,
-      custom_tag,
-      start_date,
-      end_date,
+      details,
+      reference_url,
+      photo_path,
       archived_at,
       created_by_user_id,
       updated_by_user_id
@@ -18321,61 +18937,89 @@ BEGIN
     VALUES (
       p_home_id,
       v_title,
-      v_url,
-      v_tag,
-      v_custom_tag,
-      p_start_date,
-      p_end_date,
+      v_details,
+      v_reference_url,
+      v_photo_path,
       NULL,
       v_user,
       v_user
     )
-    RETURNING * INTO v_link;
+    RETURNING * INTO v_note;
+
+    IF v_photo_delta > 0 THEN
+      PERFORM public._home_usage_apply_delta(
+        p_home_id,
+        jsonb_build_object('house_directory_note_photos', v_photo_delta)
+      );
+    END IF;
   ELSE
-    UPDATE public.home_directory_links l
-       SET title = v_title,
-           url = v_url,
-           tag = v_tag,
-           custom_tag = v_custom_tag,
-           start_date = p_start_date,
-           end_date = p_end_date,
-           updated_by_user_id = v_user
-     WHERE l.id = p_link_id
-       AND l.home_id = p_home_id
-       AND l.archived_at IS NULL
-    RETURNING * INTO v_link;
+    SELECT *
+      INTO v_existing
+    FROM public.home_directory_notes n
+    WHERE n.id = p_note_id
+      AND n.home_id = p_home_id
+      AND n.archived_at IS NULL
+    FOR UPDATE;
 
     IF NOT FOUND THEN
       PERFORM public.api_error(
-        'HOUSE_DIRECTORY_LINK_NOT_FOUND',
-        'The link was not found for this home, or it has been archived.',
+        'HOUSE_DIRECTORY_NOTE_NOT_FOUND',
+        'The note was not found for this home, or it has been archived.',
         'P0002',
-        jsonb_build_object('home_id', p_home_id, 'link_id', p_link_id)
+        jsonb_build_object('home_id', p_home_id, 'note_id', p_note_id)
+      );
+    END IF;
+
+    v_photo_delta := CASE
+      WHEN v_existing.photo_path IS NULL AND v_photo_path IS NOT NULL THEN 1
+      ELSE 0
+    END;
+
+    IF v_photo_delta > 0 THEN
+      PERFORM public._home_assert_quota(
+        p_home_id,
+        jsonb_build_object('house_directory_note_photos', v_photo_delta)
+      );
+    END IF;
+
+    UPDATE public.home_directory_notes n
+       SET title = v_title,
+           details = v_details,
+           reference_url = v_reference_url,
+           photo_path = v_photo_path,
+           updated_by_user_id = v_user
+     WHERE n.id = p_note_id
+       AND n.home_id = p_home_id
+       AND n.archived_at IS NULL
+    RETURNING * INTO v_note;
+
+    IF v_photo_delta > 0 THEN
+      PERFORM public._home_usage_apply_delta(
+        p_home_id,
+        jsonb_build_object('house_directory_note_photos', v_photo_delta)
       );
     END IF;
   END IF;
 
   RETURN jsonb_build_object(
     'ok', true,
-    'link', jsonb_build_object(
-      'id', v_link.id,
-      'home_id', v_link.home_id,
-      'title', v_link.title,
-      'url', v_link.url,
-      'tag', v_link.tag,
-      'custom_tag', v_link.custom_tag,
-      'start_date', v_link.start_date,
-      'end_date', v_link.end_date,
-      'archived_at', v_link.archived_at,
-      'created_at', v_link.created_at,
-      'updated_at', v_link.updated_at
+    'note', jsonb_build_object(
+      'id', v_note.id,
+      'home_id', v_note.home_id,
+      'title', v_note.title,
+      'details', v_note.details,
+      'reference_url', v_note.reference_url,
+      'photo_path', v_note.photo_path,
+      'archived_at', v_note.archived_at,
+      'created_at', v_note.created_at,
+      'updated_at', v_note.updated_at
     )
   );
 END;
 $$;
 
 
-ALTER FUNCTION "public"."upsert_home_directory_link"("p_home_id" "uuid", "p_link_id" "uuid", "p_title" "text", "p_url" "text", "p_tag" "text", "p_custom_tag" "text", "p_start_date" "date", "p_end_date" "date") OWNER TO "postgres";
+ALTER FUNCTION "public"."upsert_home_directory_note"("p_home_id" "uuid", "p_note_id" "uuid", "p_title" "text", "p_details" "text", "p_reference_url" "text", "p_photo_path" "text") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."upsert_home_directory_service"("p_home_id" "uuid", "p_service_id" "uuid" DEFAULT NULL::"uuid", "p_service_type" "text" DEFAULT NULL::"text", "p_custom_label" "text" DEFAULT NULL::"text", "p_provider_name" "text" DEFAULT NULL::"text", "p_account_reference" "text" DEFAULT NULL::"text", "p_link_url" "text" DEFAULT NULL::"text", "p_term_start_date" "date" DEFAULT NULL::"date", "p_term_end_date" "date" DEFAULT NULL::"date", "p_renewal_reminder_offset_value" integer DEFAULT NULL::integer, "p_renewal_reminder_offset_unit" "text" DEFAULT NULL::"text", "p_notes" "text" DEFAULT NULL::"text") RETURNS "jsonb"
@@ -19259,32 +19903,33 @@ COMMENT ON COLUMN "public"."gratitude_wall_reads"."last_read_at" IS 'Timestamp w
 
 
 
-CREATE TABLE IF NOT EXISTS "public"."home_directory_links" (
+CREATE TABLE IF NOT EXISTS "public"."home_directory_notes" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "home_id" "uuid" NOT NULL,
     "title" "text" NOT NULL,
-    "url" "text" NOT NULL,
-    "tag" "text" NOT NULL,
-    "custom_tag" "text",
-    "start_date" "date",
-    "end_date" "date",
+    "details" "text" NOT NULL,
+    "reference_url" "text",
+    "photo_path" "text",
     "archived_at" timestamp with time zone,
     "created_by_user_id" "uuid" NOT NULL,
     "updated_by_user_id" "uuid" NOT NULL,
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
-    CONSTRAINT "home_directory_links_date_range_check" CHECK (((("start_date" IS NULL) AND ("end_date" IS NULL)) OR (("start_date" IS NOT NULL) AND ("end_date" IS NOT NULL) AND ("start_date" <= "end_date")))),
-    CONSTRAINT "home_directory_links_other_custom_tag_check" CHECK (((("tag" = 'other'::"text") AND (("char_length"("btrim"(COALESCE("custom_tag", ''::"text"))) >= 1) AND ("char_length"("btrim"(COALESCE("custom_tag", ''::"text"))) <= 24))) OR (("tag" <> 'other'::"text") AND ("custom_tag" IS NULL)))),
-    CONSTRAINT "home_directory_links_tag_check" CHECK (("tag" = ANY (ARRAY['rent'::"text", 'bond'::"text", 'utilities'::"text", 'other'::"text"]))),
-    CONSTRAINT "home_directory_links_title_check" CHECK ((("char_length"("btrim"("title")) >= 1) AND ("char_length"("btrim"("title")) <= 120))),
-    CONSTRAINT "home_directory_links_url_check" CHECK ((("char_length"("url") <= 2048) AND ("url" ~* '^https?://'::"text")))
+    CONSTRAINT "home_directory_notes_details_check" CHECK ((("char_length"("btrim"("details")) >= 1) AND ("char_length"("btrim"("details")) <= 4000))),
+    CONSTRAINT "home_directory_notes_photo_path_check" CHECK ((("photo_path" IS NULL) OR (("char_length"("photo_path") <= 512) AND ("photo_path" ~~ 'households/%'::"text")))),
+    CONSTRAINT "home_directory_notes_reference_url_check" CHECK ((("reference_url" IS NULL) OR (("char_length"("reference_url") <= 2048) AND ("reference_url" ~* '^https?://'::"text")))),
+    CONSTRAINT "home_directory_notes_title_check" CHECK ((("char_length"("btrim"("title")) >= 1) AND ("char_length"("btrim"("title")) <= 120)))
 );
 
 
-ALTER TABLE "public"."home_directory_links" OWNER TO "postgres";
+ALTER TABLE "public"."home_directory_notes" OWNER TO "postgres";
 
 
-COMMENT ON TABLE "public"."home_directory_links" IS 'Shared home directory links. Tag can remain other until stable category requirements emerge.';
+COMMENT ON TABLE "public"."home_directory_notes" IS 'Shared home directory notes for operational home context. Optional reference_url and photo_path support lightweight annotations.';
+
+
+
+COMMENT ON COLUMN "public"."home_directory_notes"."photo_path" IS 'Supabase Storage object path (no bucket/host) for note photos.';
 
 
 
@@ -19627,6 +20272,64 @@ CREATE TABLE IF NOT EXISTS "public"."house_norms_member_views" (
 
 
 ALTER TABLE "public"."house_norms_member_views" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."house_norms_publish_jobs" (
+    "job_id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "home_id" "uuid" NOT NULL,
+    "home_public_id" "public"."citext" NOT NULL,
+    "published_version" "text" NOT NULL,
+    "published_at" timestamp with time zone NOT NULL,
+    "template_key" "text" NOT NULL,
+    "locale_base" "text" NOT NULL,
+    "public_url_path" "text" NOT NULL,
+    "payload" "jsonb" NOT NULL,
+    "status" "text" DEFAULT 'queued'::"text" NOT NULL,
+    "attempt_count" integer DEFAULT 0 NOT NULL,
+    "current_stage" "text",
+    "last_request_id" "text",
+    "last_error_code" "text",
+    "last_error" "text",
+    "last_error_at" timestamp with time zone,
+    "claimed_at" timestamp with time zone,
+    "dispatch_started_at" timestamp with time zone,
+    "processing_started_at" timestamp with time zone,
+    "heartbeat_at" timestamp with time zone,
+    "processed_at" timestamp with time zone,
+    "snapshot_upload_ms" integer,
+    "manifest_upload_ms" integer,
+    "revalidate_ms" integer,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "house_norms_publish_jobs_attempt_count_check" CHECK (("attempt_count" >= 0)),
+    CONSTRAINT "house_norms_publish_jobs_locale_base_check" CHECK (("locale_base" ~ '^[a-z]{2}$'::"text")),
+    CONSTRAINT "house_norms_publish_jobs_manifest_upload_ms_check" CHECK ((("manifest_upload_ms" IS NULL) OR ("manifest_upload_ms" >= 0))),
+    CONSTRAINT "house_norms_publish_jobs_payload_object_check" CHECK (("jsonb_typeof"("payload") = 'object'::"text")),
+    CONSTRAINT "house_norms_publish_jobs_public_url_path_check" CHECK (("public_url_path" ~ '^/'::"text")),
+    CONSTRAINT "house_norms_publish_jobs_published_version_check" CHECK (("published_version" ~ '^v[0-9]{6}$'::"text")),
+    CONSTRAINT "house_norms_publish_jobs_revalidate_ms_check" CHECK ((("revalidate_ms" IS NULL) OR ("revalidate_ms" >= 0))),
+    CONSTRAINT "house_norms_publish_jobs_snapshot_upload_ms_check" CHECK ((("snapshot_upload_ms" IS NULL) OR ("snapshot_upload_ms" >= 0))),
+    CONSTRAINT "house_norms_publish_jobs_status_check" CHECK (("status" = ANY (ARRAY['queued'::"text", 'dispatching'::"text", 'processing'::"text", 'succeeded'::"text", 'failed'::"text"])))
+);
+
+
+ALTER TABLE "public"."house_norms_publish_jobs" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."house_norms_publish_jobs" IS 'Tracks async public web delivery for published house norms documents.';
+
+
+
+COMMENT ON COLUMN "public"."house_norms_publish_jobs"."status" IS 'Queue lifecycle: queued -> dispatching -> processing -> succeeded|failed.';
+
+
+
+COMMENT ON COLUMN "public"."house_norms_publish_jobs"."attempt_count" IS 'Number of dispatch attempts. Incremented when a job is claimed for dispatch, not when worker heartbeats.';
+
+
+
+COMMENT ON COLUMN "public"."house_norms_publish_jobs"."heartbeat_at" IS 'Worker liveness timestamp used for stale-job requeue decisions.';
+
 
 
 CREATE TABLE IF NOT EXISTS "public"."house_norms_revisions" (
@@ -20808,8 +21511,8 @@ ALTER TABLE ONLY "public"."gratitude_wall_posts"
 
 
 
-ALTER TABLE ONLY "public"."home_directory_links"
-    ADD CONSTRAINT "home_directory_links_pkey" PRIMARY KEY ("id");
+ALTER TABLE ONLY "public"."home_directory_notes"
+    ADD CONSTRAINT "home_directory_notes_pkey" PRIMARY KEY ("id");
 
 
 
@@ -20890,6 +21593,16 @@ ALTER TABLE ONLY "public"."house_norms_member_views"
 
 ALTER TABLE ONLY "public"."house_norms"
     ADD CONSTRAINT "house_norms_pkey" PRIMARY KEY ("home_id");
+
+
+
+ALTER TABLE ONLY "public"."house_norms_publish_jobs"
+    ADD CONSTRAINT "house_norms_publish_jobs_home_version_unique" UNIQUE ("home_id", "published_version");
+
+
+
+ALTER TABLE ONLY "public"."house_norms_publish_jobs"
+    ADD CONSTRAINT "house_norms_publish_jobs_pkey" PRIMARY KEY ("job_id");
 
 
 
@@ -21356,7 +22069,7 @@ CREATE INDEX "idx_gratitude_wall_posts_home_created_desc" ON "public"."gratitude
 
 
 
-CREATE INDEX "idx_home_directory_links_home_active" ON "public"."home_directory_links" USING "btree" ("home_id", "created_at" DESC, "id") WHERE ("archived_at" IS NULL);
+CREATE INDEX "idx_home_directory_notes_home_active" ON "public"."home_directory_notes" USING "btree" ("home_id", "created_at" DESC, "id") WHERE ("archived_at" IS NULL);
 
 
 
@@ -21393,6 +22106,22 @@ CREATE INDEX "idx_home_mood_entries_user_week" ON "public"."home_mood_entries" U
 
 
 CREATE INDEX "idx_home_nps_home_created_desc" ON "public"."home_nps" USING "btree" ("home_id", "created_at" DESC, "id" DESC);
+
+
+
+CREATE INDEX "idx_house_norms_publish_jobs_dispatching" ON "public"."house_norms_publish_jobs" USING "btree" ("claimed_at", "job_id") WHERE ("status" = 'dispatching'::"text");
+
+
+
+CREATE INDEX "idx_house_norms_publish_jobs_home_latest" ON "public"."house_norms_publish_jobs" USING "btree" ("home_id", "created_at" DESC);
+
+
+
+CREATE INDEX "idx_house_norms_publish_jobs_processing" ON "public"."house_norms_publish_jobs" USING "btree" ("heartbeat_at", "processing_started_at", "job_id") WHERE ("status" = 'processing'::"text");
+
+
+
+CREATE INDEX "idx_house_norms_publish_jobs_queued" ON "public"."house_norms_publish_jobs" USING "btree" ("created_at", "job_id") WHERE ("status" = 'queued'::"text");
 
 
 
@@ -21704,7 +22433,7 @@ CREATE OR REPLACE TRIGGER "trg_complaint_rewrite_triggers_touch" BEFORE UPDATE O
 
 
 
-CREATE OR REPLACE TRIGGER "trg_home_directory_links_touch_updated_at" BEFORE UPDATE ON "public"."home_directory_links" FOR EACH ROW EXECUTE FUNCTION "public"."_touch_updated_at"();
+CREATE OR REPLACE TRIGGER "trg_home_directory_notes_touch_updated_at" BEFORE UPDATE ON "public"."home_directory_notes" FOR EACH ROW EXECUTE FUNCTION "public"."_touch_updated_at"();
 
 
 
@@ -21733,6 +22462,10 @@ CREATE OR REPLACE TRIGGER "trg_house_norm_templates_validate" BEFORE INSERT OR U
 
 
 CREATE OR REPLACE TRIGGER "trg_house_norms_public_id_immutable" BEFORE UPDATE ON "public"."house_norms" FOR EACH ROW EXECUTE FUNCTION "public"."_house_norms_enforce_public_id_immutable"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_house_norms_publish_jobs_touch_updated_at" BEFORE UPDATE ON "public"."house_norms_publish_jobs" FOR EACH ROW EXECUTE FUNCTION "public"."_touch_updated_at"();
 
 
 
@@ -22068,18 +22801,18 @@ ALTER TABLE ONLY "public"."gratitude_wall_reads"
 
 
 
-ALTER TABLE ONLY "public"."home_directory_links"
-    ADD CONSTRAINT "home_directory_links_created_by_user_id_fkey" FOREIGN KEY ("created_by_user_id") REFERENCES "public"."profiles"("id") ON DELETE RESTRICT;
+ALTER TABLE ONLY "public"."home_directory_notes"
+    ADD CONSTRAINT "home_directory_notes_created_by_user_id_fkey" FOREIGN KEY ("created_by_user_id") REFERENCES "public"."profiles"("id") ON DELETE RESTRICT;
 
 
 
-ALTER TABLE ONLY "public"."home_directory_links"
-    ADD CONSTRAINT "home_directory_links_home_id_fkey" FOREIGN KEY ("home_id") REFERENCES "public"."homes"("id") ON DELETE CASCADE;
+ALTER TABLE ONLY "public"."home_directory_notes"
+    ADD CONSTRAINT "home_directory_notes_home_id_fkey" FOREIGN KEY ("home_id") REFERENCES "public"."homes"("id") ON DELETE CASCADE;
 
 
 
-ALTER TABLE ONLY "public"."home_directory_links"
-    ADD CONSTRAINT "home_directory_links_updated_by_user_id_fkey" FOREIGN KEY ("updated_by_user_id") REFERENCES "public"."profiles"("id") ON DELETE RESTRICT;
+ALTER TABLE ONLY "public"."home_directory_notes"
+    ADD CONSTRAINT "home_directory_notes_updated_by_user_id_fkey" FOREIGN KEY ("updated_by_user_id") REFERENCES "public"."profiles"("id") ON DELETE RESTRICT;
 
 
 
@@ -22200,6 +22933,11 @@ ALTER TABLE ONLY "public"."house_norms_member_views"
 
 ALTER TABLE ONLY "public"."house_norms_member_views"
     ADD CONSTRAINT "house_norms_member_views_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."users"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."house_norms_publish_jobs"
+    ADD CONSTRAINT "house_norms_publish_jobs_home_id_fkey" FOREIGN KEY ("home_id") REFERENCES "public"."homes"("id") ON DELETE CASCADE;
 
 
 
@@ -22533,7 +23271,7 @@ ALTER TABLE "public"."gratitude_wall_posts" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "public"."gratitude_wall_reads" ENABLE ROW LEVEL SECURITY;
 
 
-ALTER TABLE "public"."home_directory_links" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "public"."home_directory_notes" ENABLE ROW LEVEL SECURITY;
 
 
 ALTER TABLE "public"."home_directory_service_reminder_acknowledgements" ENABLE ROW LEVEL SECURITY;
@@ -23312,6 +24050,11 @@ GRANT ALL ON FUNCTION "public"."_house_norms_next_published_version"("p_prev" "t
 
 
 
+REVOKE ALL ON FUNCTION "public"."_house_norms_publish_job_dispatch"("p_job_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_house_norms_publish_job_dispatch"("p_job_id" "uuid") TO "service_role";
+
+
+
 REVOKE ALL ON FUNCTION "public"."_house_norms_publish_sync_call"("p_home_public_id" "text", "p_published_at" timestamp with time zone, "p_published_version" "text", "p_template_key" "text", "p_locale_base" "text", "p_published_content" "jsonb", "p_public_url_path" "text") FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."_house_norms_publish_sync_call"("p_home_public_id" "text", "p_published_at" timestamp with time zone, "p_published_version" "text", "p_template_key" "text", "p_locale_base" "text", "p_published_content" "jsonb", "p_public_url_path" "text") TO "service_role";
 
@@ -23499,9 +24242,9 @@ GRANT ALL ON FUNCTION "public"."api_error"("p_code" "text", "p_msg" "text", "p_s
 
 
 
-REVOKE ALL ON FUNCTION "public"."archive_home_directory_link"("p_home_id" "uuid", "p_link_id" "uuid") FROM PUBLIC;
-GRANT ALL ON FUNCTION "public"."archive_home_directory_link"("p_home_id" "uuid", "p_link_id" "uuid") TO "service_role";
-GRANT ALL ON FUNCTION "public"."archive_home_directory_link"("p_home_id" "uuid", "p_link_id" "uuid") TO "authenticated";
+REVOKE ALL ON FUNCTION "public"."archive_home_directory_note"("p_home_id" "uuid", "p_note_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."archive_home_directory_note"("p_home_id" "uuid", "p_note_id" "uuid") TO "service_role";
+GRANT ALL ON FUNCTION "public"."archive_home_directory_note"("p_home_id" "uuid", "p_note_id" "uuid") TO "authenticated";
 
 
 
@@ -25284,9 +26027,40 @@ GRANT ALL ON FUNCTION "public"."house_norms_publish_for_home"("p_home_id" "uuid"
 
 
 
+REVOKE ALL ON FUNCTION "public"."house_norms_publish_job_mark_failed"("p_job_id" "uuid", "p_request_id" "text", "p_error_code" "text", "p_error" "text", "p_stage" "text", "p_snapshot_upload_ms" integer, "p_manifest_upload_ms" integer, "p_revalidate_ms" integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."house_norms_publish_job_mark_failed"("p_job_id" "uuid", "p_request_id" "text", "p_error_code" "text", "p_error" "text", "p_stage" "text", "p_snapshot_upload_ms" integer, "p_manifest_upload_ms" integer, "p_revalidate_ms" integer) TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."house_norms_publish_job_mark_processing"("p_job_id" "uuid", "p_request_id" "text", "p_stage" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."house_norms_publish_job_mark_processing"("p_job_id" "uuid", "p_request_id" "text", "p_stage" "text") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."house_norms_publish_job_mark_succeeded"("p_job_id" "uuid", "p_request_id" "text", "p_snapshot_upload_ms" integer, "p_manifest_upload_ms" integer, "p_revalidate_ms" integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."house_norms_publish_job_mark_succeeded"("p_job_id" "uuid", "p_request_id" "text", "p_snapshot_upload_ms" integer, "p_manifest_upload_ms" integer, "p_revalidate_ms" integer) TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."house_norms_publish_job_redrive_v1"("p_job_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."house_norms_publish_job_redrive_v1"("p_job_id" "uuid") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."house_norms_publish_jobs_dispatch_queued_v1"("p_limit" integer, "p_stale_for" interval) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."house_norms_publish_jobs_dispatch_queued_v1"("p_limit" integer, "p_stale_for" interval) TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."house_norms_record_view"("p_home_id" "uuid") TO "anon";
 GRANT ALL ON FUNCTION "public"."house_norms_record_view"("p_home_id" "uuid") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."house_norms_record_view"("p_home_id" "uuid") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."house_norms_should_show_member_review"("p_home_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."house_norms_should_show_member_review"("p_home_id" "uuid") TO "service_role";
+GRANT ALL ON FUNCTION "public"."house_norms_should_show_member_review"("p_home_id" "uuid") TO "authenticated";
 
 
 
@@ -25997,9 +26771,9 @@ GRANT ALL ON FUNCTION "public"."tstz_dist"(timestamp with time zone, timestamp w
 
 
 
-REVOKE ALL ON FUNCTION "public"."upsert_home_directory_link"("p_home_id" "uuid", "p_link_id" "uuid", "p_title" "text", "p_url" "text", "p_tag" "text", "p_custom_tag" "text", "p_start_date" "date", "p_end_date" "date") FROM PUBLIC;
-GRANT ALL ON FUNCTION "public"."upsert_home_directory_link"("p_home_id" "uuid", "p_link_id" "uuid", "p_title" "text", "p_url" "text", "p_tag" "text", "p_custom_tag" "text", "p_start_date" "date", "p_end_date" "date") TO "service_role";
-GRANT ALL ON FUNCTION "public"."upsert_home_directory_link"("p_home_id" "uuid", "p_link_id" "uuid", "p_title" "text", "p_url" "text", "p_tag" "text", "p_custom_tag" "text", "p_start_date" "date", "p_end_date" "date") TO "authenticated";
+REVOKE ALL ON FUNCTION "public"."upsert_home_directory_note"("p_home_id" "uuid", "p_note_id" "uuid", "p_title" "text", "p_details" "text", "p_reference_url" "text", "p_photo_path" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."upsert_home_directory_note"("p_home_id" "uuid", "p_note_id" "uuid", "p_title" "text", "p_details" "text", "p_reference_url" "text", "p_photo_path" "text") TO "service_role";
+GRANT ALL ON FUNCTION "public"."upsert_home_directory_note"("p_home_id" "uuid", "p_note_id" "uuid", "p_title" "text", "p_details" "text", "p_reference_url" "text", "p_photo_path" "text") TO "authenticated";
 
 
 
@@ -26125,7 +26899,7 @@ GRANT ALL ON TABLE "public"."gratitude_wall_reads" TO "service_role";
 
 
 
-GRANT ALL ON TABLE "public"."home_directory_links" TO "service_role";
+GRANT ALL ON TABLE "public"."home_directory_notes" TO "service_role";
 
 
 
@@ -26174,6 +26948,10 @@ GRANT ALL ON TABLE "public"."house_norms" TO "service_role";
 
 
 GRANT ALL ON TABLE "public"."house_norms_member_views" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."house_norms_publish_jobs" TO "service_role";
 
 
 

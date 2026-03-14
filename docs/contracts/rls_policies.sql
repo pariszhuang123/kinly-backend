@@ -16,7 +16,7 @@ ALTER TABLE "public"."gratitude_wall_personal_items" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "public"."gratitude_wall_personal_reads" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "public"."gratitude_wall_posts" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "public"."gratitude_wall_reads" ENABLE ROW LEVEL SECURITY;
-ALTER TABLE "public"."home_directory_links" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "public"."home_directory_notes" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "public"."home_directory_service_reminder_acknowledgements" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "public"."home_directory_service_reminders" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "public"."home_directory_services" ENABLE ROW LEVEL SECURITY;

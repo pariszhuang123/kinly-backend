@@ -2,7 +2,7 @@ SET search_path = pgtap, public, auth, extensions;
 
 BEGIN;
 
-SELECT plan(52);
+SELECT plan(61);
 
 CREATE TEMP TABLE tmp_users (
   label text PRIMARY KEY,
@@ -21,21 +21,19 @@ CREATE TEMP TABLE tmp_publish_refs (
   first_home_public_id text
 );
 
+CREATE TEMP TABLE tmp_publish_result (
+  payload jsonb
+);
+
 -- pgTAP deterministic stub: avoid real network/edge invocation from publish RPC.
 -- Edge behavior is covered in supabase/functions/house_norms_publish_sync tests.
 SELECT set_config('app.settings.supabase_url', 'http://stub.local', true);
 SELECT set_config('app.settings.worker_shared_secret', 'test-secret', true);
 
-CREATE OR REPLACE FUNCTION public._house_norms_publish_sync_call(
-  p_home_public_id text,
-  p_published_at timestamptz,
-  p_published_version text,
-  p_template_key text,
-  p_locale_base text,
-  p_published_content jsonb,
-  p_public_url_path text DEFAULT NULL
+CREATE OR REPLACE FUNCTION public._house_norms_publish_job_dispatch(
+  p_job_id uuid
 )
-RETURNS void
+RETURNS jsonb
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = ''
@@ -44,27 +42,51 @@ DECLARE
   v_supabase_url text := nullif(current_setting('app.settings.supabase_url', true), '');
   v_secret text := nullif(current_setting('app.settings.worker_shared_secret', true), '');
 BEGIN
-  PERFORM public.api_assert(
-    v_supabase_url IS NOT NULL,
-    'HOUSE_NORMS_PUBLISH_ARTIFACT_FAILED',
-    'Missing app.settings.supabase_url.',
-    'P0001'
-  );
+  IF v_supabase_url IS NULL THEN
+    UPDATE public.house_norms_publish_jobs
+    SET status = 'failed',
+        current_stage = 'dispatch_config',
+        last_error_code = 'dispatch_config_missing',
+        last_error = 'Missing app.settings.supabase_url.',
+        last_error_at = now(),
+        processed_at = now()
+    WHERE job_id = p_job_id;
 
-  PERFORM public.api_assert(
-    v_secret IS NOT NULL,
-    'HOUSE_NORMS_PUBLISH_ARTIFACT_FAILED',
-    'Missing app.settings.worker_shared_secret.',
-    'P0001'
-  );
+    RETURN jsonb_build_object('ok', false, 'reason', 'missing_supabase_url');
+  END IF;
 
-  -- Deterministic failure hook used by rollback-path assertion.
-  PERFORM public.api_assert(
-    v_secret <> 'wrong-secret-for-test',
-    'HOUSE_NORMS_PUBLISH_ARTIFACT_FAILED',
-    'Publish sync request failed.',
-    'P0001'
-  );
+  IF v_secret IS NULL THEN
+    UPDATE public.house_norms_publish_jobs
+    SET status = 'failed',
+        current_stage = 'dispatch_config',
+        last_error_code = 'dispatch_config_missing',
+        last_error = 'Missing app.settings.worker_shared_secret.',
+        last_error_at = now(),
+        processed_at = now()
+    WHERE job_id = p_job_id;
+
+    RETURN jsonb_build_object('ok', false, 'reason', 'missing_worker_secret');
+  END IF;
+
+  IF v_secret = 'wrong-secret-for-test' THEN
+    UPDATE public.house_norms_publish_jobs
+    SET status = 'failed',
+        current_stage = 'dispatch_enqueue',
+        last_error_code = 'dispatch_enqueue_failed',
+        last_error = 'Publish sync request failed.',
+        last_error_at = now(),
+        processed_at = now()
+    WHERE job_id = p_job_id;
+
+    RETURN jsonb_build_object('ok', false, 'reason', 'dispatch_enqueue_failed');
+  END IF;
+
+  UPDATE public.house_norms_publish_jobs
+  SET current_stage = 'dispatch_queued',
+      last_request_id = 'stub-request'
+  WHERE job_id = p_job_id;
+
+  RETURN jsonb_build_object('ok', true, 'job_id', p_job_id);
 END;
 $$;
 
@@ -279,9 +301,19 @@ SELECT ok(
   'owner never sees member review card signal'
 );
 
+DELETE FROM tmp_publish_result;
+INSERT INTO tmp_publish_result (payload)
+SELECT public.house_norms_publish_for_home((SELECT home_id FROM tmp_home), 'en');
+
 SELECT ok(
-  (public.house_norms_publish_for_home((SELECT home_id FROM tmp_home), 'en')->>'ok')::boolean,
+  (SELECT (payload->>'ok')::boolean FROM tmp_publish_result),
   'owner can publish'
+);
+
+SELECT is(
+  (SELECT payload->>'publish_sync_status' FROM tmp_publish_result),
+  'queued',
+  'publish response exposes queued sync status'
 );
 
 SELECT ok(
@@ -311,6 +343,24 @@ SELECT ok(
 SELECT ok(
   (SELECT home_public_id::text ~ '^[a-z0-9]{8,32}$' FROM public.house_norms WHERE home_id = (SELECT home_id FROM tmp_home)),
   'home_public_id format is lowercase alnum 8..32'
+);
+
+SELECT is(
+  (SELECT count(*)::text
+   FROM public.house_norms_publish_jobs
+   WHERE home_id = (SELECT home_id FROM tmp_home)
+     AND published_version = 'v000001'),
+  '1',
+  'first publish inserts one publish job'
+);
+
+SELECT is(
+  (SELECT payload->>'published_version'
+   FROM public.house_norms_publish_jobs
+   WHERE home_id = (SELECT home_id FROM tmp_home)
+     AND published_version = 'v000001'),
+  'v000001',
+  'publish job payload stores the published version'
 );
 
 INSERT INTO tmp_publish_refs (first_home_public_id)
@@ -346,6 +396,26 @@ SELECT ok(
     true
   ),
   'public read returns unavailable for unknown home_public_id'
+);
+
+SELECT public.house_norms_publish_job_mark_succeeded(
+  (
+    SELECT job_id
+    FROM public.house_norms_publish_jobs
+    WHERE home_id = (SELECT home_id FROM tmp_home)
+      AND published_version = 'v000001'
+    LIMIT 1
+  ),
+  'stub-success',
+  12,
+  34,
+  56
+);
+
+SELECT is(
+  public.house_norms_get_for_home((SELECT home_id FROM tmp_home), 'en')->'house_norms'->>'publish_sync_status',
+  'succeeded',
+  'owner read exposes succeeded publish sync state'
 );
 
 -- Non-owner cannot edit.
@@ -482,8 +552,12 @@ SELECT is(
 );
 
 -- Republish after draft edits: public id must be stable, version must increment.
+DELETE FROM tmp_publish_result;
+INSERT INTO tmp_publish_result (payload)
+SELECT public.house_norms_publish_for_home((SELECT home_id FROM tmp_home), 'en');
+
 SELECT ok(
-  (public.house_norms_publish_for_home((SELECT home_id FROM tmp_home), 'en')->>'ok')::boolean,
+  (SELECT (payload->>'ok')::boolean FROM tmp_publish_result),
   'owner can republish after edits'
 );
 
@@ -499,6 +573,12 @@ SELECT is(
   'republish increments published_version'
 );
 
+SELECT is(
+  (SELECT payload->>'publish_sync_status' FROM tmp_publish_result),
+  'queued',
+  'republish response exposes queued sync status'
+);
+
 SELECT throws_like(
   $$ UPDATE public.house_norms
      SET home_public_id = 'zzzz9999'::public.citext
@@ -507,36 +587,60 @@ SELECT throws_like(
   'home_public_id cannot be mutated once assigned'
 );
 
--- Prepare out_of_date draft then force publish sync failure via bad secret.
+-- Prepare out_of_date draft then force async dispatch failure via bad secret.
 SELECT ok(
   (public.house_norms_edit_section_text(
     (SELECT home_id FROM tmp_home),
     'en',
     'summary_framing',
     'We keep communication calm and practical for everyone sharing this home.',
-    'Prepare rollback test'
+    'Prepare async delivery failure test'
   )->>'ok')::boolean,
-  'owner can edit draft before rollback test'
+  'owner can edit draft before async delivery failure test'
 );
 
 SELECT set_config('app.settings.worker_shared_secret', 'wrong-secret-for-test', true);
 
-SELECT throws_like(
-  $$ SELECT public.house_norms_publish_for_home((SELECT home_id FROM tmp_home), 'en'); $$,
-  '%HOUSE_NORMS_PUBLISH_ARTIFACT_FAILED%',
-  'publish fails when sync call is unauthorized'
+DELETE FROM tmp_publish_result;
+INSERT INTO tmp_publish_result (payload)
+SELECT public.house_norms_publish_for_home((SELECT home_id FROM tmp_home), 'en');
+
+SELECT ok(
+  (SELECT (payload->>'ok')::boolean FROM tmp_publish_result),
+  'publish still succeeds when async dispatch fails'
 );
 
 SELECT is(
   (SELECT published_version FROM public.house_norms WHERE home_id = (SELECT home_id FROM tmp_home)),
-  'v000002',
-  'failed publish does not advance published_version'
+  'v000003',
+  'failed async delivery still advances published_version'
 );
 
 SELECT is(
   (SELECT status FROM public.house_norms WHERE home_id = (SELECT home_id FROM tmp_home)),
-  'out_of_date',
-  'failed publish keeps draft state as out_of_date'
+  'published',
+  'failed async delivery does not roll back published status'
+);
+
+SELECT is(
+  (SELECT payload->>'publish_sync_status' FROM tmp_publish_result),
+  'failed',
+  'publish response exposes failed sync status when dispatch fails'
+);
+
+SELECT is(
+  public.house_norms_get_for_home((SELECT home_id FROM tmp_home), 'en')->'house_norms'->>'publish_sync_status',
+  'failed',
+  'owner read exposes failed publish sync state'
+);
+
+SELECT is(
+  (SELECT last_error_code
+   FROM public.house_norms_publish_jobs
+   WHERE home_id = (SELECT home_id FROM tmp_home)
+     AND published_version = 'v000003'),
+  'dispatch_enqueue_failed',
+  'failed async dispatch stores job error code'
 );
 
 -- Invalid generate payload (unknown key) rejected.

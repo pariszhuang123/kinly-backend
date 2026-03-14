@@ -5,10 +5,10 @@ Scope: shared
 Artifact-Type: contract
 Stability: evolving
 Status: draft
-Version: v1.0
+Version: v1.1
 ---
 
-# Kinly House Norms Contract v1
+# Kinly House Norms Contract v1.1
 
 Status: Proposed (Home MVP)
 
@@ -192,6 +192,11 @@ Optional:
   - Owner-only.
   - Copies `generated_content` to `published_content`.
   - Marks document `published`.
+  - Enqueues async public delivery work for the new `published_version`.
+  - Returns success after canonical publish state and delivery job are
+    committed.
+  - Returns owner-facing `publish_sync_status` / `publish_sync_error` metadata
+    for the new `published_version`.
 
 7.4 Edit section text (owner-only)
 - `house_norms_edit_section_text(p_home_id uuid, p_locale text, p_section_key text, p_new_text text, p_change_summary text default null) -> jsonb`
@@ -249,6 +254,30 @@ Optional:
 - `user_id` (uuid, FK auth.users)
 - `viewed_at` (timestamptz)
 - PK: (`home_id`, `user_id`)
+
+`house_norms_publish_jobs`
+- `job_id` (uuid, PK)
+- `home_id` (uuid, FK homes)
+- `home_public_id` (citext)
+- `published_version` (text, monotonic `vNNNNNN`)
+- `published_at` (timestamptz)
+- `template_key` (text)
+- `locale_base` (text, lowercase ISO 639-1)
+- `public_url_path` (text)
+- `payload` (jsonb)
+- `status` (text: `queued` | `processing` | `succeeded` | `failed`)
+- `attempt_count` (integer)
+- `current_stage` (text|null)
+- `last_request_id` (text|null)
+- `last_error_code` (text|null)
+- `last_error` (text|null)
+- `last_error_at` (timestamptz|null)
+- `processed_at` (timestamptz|null)
+- `snapshot_upload_ms` (integer|null)
+- `manifest_upload_ms` (integer|null)
+- `revalidate_ms` (integer|null)
+- `created_at` (timestamptz)
+- `updated_at` (timestamptz)
 
 8.2 RLS
 - RPC-only model.

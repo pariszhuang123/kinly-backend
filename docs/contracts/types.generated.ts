@@ -948,69 +948,63 @@ export type Database = {
           },
         ]
       }
-      home_directory_links: {
+      home_directory_notes: {
         Row: {
           archived_at: string | null
           created_at: string
           created_by_user_id: string
-          custom_tag: string | null
-          end_date: string | null
+          details: string
           home_id: string
           id: string
-          start_date: string | null
-          tag: string
+          photo_path: string | null
+          reference_url: string | null
           title: string
           updated_at: string
           updated_by_user_id: string
-          url: string
         }
         Insert: {
           archived_at?: string | null
           created_at?: string
           created_by_user_id: string
-          custom_tag?: string | null
-          end_date?: string | null
+          details: string
           home_id: string
           id?: string
-          start_date?: string | null
-          tag: string
+          photo_path?: string | null
+          reference_url?: string | null
           title: string
           updated_at?: string
           updated_by_user_id: string
-          url: string
         }
         Update: {
           archived_at?: string | null
           created_at?: string
           created_by_user_id?: string
-          custom_tag?: string | null
-          end_date?: string | null
+          details?: string
           home_id?: string
           id?: string
-          start_date?: string | null
-          tag?: string
+          photo_path?: string | null
+          reference_url?: string | null
           title?: string
           updated_at?: string
           updated_by_user_id?: string
-          url?: string
         }
         Relationships: [
           {
-            foreignKeyName: "home_directory_links_created_by_user_id_fkey"
+            foreignKeyName: "home_directory_notes_created_by_user_id_fkey"
             columns: ["created_by_user_id"]
             isOneToOne: false
             referencedRelation: "profiles"
             referencedColumns: ["id"]
           },
           {
-            foreignKeyName: "home_directory_links_home_id_fkey"
+            foreignKeyName: "home_directory_notes_home_id_fkey"
             columns: ["home_id"]
             isOneToOne: false
             referencedRelation: "homes"
             referencedColumns: ["id"]
           },
           {
-            foreignKeyName: "home_directory_links_updated_by_user_id_fkey"
+            foreignKeyName: "home_directory_notes_updated_by_user_id_fkey"
             columns: ["updated_by_user_id"]
             isOneToOne: false
             referencedRelation: "profiles"
@@ -1454,6 +1448,7 @@ export type Database = {
           chore_photos: number
           expense_photos: number
           home_id: string
+          house_directory_note_photos: number
           shopping_item_photos: number
           updated_at: string
         }
@@ -1464,6 +1459,7 @@ export type Database = {
           chore_photos?: number
           expense_photos?: number
           home_id: string
+          house_directory_note_photos?: number
           shopping_item_photos?: number
           updated_at?: string
         }
@@ -1474,6 +1470,7 @@ export type Database = {
           chore_photos?: number
           expense_photos?: number
           home_id?: string
+          house_directory_note_photos?: number
           shopping_item_photos?: number
           updated_at?: string
         }
@@ -1634,6 +1631,101 @@ export type Database = {
         Relationships: [
           {
             foreignKeyName: "house_norms_member_views_home_id_fkey"
+            columns: ["home_id"]
+            isOneToOne: false
+            referencedRelation: "homes"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      house_norms_publish_jobs: {
+        Row: {
+          attempt_count: number
+          claimed_at: string | null
+          created_at: string
+          current_stage: string | null
+          dispatch_started_at: string | null
+          heartbeat_at: string | null
+          home_id: string
+          home_public_id: string
+          job_id: string
+          last_error: string | null
+          last_error_at: string | null
+          last_error_code: string | null
+          last_request_id: string | null
+          locale_base: string
+          manifest_upload_ms: number | null
+          payload: Json
+          processed_at: string | null
+          processing_started_at: string | null
+          public_url_path: string
+          published_at: string
+          published_version: string
+          revalidate_ms: number | null
+          snapshot_upload_ms: number | null
+          status: string
+          template_key: string
+          updated_at: string
+        }
+        Insert: {
+          attempt_count?: number
+          claimed_at?: string | null
+          created_at?: string
+          current_stage?: string | null
+          dispatch_started_at?: string | null
+          heartbeat_at?: string | null
+          home_id: string
+          home_public_id: string
+          job_id?: string
+          last_error?: string | null
+          last_error_at?: string | null
+          last_error_code?: string | null
+          last_request_id?: string | null
+          locale_base: string
+          manifest_upload_ms?: number | null
+          payload: Json
+          processed_at?: string | null
+          processing_started_at?: string | null
+          public_url_path: string
+          published_at: string
+          published_version: string
+          revalidate_ms?: number | null
+          snapshot_upload_ms?: number | null
+          status?: string
+          template_key: string
+          updated_at?: string
+        }
+        Update: {
+          attempt_count?: number
+          claimed_at?: string | null
+          created_at?: string
+          current_stage?: string | null
+          dispatch_started_at?: string | null
+          heartbeat_at?: string | null
+          home_id?: string
+          home_public_id?: string
+          job_id?: string
+          last_error?: string | null
+          last_error_at?: string | null
+          last_error_code?: string | null
+          last_request_id?: string | null
+          locale_base?: string
+          manifest_upload_ms?: number | null
+          payload?: Json
+          processed_at?: string | null
+          processing_started_at?: string | null
+          public_url_path?: string
+          published_at?: string
+          published_version?: string
+          revalidate_ms?: number | null
+          snapshot_upload_ms?: number | null
+          status?: string
+          template_key?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "house_norms_publish_jobs_home_id_fkey"
             columns: ["home_id"]
             isOneToOne: false
             referencedRelation: "homes"
@@ -4101,6 +4193,7 @@ export type Database = {
           chore_photos: number
           expense_photos: number
           home_id: string
+          house_directory_note_photos: number
           shopping_item_photos: number
           updated_at: string
         }
@@ -4167,6 +4260,10 @@ export type Database = {
       _house_norms_next_published_version: {
         Args: { p_prev: string }
         Returns: string
+      }
+      _house_norms_publish_job_dispatch: {
+        Args: { p_job_id: string }
+        Returns: Json
       }
       _house_norms_publish_sync_call: {
         Args: {
@@ -4314,8 +4411,8 @@ export type Database = {
         }
         Returns: undefined
       }
-      archive_home_directory_link: {
-        Args: { p_home_id: string; p_link_id: string }
+      archive_home_directory_note: {
+        Args: { p_home_id: string; p_note_id: string }
         Returns: Json
       }
       archive_home_directory_service: {
@@ -5239,7 +5336,46 @@ export type Database = {
         Args: { p_home_id: string; p_locale: string }
         Returns: Json
       }
+      house_norms_publish_job_mark_failed: {
+        Args: {
+          p_error?: string
+          p_error_code?: string
+          p_job_id: string
+          p_manifest_upload_ms?: number
+          p_request_id?: string
+          p_revalidate_ms?: number
+          p_snapshot_upload_ms?: number
+          p_stage?: string
+        }
+        Returns: Json
+      }
+      house_norms_publish_job_mark_processing: {
+        Args: { p_job_id: string; p_request_id?: string; p_stage?: string }
+        Returns: Json
+      }
+      house_norms_publish_job_mark_succeeded: {
+        Args: {
+          p_job_id: string
+          p_manifest_upload_ms?: number
+          p_request_id?: string
+          p_revalidate_ms?: number
+          p_snapshot_upload_ms?: number
+        }
+        Returns: Json
+      }
+      house_norms_publish_job_redrive_v1: {
+        Args: { p_job_id: string }
+        Returns: Json
+      }
+      house_norms_publish_jobs_dispatch_queued_v1: {
+        Args: { p_limit?: number; p_stale_for?: string }
+        Returns: Json
+      }
       house_norms_record_view: { Args: { p_home_id: string }; Returns: Json }
+      house_norms_should_show_member_review: {
+        Args: { p_home_id: string }
+        Returns: boolean
+      }
       house_pulse_compute_week: {
         Args: {
           p_contract_version?: string
@@ -5849,16 +5985,14 @@ export type Database = {
         Returns: boolean
       }
       today_onboarding_hints: { Args: never; Returns: Json }
-      upsert_home_directory_link: {
+      upsert_home_directory_note: {
         Args: {
-          p_custom_tag?: string
-          p_end_date?: string
+          p_details?: string
           p_home_id: string
-          p_link_id?: string
-          p_start_date?: string
-          p_tag?: string
+          p_note_id?: string
+          p_photo_path?: string
+          p_reference_url?: string
           p_title?: string
-          p_url?: string
         }
         Returns: Json
       }
@@ -5909,6 +6043,7 @@ export type Database = {
         | "active_expenses"
         | "shopping_item_photos"
         | "expense_photos"
+        | "house_directory_note_photos"
       house_pulse_state:
         | "forming"
         | "sunny_calm"
@@ -6079,6 +6214,7 @@ export const Constants = {
         "active_expenses",
         "shopping_item_photos",
         "expense_photos",
+        "house_directory_note_photos",
       ],
       house_pulse_state: [
         "forming",

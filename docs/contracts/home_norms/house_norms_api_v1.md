@@ -5,10 +5,10 @@ Scope: backend
 Artifact-Type: contract
 Stability: evolving
 Status: draft
-Version: v1.0
+Version: v1.1
 ---
 
-# House Norms API v1
+# House Norms API v1.1
 
 Status: Proposed (Home MVP)
 
@@ -106,6 +106,8 @@ Behavior:
 - Owner-facing URL/control metadata is included only for owner callers.
 - Owner-facing `public_url` is derived from canonical host +
   `/kinly/norms/{home_public_id}` and is never persisted as a DB column.
+- Owner-facing publish delivery metadata is included only for owner callers and
+  reflects async public-web delivery for the current `published_version`.
 - Member-review visibility is backend-computed and returned as
   `show_member_review_card` for non-owner callers.
 
@@ -142,6 +144,13 @@ Owner metadata extension (owner callers only):
     "home_public_id": "text|null",
     "public_url": "text|null",
     "published_version": "text|null",
+    "publish_sync_status": "queued|processing|succeeded|failed|null",
+    "publish_sync_error": {
+      "code": "text",
+      "message": "text",
+      "stage": "text",
+      "at": "timestamptz"
+    },
     "show_publish_button": true,
     "show_republish_button": false,
     "show_public_url": false
@@ -191,6 +200,20 @@ For owner callers:
   - `show_republish_button=true`
   - `show_public_url=true`
 
+4.1.2 Publish sync status
+
+For owner callers:
+- `publish_sync_status` is scoped to the current `published_version`.
+- Allowed values:
+  - `queued`
+  - `processing`
+  - `succeeded`
+  - `failed`
+  - `null` when no publish has happened yet
+- `publish_sync_error` is null unless `publish_sync_status='failed'`.
+- Older published records created before async job tracking MAY surface
+  `publish_sync_status='succeeded'` without a stored job row.
+
 4.2 `house_norms_generate_for_home(p_home_id uuid, p_template_key text, p_locale text, p_inputs jsonb, p_force boolean) -> jsonb`
 
 Caller: current owner.
@@ -238,7 +261,7 @@ Behavior:
 - Generates a new monotonic `published_version` on every publish.
 - Computes `public_url` from canonical host + route template + `home_public_id`.
 - `public_url` is derived and returned, not persisted.
-- Writes derived public delivery artifacts after canonical publish update:
+- Enqueues async public delivery work after canonical publish update:
   - versioned snapshot:
     `public_norms/home/{home_public_id}/published_{published_version}.json`
   - manifest pointer:
@@ -255,13 +278,21 @@ Behavior:
     `public, max-age=31536000, immutable`
   - manifest:
     `no-store`
-- Publish atomicity:
-  - if artifact or manifest write fails, publish RPC MUST fail (no success
-    response for partial publish state).
-- On successful publish + artifact write, backend MUST trigger Vercel
-  on-demand revalidation for `/kinly/norms/{home_public_id}` before returning
-  success.
-- Returned `has_unpublished_changes=false` confirms publish complete.
+- Publish response timing:
+  - publish RPC MUST return success once canonical DB publish state and the
+    publish job row are committed.
+  - publish RPC MUST NOT wait on artifact upload or Vercel revalidation.
+- Delivery observability:
+  - response includes `publish_sync_status` for the new `published_version`.
+  - normal path returns `publish_sync_status='queued'`.
+  - if enqueue/dispatch fails before the RPC returns, response returns
+    `publish_sync_status='failed'` with `publish_sync_error`.
+- Delivery guarantees:
+  - async worker writes versioned artifact + manifest and then triggers Vercel
+    on-demand revalidation for `/kinly/norms/{home_public_id}`.
+  - failed delivery does not roll back canonical publish state; failure is
+    surfaced through owner-facing publish sync metadata.
+- Returned `has_unpublished_changes=false` confirms canonical publish complete.
 
 Response shape:
 
@@ -277,7 +308,9 @@ Response shape:
   "published_version": "text",
   "has_unpublished_changes": false,
   "home_public_id": "text",
-  "public_url": "https://go.makinglifeeasie.com/kinly/norms/{homePublicId}"
+  "public_url": "https://go.makinglifeeasie.com/kinly/norms/{homePublicId}",
+  "publish_sync_status": "queued|failed",
+  "publish_sync_error": null
 }
 ```
 
@@ -437,8 +470,6 @@ Required private codes:
 - `HOUSE_NORMS_TEMPLATE_NOT_FOUND`
 - `HOUSE_NORMS_INVALID_SECTION`
 - `HOUSE_NORMS_UNSAFE_TEXT`
-- `HOUSE_NORMS_PUBLISH_ARTIFACT_FAILED`
-- `HOUSE_NORMS_PUBLISH_REVALIDATE_FAILED`
 
 Public read RPC:
 - Prefer unavailable/null payload over throw for unpublished/inactive/not found.
@@ -462,20 +493,21 @@ Public read RPC:
   - generates `home_public_id`
   - generates `published_version`
   - returns derived `public_url`
-  - writes versioned artifact + manifest
+  - enqueues versioned artifact + manifest delivery job
+  - returns `publish_sync_status='queued'` on the normal path
 - Republish:
   - reuses same `home_public_id` and `public_url`
   - increments `published_version`
-  - rewrites versioned artifact + manifest
+  - enqueues a new delivery job for the new `published_version`
 - Out-of-date after edit: `show_republish_button=true` and `show_public_url=true`.
 - Never-published draft: `show_publish_button=true`, `show_public_url=false`.
 - Non-owner member read succeeds without owner URL controls.
 - Public route read resolves published snapshot only when published and active.
 - Public route read returns unavailable for unpublished/inactive/unknown id.
-- Publish failure on artifact/manifest write returns failure (no partial publish
-  success response).
-- Successful publish triggers route revalidation; next public render resolves
-  new `published_version`.
+- Async delivery failure surfaces `publish_sync_status='failed'` without
+  rolling back canonical publish state.
+- Successful async delivery triggers route revalidation; next public render
+  resolves new `published_version`.
 - High-traffic public reads are served through cache/artifact path without
   repeated DB reads per view.
 - Unknown `p_section_key` fails with `HOUSE_NORMS_INVALID_SECTION`.

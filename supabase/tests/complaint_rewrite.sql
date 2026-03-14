@@ -3,7 +3,7 @@ SET search_path = pgtap, public, auth, extensions;
 BEGIN;
 SET ROLE postgres;
 
-SELECT plan(21);
+SELECT plan(28);
 
 -- Helper UUIDs (temp table for reuse)
 CREATE TEMP TABLE consts AS
@@ -379,57 +379,74 @@ ok(
 );
 
 -- 10) Deleting rewrite_request cascades to snapshots and jobs
-WITH ids AS (
-  SELECT
-    '00000000-0000-4000-8000-000000000951'::uuid AS rid,
-    '00000000-0000-4000-8000-000000000952'::uuid AS sid,
-    '00000000-0000-4000-8000-000000000953'::uuid AS psid,
-    '00000000-0000-4000-8000-000000000954'::uuid AS jid
-),
-insert_req AS (
-  INSERT INTO public.rewrite_requests(
-    rewrite_request_id, home_id, sender_user_id, recipient_user_id,
-    surface, original_text, source_locale, target_locale, lane,
-    topics, intent, rewrite_strength,
-    classifier_result, context_pack, rewrite_request,
-    classifier_version, context_pack_version, policy_version
-  ) VALUES (
-    '00000000-0000-4000-8000-000000000951',
-    '00000000-0000-4000-8000-000000000951',
-    '00000000-0000-4000-8000-000000000951',
-    '00000000-0000-4000-8000-000000000951',
-    'other', 'bye', 'en', 'en', 'same_language',
-    '["other"]'::jsonb, 'concern', 'full_reframe',
-    '{}'::jsonb, '{}'::jsonb, '{}'::jsonb,
-    'v1', 'v1', 'v1'
-  ) RETURNING 1
-),
-ins_snap AS (
-  INSERT INTO public.recipient_snapshots(recipient_snapshot_id, rewrite_request_id, home_id, recipient_user_ids)
-  SELECT sid, rid, rid, ARRAY[rid] FROM ids
-  RETURNING 1
-),
-ins_pref AS (
-  INSERT INTO public.recipient_preference_snapshots(recipient_preference_snapshot_id, rewrite_request_id, recipient_user_id, preference_payload)
-  SELECT psid, rid, rid, '{}'::jsonb FROM ids
-  RETURNING 1
-),
-ins_job AS (
-  INSERT INTO public.rewrite_jobs(
-    job_id, rewrite_request_id, recipient_user_id,
-    recipient_snapshot_id, recipient_preference_snapshot_id,
-    task, surface, rewrite_strength, lane,
-    language_pair, routing_decision, status
-  )
-  SELECT
-    jid, rid, rid,
-    sid, psid,
-    'complaint_rewrite', 'other', 'full_reframe', 'same_language',
-    '{}'::jsonb, '{}'::jsonb, 'queued'
-  FROM ids
-  RETURNING 1
+DELETE FROM public.rewrite_jobs
+WHERE rewrite_request_id = '00000000-0000-4000-8000-000000000951'::uuid;
+
+DELETE FROM public.recipient_preference_snapshots
+WHERE rewrite_request_id = '00000000-0000-4000-8000-000000000951'::uuid;
+
+DELETE FROM public.recipient_snapshots
+WHERE rewrite_request_id = '00000000-0000-4000-8000-000000000951'::uuid;
+
+DELETE FROM public.rewrite_requests
+WHERE rewrite_request_id = '00000000-0000-4000-8000-000000000951'::uuid;
+
+INSERT INTO public.rewrite_requests(
+  rewrite_request_id, home_id, sender_user_id, recipient_user_id,
+  surface, original_text, source_locale, target_locale, lane,
+  topics, intent, rewrite_strength,
+  classifier_result, context_pack, rewrite_request,
+  classifier_version, context_pack_version, policy_version
+) VALUES (
+  '00000000-0000-4000-8000-000000000951',
+  '00000000-0000-4000-8000-000000000951',
+  '00000000-0000-4000-8000-000000000951',
+  '00000000-0000-4000-8000-000000000951',
+  'other', 'bye', 'en', 'en', 'same_language',
+  '["other"]'::jsonb, 'concern', 'full_reframe',
+  '{}'::jsonb, '{}'::jsonb, '{}'::jsonb,
+  'v1', 'v1', 'v1'
+);
+
+INSERT INTO public.recipient_snapshots(recipient_snapshot_id, rewrite_request_id, home_id, recipient_user_ids)
+VALUES (
+  '00000000-0000-4000-8000-000000000952',
+  '00000000-0000-4000-8000-000000000951',
+  '00000000-0000-4000-8000-000000000951',
+  ARRAY['00000000-0000-4000-8000-000000000951'::uuid]
+);
+
+INSERT INTO public.recipient_preference_snapshots(
+  recipient_preference_snapshot_id,
+  rewrite_request_id,
+  recipient_user_id,
+  preference_payload
 )
-DELETE FROM public.rewrite_requests WHERE rewrite_request_id = (SELECT rid FROM ids);
+VALUES (
+  '00000000-0000-4000-8000-000000000953',
+  '00000000-0000-4000-8000-000000000951',
+  '00000000-0000-4000-8000-000000000951',
+  '{}'::jsonb
+);
+
+INSERT INTO public.rewrite_jobs(
+  job_id, rewrite_request_id, recipient_user_id,
+  recipient_snapshot_id, recipient_preference_snapshot_id,
+  task, surface, rewrite_strength, lane,
+  language_pair, routing_decision, status
+)
+VALUES (
+  '00000000-0000-4000-8000-000000000954',
+  '00000000-0000-4000-8000-000000000951',
+  '00000000-0000-4000-8000-000000000951',
+  '00000000-0000-4000-8000-000000000952',
+  '00000000-0000-4000-8000-000000000953',
+  'complaint_rewrite', 'other', 'full_reframe', 'same_language',
+  '{}'::jsonb, '{}'::jsonb, 'queued'
+);
+
+DELETE FROM public.rewrite_requests
+WHERE rewrite_request_id = '00000000-0000-4000-8000-000000000951'::uuid;
 
 SELECT is(
   (SELECT COUNT(*) FROM public.recipient_snapshots WHERE rewrite_request_id = '00000000-0000-4000-8000-000000000951'::uuid),
@@ -441,6 +458,177 @@ SELECT is(
   (SELECT COUNT(*) FROM public.rewrite_jobs WHERE rewrite_request_id = '00000000-0000-4000-8000-000000000951'::uuid),
   0::bigint,
   'rewrite_jobs cascade deleted'
+);
+
+-- 11) complaint_fetch_entry_locales returns authoritative row data for a real mood entry
+CREATE TEMP TABLE complaint_fetch_users (
+  label text PRIMARY KEY,
+  user_id uuid NOT NULL,
+  email text NOT NULL
+);
+
+CREATE TEMP TABLE complaint_fetch_runtime (
+  home_id uuid,
+  entry_id uuid
+);
+
+INSERT INTO public.avatars (id, storage_path, category, name)
+VALUES ('00000000-0000-4000-8000-000000000977', 'avatars/default.png', 'animal', 'Complaint Rewrite Avatar')
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO complaint_fetch_users (label, user_id, email) VALUES
+  ('author', '00000000-0000-4000-8000-000000000971', 'complaint-author@example.com'),
+  ('recipient', '00000000-0000-4000-8000-000000000972', 'complaint-recipient@example.com');
+
+INSERT INTO auth.users (id, instance_id, email, raw_user_meta_data, raw_app_meta_data, aud, role, encrypted_password)
+SELECT
+  user_id,
+  '00000000-0000-0000-0000-000000000000'::uuid,
+  email,
+  '{}'::jsonb,
+  '{"provider":"email"}'::jsonb,
+  'authenticated',
+  'authenticated',
+  'secret'
+FROM complaint_fetch_users
+ON CONFLICT (id) DO NOTHING;
+
+DELETE FROM public.home_mood_entries
+WHERE user_id IN (SELECT user_id FROM complaint_fetch_users);
+
+SELECT set_config(
+  'request.jwt.claim.sub',
+  (SELECT user_id::text FROM complaint_fetch_users WHERE label = 'author'),
+  true
+);
+SELECT set_config('request.jwt.claim.role', 'authenticated', true);
+
+WITH res AS (
+  SELECT public.homes_create_with_invite() AS payload
+)
+INSERT INTO complaint_fetch_runtime (home_id)
+SELECT (payload->'home'->>'id')::uuid FROM res;
+
+WITH payload AS (
+  SELECT *
+  FROM public.mood_submit(
+    (SELECT home_id FROM complaint_fetch_runtime LIMIT 1),
+    'thunderstorm',
+    'Please keep the kitchen quieter late at night',
+    false
+  )
+)
+UPDATE complaint_fetch_runtime
+SET entry_id = (SELECT entry_id FROM payload);
+
+SELECT is(
+  (
+    SELECT recipient_locale
+    FROM public.complaint_fetch_entry_locales(
+      (SELECT entry_id FROM complaint_fetch_runtime LIMIT 1),
+      (SELECT user_id FROM complaint_fetch_users WHERE label = 'recipient')
+    )
+  ),
+  'en'::text,
+  'complaint_fetch_entry_locales defaults recipient locale to en'
+);
+
+SELECT is(
+  (
+    SELECT home_id
+    FROM public.complaint_fetch_entry_locales(
+      (SELECT entry_id FROM complaint_fetch_runtime LIMIT 1),
+      (SELECT user_id FROM complaint_fetch_users WHERE label = 'recipient')
+    )
+  ),
+  (SELECT home_id FROM complaint_fetch_runtime LIMIT 1),
+  'complaint_fetch_entry_locales returns the entry home_id'
+);
+
+SELECT is(
+  (
+    SELECT author_user_id
+    FROM public.complaint_fetch_entry_locales(
+      (SELECT entry_id FROM complaint_fetch_runtime LIMIT 1),
+      (SELECT user_id FROM complaint_fetch_users WHERE label = 'recipient')
+    )
+  ),
+  (SELECT user_id FROM complaint_fetch_users WHERE label = 'author'),
+  'complaint_fetch_entry_locales returns the entry author_user_id'
+);
+
+SELECT is(
+  (
+    SELECT recipient_user_id
+    FROM public.complaint_fetch_entry_locales(
+      (SELECT entry_id FROM complaint_fetch_runtime LIMIT 1),
+      (SELECT user_id FROM complaint_fetch_users WHERE label = 'recipient')
+    )
+  ),
+  (SELECT user_id FROM complaint_fetch_users WHERE label = 'recipient'),
+  'complaint_fetch_entry_locales returns the requested recipient_user_id'
+);
+
+-- 12) complaint_rewrite_enqueue accepts the orchestrator payload shape and persists snapshots/jobs
+DELETE FROM public.rewrite_jobs
+WHERE rewrite_request_id = '00000000-0000-4000-8000-000000000981'::uuid;
+
+DELETE FROM public.recipient_preference_snapshots
+WHERE rewrite_request_id = '00000000-0000-4000-8000-000000000981'::uuid;
+
+DELETE FROM public.recipient_snapshots
+WHERE rewrite_request_id = '00000000-0000-4000-8000-000000000981'::uuid;
+
+DELETE FROM public.rewrite_requests
+WHERE rewrite_request_id = '00000000-0000-4000-8000-000000000981'::uuid;
+
+SELECT ok(
+  public.complaint_rewrite_enqueue(
+    '00000000-0000-4000-8000-000000000981'::uuid,
+    '00000000-0000-4000-8000-000000000982'::uuid,
+    '00000000-0000-4000-8000-000000000983'::uuid,
+    '00000000-0000-4000-8000-000000000984'::uuid,
+    'weekly_harmony',
+    'Please leave the dishes soaking instead of piling them up',
+    '{"rewrite_request_id":"00000000-0000-4000-8000-000000000981"}'::jsonb,
+    '{"classifier_version":"v1","detected_language":"en","topics":["noise"],"intent":"concern","rewrite_strength":"full_reframe","safety_flags":[]}'::jsonb,
+    '{"tone":"gentle"}'::jsonb,
+    'en',
+    'en',
+    'same_language',
+    '["noise"]'::jsonb,
+    'concern',
+    'full_reframe',
+    'v1',
+    'v1.1',
+    'v1',
+    '{"provider":"openai","model":"gpt-5-mini"}'::jsonb,
+    '{"from":"en","to":"en"}'::jsonb,
+    '{"preferences":{"communication_directness":"gentle"}}'::jsonb,
+    2
+  ) IS NOT NULL,
+  'complaint_rewrite_enqueue accepts orchestrator payload shape'
+);
+
+SELECT ok(
+  EXISTS (
+    SELECT 1
+    FROM public.rewrite_requests
+    WHERE rewrite_request_id = '00000000-0000-4000-8000-000000000981'::uuid
+      AND recipient_snapshot_id IS NOT NULL
+      AND recipient_preference_snapshot_id IS NOT NULL
+  ),
+  'complaint_rewrite_enqueue stores snapshot ids on rewrite_requests'
+);
+
+SELECT ok(
+  EXISTS (
+    SELECT 1
+    FROM public.rewrite_jobs
+    WHERE rewrite_request_id = '00000000-0000-4000-8000-000000000981'::uuid
+      AND recipient_user_id = '00000000-0000-4000-8000-000000000984'::uuid
+  ),
+  'complaint_rewrite_enqueue inserts the rewrite job'
 );
 
 SELECT * FROM finish();

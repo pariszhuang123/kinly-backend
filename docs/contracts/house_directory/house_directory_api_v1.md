@@ -39,21 +39,15 @@ Depends on:
 - `water`
 - `other`
 
-### 2.2 `home_directory_link_tag`
-- `rent`
-- `bond`
-- `utilities`
-- `other`
-
-### 2.3 `home_directory_reminder_kind`
+### 2.2 `home_directory_reminder_kind`
 - `renewal`
 
-### 2.4 `home_directory_reminder_status`
+### 2.3 `home_directory_reminder_status`
 - `active`
 - `dismissed`
 - `retired`
 
-### 2.5 `home_directory_reminder_offset_unit`
+### 2.4 `home_directory_reminder_offset_unit`
 - `day`
 - `week`
 - `month`
@@ -167,17 +161,15 @@ Required constraints:
 - primary key: `(reminder_id, user_id)`
 - at most one acknowledgement per member per reminder row
 
-### 3.5 `home_directory_links`
+### 3.5 `home_directory_notes`
 
 Required fields:
 - `id uuid pk`
 - `home_id uuid fk homes(id)`
 - `title text`
-- `url text`
-- `tag text`
-- `custom_tag text null`
-- `start_date date null`
-- `end_date date null`
+- `details text`
+- `reference_url text null`
+- `photo_path text null`
 - `archived_at timestamptz null`
 - `created_by_user_id uuid`
 - `updated_by_user_id uuid`
@@ -185,11 +177,11 @@ Required fields:
 - `updated_at timestamptz`
 
 Required constraints:
-- `tag` in canonical enum list
-- `tag='other'` requires non-empty trimmed `custom_tag` length `1..24`
-- non-`other` tags require `custom_tag is null`
-- `end_date` requires `start_date`
-- if both dates exist: `start_date <= end_date`
+- `title` must be non-empty after trim
+- `details` must be non-empty after trim
+- `reference_url` may be null; if present it must be `http/https`
+- `photo_path` may be null; if present it must be a storage reference under `households/%`
+- at most one photo path may be attached per active note row in v1
 
 ## 4. Reminder semantics
 
@@ -252,8 +244,8 @@ Caller: member.
 
 Returns:
 - `services` array ordered by `provider_name` asc, then `created_at` desc, then `id`
-- `links` array ordered by `title` asc, then `created_at` desc, then `id`
-- archived services and links are excluded
+- `notes` array ordered by `title` asc, then `created_at` desc, then `id`
+- archived services and notes are excluded
 
 ### 5.4 `upsert_home_directory_service(p_home_id uuid, p_service_id uuid|null default null, p_service_type text, p_custom_label text|null default null, p_provider_name text, p_account_reference text|null default null, p_link_url text|null default null, p_term_start_date date|null default null, p_term_end_date date|null default null, p_renewal_reminder_offset_value integer|null default null, p_renewal_reminder_offset_unit text|null default null, p_notes text|null default null) -> jsonb`
 
@@ -273,19 +265,26 @@ Behavior:
 - retires associated reminder rows
 - idempotent shape via `already_archived`
 
-### 5.6 `upsert_home_directory_link(p_home_id uuid, p_link_id uuid|null default null, p_title text, p_url text, p_tag text, p_custom_tag text|null default null, p_start_date date|null default null, p_end_date date|null default null) -> jsonb`
+### 5.6 `upsert_home_directory_note(p_home_id uuid, p_note_id uuid|null default null, p_title text, p_details text, p_reference_url text|null default null, p_photo_path text|null default null) -> jsonb`
 
 Caller: owner-only.
 
 Behavior:
-- create/update link using replace semantics
+- create/update note using replace semantics
+- `title` and `details` are required and trimmed for validation
+- `reference_url` may be null, but if present it must be `http/https`
+- `photo_path` may be null; when present it stores a storage reference only
+- `photo_path` must match `households/%` when present
+- the first add for a note enforces the note-photo usage limit when the home is not premium
+- clearing or archiving a note photo does not refund prior usage
+- replacing an existing `photo_path` MUST NOT count as a second paid usage event
 
-### 5.7 `archive_home_directory_link(p_home_id uuid, p_link_id uuid) -> jsonb`
+### 5.7 `archive_home_directory_note(p_home_id uuid, p_note_id uuid) -> jsonb`
 
 Caller: owner-only.
 
 Behavior:
-- soft-archives the link
+- soft-archives the note
 - idempotent shape via `already_archived`
 
 ### 5.8 `list_due_home_directory_reminders(p_home_id uuid) -> jsonb`
@@ -340,16 +339,15 @@ Required codes:
 - `HOUSE_DIRECTORY_INVALID_ENUM`
 - `HOUSE_DIRECTORY_INVALID_INPUT`
 - `HOUSE_DIRECTORY_INVALID_TERM_RANGE`
-- `HOUSE_DIRECTORY_INVALID_DATE_RANGE`
 - `HOUSE_DIRECTORY_RENT_TERM_REQUIRED`
 - `HOUSE_DIRECTORY_INVALID_REMINDER_OFFSET`
 - `HOUSE_DIRECTORY_OTHER_LABEL_REQUIRED`
 - `HOUSE_DIRECTORY_OTHER_LABEL_FORBIDDEN`
-- `HOUSE_DIRECTORY_OTHER_TAG_REQUIRED`
-- `HOUSE_DIRECTORY_OTHER_TAG_FORBIDDEN`
 - `HOUSE_DIRECTORY_ACTIVE_SERVICE_CONFLICT`
 - `HOUSE_DIRECTORY_SERVICE_NOT_FOUND`
-- `HOUSE_DIRECTORY_LINK_NOT_FOUND`
+- `HOUSE_DIRECTORY_NOTE_REQUIRED_FIELDS`
+- `HOUSE_DIRECTORY_NOTE_INVALID_URL`
+- `HOUSE_DIRECTORY_NOTE_NOT_FOUND`
 - `HOUSE_DIRECTORY_REMINDER_NOT_FOUND`
 - `HOUSE_DIRECTORY_REMINDER_NOT_ACTIONABLE`
 
@@ -363,20 +361,22 @@ Required codes:
 ## 8. Contract test scenarios
 
 - Member reads wifi/content/due reminders successfully.
-- Non-owner cannot mutate wifi, services, links, or dismiss reminders.
+- Non-owner cannot mutate wifi, services, notes, or dismiss reminders.
 - Wifi upsert rejects whitespace-only password and read omits password.
 - Rent service without term dates fails with `HOUSE_DIRECTORY_RENT_TERM_REQUIRED`.
+- Note create/update without `title` or `details` fails with `HOUSE_DIRECTORY_NOTE_REQUIRED_FIELDS`.
+- Note with invalid `reference_url` fails with `HOUSE_DIRECTORY_NOTE_INVALID_URL`.
 - Invalid reminder offset pair or invalid offset range fails with `HOUSE_DIRECTORY_INVALID_REMINDER_OFFSET`.
 - Due reminders appear only when current UTC date is on/after `due_at`.
 - Member acknowledgement hides reminder for that member only.
 - Owner dismissal removes the reminder from due-reminder results.
-- Archived services and links disappear from content reads.
+- Archived services and notes disappear from content reads.
 - Active rent/internet/electricity uniqueness conflicts surface `HOUSE_DIRECTORY_ACTIVE_SERVICE_CONFLICT`.
 
 ## 9. References
 
-- [House Directory Contract v1](./house_directory_v1.md)
-- [Homes v2](../homes_v2.md)
+- [House Directory Contract v1](../../../product/kinly/shared/house_directory_v1.md)
+- [Homes v2](./homes_v2.md)
 
 ```contracts-json
 {
@@ -387,7 +387,7 @@ Required codes:
     "HomeDirectoryService": {},
     "HomeDirectoryServiceReminder": {},
     "HomeDirectoryServiceReminderAcknowledgement": {},
-    "HomeDirectoryLink": {}
+    "HouseNote": {}
   },
   "functions": {
     "houseDirectory.getWifi": {
@@ -449,29 +449,27 @@ Required codes:
       },
       "returns": "jsonb"
     },
-    "houseDirectory.upsertLink": {
+    "houseDirectory.upsertNote": {
       "type": "rpc",
       "caller": "owner-only",
-      "impl": "public.upsert_home_directory_link",
+      "impl": "public.upsert_home_directory_note",
       "args": {
         "p_home_id": "uuid",
-        "p_link_id": "uuid|null",
+        "p_note_id": "uuid|null",
         "p_title": "text",
-        "p_url": "text",
-        "p_tag": "text",
-        "p_custom_tag": "text|null",
-        "p_start_date": "date|null",
-        "p_end_date": "date|null"
+        "p_details": "text",
+        "p_reference_url": "text|null",
+        "p_photo_path": "text|null"
       },
       "returns": "jsonb"
     },
-    "houseDirectory.archiveLink": {
+    "houseDirectory.archiveNote": {
       "type": "rpc",
       "caller": "owner-only",
-      "impl": "public.archive_home_directory_link",
+      "impl": "public.archive_home_directory_note",
       "args": {
         "p_home_id": "uuid",
-        "p_link_id": "uuid"
+        "p_note_id": "uuid"
       },
       "returns": "jsonb"
     },

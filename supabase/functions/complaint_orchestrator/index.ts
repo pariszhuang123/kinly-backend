@@ -144,7 +144,9 @@ if (import.meta.main) {
       }
 
       // 1) Fetch authoritative entry data (text + locale + home + author + recipient)
-      const entryData: EntryLocalesRow | null = await rpcJson<EntryLocalesRow>(
+      const entryData: EntryLocalesRow | null = await rpcSingleRow<
+        EntryLocalesRow
+      >(
         supabase,
         "complaint_fetch_entry_locales",
         {
@@ -322,6 +324,18 @@ if (import.meta.main) {
         },
       );
 
+      if (
+        !context_pack || typeof context_pack !== "object" ||
+        Array.isArray(context_pack)
+      ) {
+        throw new ApiError(
+          500,
+          "context_pack_invalid_shape",
+          false,
+          "context_pack_invalid_shape",
+        );
+      }
+
       // 7) Routing (RPC)
       const routing_decision: RoutingDecision | null = await rpcJson<
         RoutingDecision
@@ -388,32 +402,23 @@ if (import.meta.main) {
       const enqueueData = await rpcJson(
         supabase,
         "complaint_rewrite_enqueue",
-        {
-          p_rewrite_request_id: rewrite_request_id,
-          p_home_id: input.home_id,
-          p_sender_user_id: input.sender_user_id,
-          p_recipient_user_id: input.recipient_user_id,
-          p_recipient_snapshot_id: recipient_snapshot_id,
-          p_recipient_preference_snapshot_id: recipient_preference_snapshot_id,
-          p_surface: input.surface,
-          p_original_text: original_text,
-          p_rewrite_request: rewrite_request,
-          p_classifier_result: classifier_result,
-          p_context_pack: context_pack,
-          p_source_locale: source_locale,
-          p_target_locale: target_locale,
-          p_lane: lane,
-          p_topics: classifier_result.topics,
-          p_intent: classifier_result.intent,
-          p_rewrite_strength: classifier_result.rewrite_strength,
-          p_classifier_version: classifier_result.classifier_version ?? "v1",
-          p_context_pack_version: "v1.1",
-          p_policy_version: "v1",
-          p_routing_decision: routing_decision,
-          p_language_pair: { from: source_locale, to: target_locale },
-          p_max_attempts: maxAttempts,
-          p_request_id: http_request_id,
-        },
+        buildComplaintRewriteEnqueueArgs({
+          rewrite_request_id,
+          home_id: input.home_id,
+          sender_user_id: input.sender_user_id,
+          recipient_user_id: input.recipient_user_id,
+          surface: input.surface,
+          original_text,
+          rewrite_request,
+          classifier_result,
+          context_pack,
+          source_locale,
+          target_locale,
+          lane,
+          routing_decision,
+          snapshotPayload,
+          maxAttempts,
+        }),
       );
 
       // Mark trigger completed (IMPORTANT: use trigger_request_id)
@@ -676,6 +681,60 @@ async function rpcBool(
   return Boolean(data);
 }
 
+async function rpcSingleRow<T>(
+  supabase: SupabaseClient,
+  fn: string,
+  args: Record<string, unknown>,
+): Promise<T | null> {
+  const data = await rpcJson<unknown>(supabase, fn, args);
+  if (data == null) return null;
+  if (Array.isArray(data)) return (data[0] ?? null) as T | null;
+  return data as T;
+}
+
+function buildComplaintRewriteEnqueueArgs(params: {
+  rewrite_request_id: string;
+  home_id: string;
+  sender_user_id: string;
+  recipient_user_id: string;
+  surface: Surface;
+  original_text: string;
+  rewrite_request: Record<string, unknown>;
+  classifier_result: ClassifierResult;
+  context_pack: Record<string, unknown>;
+  source_locale: string;
+  target_locale: string;
+  lane: "same_language" | "cross_language";
+  routing_decision: RoutingDecision;
+  snapshotPayload: { preferences: Record<string, string> };
+  maxAttempts: number;
+}) {
+  return {
+    p_rewrite_request_id: params.rewrite_request_id,
+    p_home_id: params.home_id,
+    p_sender_user_id: params.sender_user_id,
+    p_recipient_user_id: params.recipient_user_id,
+    p_surface: params.surface,
+    p_original_text: params.original_text,
+    p_rewrite_request: params.rewrite_request,
+    p_classifier_result: params.classifier_result,
+    p_context_pack: params.context_pack,
+    p_source_locale: params.source_locale,
+    p_target_locale: params.target_locale,
+    p_lane: params.lane,
+    p_topics: params.classifier_result.topics,
+    p_intent: params.classifier_result.intent,
+    p_rewrite_strength: params.classifier_result.rewrite_strength,
+    p_classifier_version: params.classifier_result.classifier_version ?? "v1",
+    p_context_pack_version: "v1.1",
+    p_policy_version: "v1",
+    p_routing_decision: params.routing_decision,
+    p_language_pair: { from: params.source_locale, to: params.target_locale },
+    p_preference_payload: params.snapshotPayload,
+    p_max_attempts: params.maxAttempts,
+  };
+}
+
 // Best-effort
 async function rpcSafe(
   supabase: SupabaseClient,
@@ -890,6 +949,7 @@ function truncate(s: string, n: number) {
 // Test-only exports
 export {
   ApiError,
+  buildComplaintRewriteEnqueueArgs,
   buildSnapshotPreferences,
   callClassifierService,
   clampInt,
@@ -898,6 +958,7 @@ export {
   normalizeLocale,
   normalizePreferencePayload,
   preferRetryableStatus,
+  rpcSingleRow,
   safeJson,
   validate,
 };

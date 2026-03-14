@@ -5,10 +5,10 @@ Scope: frontend
 Artifact-Type: contract
 Stability: evolving
 Status: draft
-Version: v1.0
+Version: v1.1
 ---
 
-# Norms - Public Norms v1.0
+# Norms - Public Norms v1.1
 
 Status: Proposed (MVP)
 
@@ -42,6 +42,8 @@ from cached web output and storage artifacts, not repeated per-view DB reads.
 - Before publish, the public page MUST be unavailable.
 - Public URL identity uses stable `home_public_id`; republish keeps the same id
   and same URL.
+- Because publish delivery is asynchronous, first publish MAY briefly return
+  success before the public page becomes available.
 
 2.3 Inactive/unavailable states
 - If home is inactive, public norms page MUST be unavailable.
@@ -101,6 +103,8 @@ from cached web output and storage artifacts, not repeated per-view DB reads.
 5.4 Freshness model
 - Correctness MUST be driven by explicit owner publish actions and backend
   on-demand revalidation for `/kinly/norms/{home_public_id}`.
+- Republish MAY briefly serve the previous published snapshot until the async
+  delivery job finishes successfully.
 - Freshness MUST NOT depend on fixed time-based TTL expiry.
 
 6. Non-goals

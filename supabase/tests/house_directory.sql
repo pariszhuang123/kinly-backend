@@ -26,9 +26,9 @@ CREATE TEMP TABLE tmp_services (
   reminder_id uuid
 );
 
-CREATE TEMP TABLE tmp_links (
+CREATE TEMP TABLE tmp_notes (
   label text PRIMARY KEY,
-  link_id uuid
+  note_id uuid
 );
 
 CREATE OR REPLACE FUNCTION pg_temp.expect_api_error(
@@ -161,6 +161,19 @@ SELECT pg_temp.expect_api_error(
      ); $$,
   'FORBIDDEN_OWNER_ONLY',
   'member cannot upsert service'
+);
+
+SELECT pg_temp.expect_api_error(
+  $$ SELECT public.upsert_home_directory_note(
+       (SELECT home_id FROM tmp_homes WHERE label = 'primary'),
+       NULL,
+       'Move-in details',
+       'Parking is behind the house.',
+       NULL,
+       NULL
+     ); $$,
+  'FORBIDDEN_OWNER_ONLY',
+  'member cannot upsert note'
 );
 
 SELECT pg_temp.expect_api_error(
@@ -408,6 +421,60 @@ SELECT pg_temp.expect_api_error(
   'only one active internet service is allowed per home'
 );
 
+SELECT pg_temp.expect_api_error(
+  $$ SELECT public.upsert_home_directory_note(
+       (SELECT home_id FROM tmp_homes WHERE label = 'primary'),
+       NULL,
+       '  ',
+       NULL,
+       NULL,
+       NULL
+     ); $$,
+  'HOUSE_DIRECTORY_NOTE_REQUIRED_FIELDS',
+  'note requires title and details'
+);
+
+SELECT pg_temp.expect_api_error(
+  $$ SELECT public.upsert_home_directory_note(
+       (SELECT home_id FROM tmp_homes WHERE label = 'primary'),
+       NULL,
+       'Alarm',
+       'Use the side panel.',
+       'ftp://example.com/alarm',
+       NULL
+     ); $$,
+  'HOUSE_DIRECTORY_NOTE_INVALID_URL',
+  'note reference_url must be http or https when present'
+);
+
+WITH note_z AS (
+  SELECT public.upsert_home_directory_note(
+    (SELECT home_id FROM tmp_homes WHERE label = 'primary'),
+    NULL,
+    'Z Utilities',
+    'Gas meter is behind the bins.',
+    'https://example.com/utilities',
+    NULL
+  ) AS payload
+)
+INSERT INTO tmp_notes (label, note_id)
+SELECT 'z_note', (payload->'note'->>'id')::uuid
+FROM note_z;
+
+WITH note_a AS (
+  SELECT public.upsert_home_directory_note(
+    (SELECT home_id FROM tmp_homes WHERE label = 'primary'),
+    NULL,
+    'A Bond Info',
+    'Deposit receipt is filed in the entry drawer.',
+    NULL,
+    'households/primary/notes/bond-info.jpg'
+  ) AS payload
+)
+INSERT INTO tmp_notes (label, note_id)
+SELECT 'a_note', (payload->'note'->>'id')::uuid
+FROM note_a;
+
 SELECT set_config('request.jwt.claim.sub', (SELECT user_id::text FROM tmp_users WHERE label = 'member'), true);
 SELECT set_config('request.jwt.claim.role', 'authenticated', true);
 
@@ -495,38 +562,6 @@ SELECT ok(
   'repeat archive returns already_archived=true for service'
 );
 
-WITH link_a AS (
-  SELECT public.upsert_home_directory_link(
-    (SELECT home_id FROM tmp_homes WHERE label = 'primary'),
-    NULL,
-    'Z Utilities',
-    'https://example.com/z-utilities',
-    'utilities',
-    NULL,
-    NULL,
-    NULL
-  ) AS payload
-)
-INSERT INTO tmp_links (label, link_id)
-SELECT 'z_link', (payload->'link'->>'id')::uuid
-FROM link_a;
-
-WITH link_b AS (
-  SELECT public.upsert_home_directory_link(
-    (SELECT home_id FROM tmp_homes WHERE label = 'primary'),
-    NULL,
-    'A Bond Info',
-    'https://example.com/a-bond',
-    'bond',
-    NULL,
-    NULL,
-    NULL
-  ) AS payload
-)
-INSERT INTO tmp_links (label, link_id)
-SELECT 'a_link', (payload->'link'->>'id')::uuid
-FROM link_b;
-
 SELECT is(
   public.get_home_directory_content((SELECT home_id FROM tmp_homes WHERE label = 'primary'))->'services'->0->>'provider_name',
   'Landlord Alpha',
@@ -534,35 +569,35 @@ SELECT is(
 );
 
 SELECT is(
-  public.get_home_directory_content((SELECT home_id FROM tmp_homes WHERE label = 'primary'))->'links'->0->>'title',
+  public.get_home_directory_content((SELECT home_id FROM tmp_homes WHERE label = 'primary'))->'notes'->0->>'title',
   'A Bond Info',
-  'links are ordered by title'
+  'notes are ordered by title'
 );
 
 SELECT ok(
   (
-    public.archive_home_directory_link(
+    public.archive_home_directory_note(
       (SELECT home_id FROM tmp_homes WHERE label = 'primary'),
-      (SELECT link_id FROM tmp_links WHERE label = 'a_link')
+      (SELECT note_id FROM tmp_notes WHERE label = 'a_note')
     )->>'ok'
   )::boolean,
-  'owner can archive link'
+  'owner can archive note'
 );
 
 SELECT ok(
   (
-    public.archive_home_directory_link(
+    public.archive_home_directory_note(
       (SELECT home_id FROM tmp_homes WHERE label = 'primary'),
-      (SELECT link_id FROM tmp_links WHERE label = 'a_link')
+      (SELECT note_id FROM tmp_notes WHERE label = 'a_note')
     )->>'already_archived'
   )::boolean,
-  'repeat archive returns already_archived=true for link'
+  'repeat archive returns already_archived=true for note'
 );
 
 SELECT is(
-  jsonb_array_length(public.get_home_directory_content((SELECT home_id FROM tmp_homes WHERE label = 'primary'))->'links'),
+  jsonb_array_length(public.get_home_directory_content((SELECT home_id FROM tmp_homes WHERE label = 'primary'))->'notes'),
   1,
-  'archived link is excluded from content reads'
+  'archived note is excluded from content reads'
 );
 
 SELECT ok(

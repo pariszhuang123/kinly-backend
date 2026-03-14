@@ -10,6 +10,7 @@ type PublishPayload = {
   locale_base: string;
   published_content: Record<string, unknown>;
   public_url_path?: string | null;
+  publish_job_id?: string | null;
 };
 
 type AppErrorCode =
@@ -48,9 +49,13 @@ if (import.meta.main) {
     const requestId = req.headers.get("x-request-id")?.trim() ||
       crypto.randomUUID();
     let stage = "start";
+    let payload: PublishPayload | null = null;
+    let supabase: ReturnType<typeof serviceClient> | null = null;
     let snapshotUploadMs: number | null = null;
     let manifestUploadMs: number | null = null;
     let revalidateMs: number | null = null;
+    let artifactOk = false;
+    let revalidateOk = false;
 
     try {
       requireInternalSecret(req);
@@ -60,10 +65,16 @@ if (import.meta.main) {
         throw new AppError("invalid_method", 405);
       }
 
-      const payload = await parsePayload(req);
+      payload = await parsePayload(req);
       stage = "payload_parsed";
 
-      const supabase = serviceClient();
+      supabase = serviceClient();
+      await markJobProcessing(
+        supabase,
+        payload.publish_job_id,
+        requestId,
+        "processing",
+      );
 
       // Normalize consistently (and validate normalized)
       const homePublicId = payload.home_public_id.toLowerCase();
@@ -143,6 +154,7 @@ if (import.meta.main) {
       if (manifestErr) {
         throw new AppError("artifact_failed", 502, manifestErr.message);
       }
+      artifactOk = true;
 
       const revalidatePath = payload.public_url_path ||
         `/kinly/norms/${homePublicId}`;
@@ -154,12 +166,22 @@ if (import.meta.main) {
       if (!revalidated.ok) {
         throw new AppError("revalidate_failed", 502, revalidated.error);
       }
+      revalidateOk = true;
 
       stage = "done";
+      await markJobSucceeded(
+        supabase,
+        payload.publish_job_id,
+        requestId,
+        snapshotUploadMs,
+        manifestUploadMs,
+        revalidateMs,
+      );
       console.log(JSON.stringify({
         level: "info",
         msg: "house_norms_publish_sync_ok",
         request_id: requestId,
+        publish_job_id: payload.publish_job_id ?? null,
         home_public_id: homePublicId,
         published_version: publishedVersion,
         snapshot_path: snapshotPath,
@@ -174,19 +196,31 @@ if (import.meta.main) {
         {
           ok: true,
           request_id: requestId,
-          artifact_ok: true,
-          revalidate_ok: true,
+          artifact_ok: artifactOk,
+          revalidate_ok: revalidateOk,
           error_code: null,
         },
         200,
       );
     } catch (err) {
       const appErr = normalizeError(err);
+      await markJobFailed(
+        supabase,
+        payload?.publish_job_id,
+        requestId,
+        appErr.code,
+        appErr.details ?? appErr.code,
+        stage,
+        snapshotUploadMs,
+        manifestUploadMs,
+        revalidateMs,
+      );
 
       console.log(JSON.stringify({
         level: appErr.status >= 500 ? "error" : "warn",
         msg: "house_norms_publish_sync_failed",
         request_id: requestId,
+        publish_job_id: payload?.publish_job_id ?? null,
         stage,
         error_code: appErr.code,
         details: appErr.details,
@@ -199,8 +233,8 @@ if (import.meta.main) {
         {
           ok: false,
           request_id: requestId,
-          artifact_ok: false,
-          revalidate_ok: false,
+          artifact_ok: artifactOk,
+          revalidate_ok: revalidateOk,
           error_code: appErr.code,
           details: appErr.details ?? null,
         },
@@ -246,6 +280,9 @@ async function parsePayload(req: Request): Promise<PublishPayload> {
   const templateKey = String(payload.template_key ?? "").trim();
   const localeBase = String(payload.locale_base ?? "").trim();
   const publishedContent = payload.published_content;
+  const publishJobId = payload.publish_job_id == null
+    ? null
+    : String(payload.publish_job_id).trim();
 
   // Validate (note: home_public_id final validation after lowercase normalization in handler)
   if (!homePublicId) throw new AppError("invalid_home_public_id", 400);
@@ -286,6 +323,14 @@ async function parsePayload(req: Request): Promise<PublishPayload> {
     validateRelativePath(publicUrlPath);
   }
 
+  if (
+    publishJobId !== null &&
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+      .test(publishJobId)
+  ) {
+    throw new AppError("invalid_payload", 400, "publish_job_id must be a UUID");
+  }
+
   return {
     home_public_id: homePublicId,
     published_at: publishedAt,
@@ -294,6 +339,7 @@ async function parsePayload(req: Request): Promise<PublishPayload> {
     locale_base: localeBase,
     published_content: publishedContent as Record<string, unknown>,
     public_url_path: publicUrlPath,
+    publish_job_id: publishJobId,
   };
 }
 
@@ -396,12 +442,117 @@ function normalizeError(err: unknown): AppError {
   return new AppError("unexpected_error", 500, msg);
 }
 
+type JobRpcClient = {
+  rpc(
+    fn: string,
+    args?: Record<string, unknown>,
+  ): PromiseLike<{ error: { message: string } | null }>;
+};
+
+async function markJobProcessing(
+  supabase: JobRpcClient | null,
+  jobId: string | null | undefined,
+  requestId: string,
+  stage: string,
+) {
+  if (!supabase || !jobId) return;
+
+  const { error } = await supabase.rpc(
+    "house_norms_publish_job_mark_processing",
+    {
+      p_job_id: jobId,
+      p_request_id: requestId,
+      p_stage: stage,
+    },
+  );
+
+  if (error) {
+    console.log(JSON.stringify({
+      level: "warn",
+      msg: "house_norms_publish_sync_job_mark_processing_failed",
+      request_id: requestId,
+      publish_job_id: jobId,
+      details: error.message,
+    }));
+  }
+}
+
+async function markJobSucceeded(
+  supabase: JobRpcClient | null,
+  jobId: string | null | undefined,
+  requestId: string,
+  snapshotUploadMs: number | null,
+  manifestUploadMs: number | null,
+  revalidateMs: number | null,
+) {
+  if (!supabase || !jobId) return;
+
+  const { error } = await supabase.rpc(
+    "house_norms_publish_job_mark_succeeded",
+    {
+      p_job_id: jobId,
+      p_request_id: requestId,
+      p_snapshot_upload_ms: snapshotUploadMs,
+      p_manifest_upload_ms: manifestUploadMs,
+      p_revalidate_ms: revalidateMs,
+    },
+  );
+
+  if (error) {
+    console.log(JSON.stringify({
+      level: "warn",
+      msg: "house_norms_publish_sync_job_mark_succeeded_failed",
+      request_id: requestId,
+      publish_job_id: jobId,
+      details: error.message,
+    }));
+  }
+}
+
+async function markJobFailed(
+  supabase: JobRpcClient | null,
+  jobId: string | null | undefined,
+  requestId: string,
+  errorCode: string,
+  errorText: string,
+  stage: string,
+  snapshotUploadMs: number | null,
+  manifestUploadMs: number | null,
+  revalidateMs: number | null,
+) {
+  if (!supabase || !jobId) return;
+
+  const { error } = await supabase.rpc("house_norms_publish_job_mark_failed", {
+    p_job_id: jobId,
+    p_request_id: requestId,
+    p_error_code: errorCode,
+    p_error: errorText,
+    p_stage: stage,
+    p_snapshot_upload_ms: snapshotUploadMs,
+    p_manifest_upload_ms: manifestUploadMs,
+    p_revalidate_ms: revalidateMs,
+  });
+
+  if (error) {
+    console.log(JSON.stringify({
+      level: "warn",
+      msg: "house_norms_publish_sync_job_mark_failed_failed",
+      request_id: requestId,
+      publish_job_id: jobId,
+      details: error.message,
+    }));
+  }
+}
+
 // Test-only exports
 export {
   AppError,
   byteLength,
   callRevalidate,
   env,
+  markJobFailed,
+  markJobProcessing,
+  markJobSucceeded,
   normalizeError,
   parsePayload,
   requireInternalSecret,
