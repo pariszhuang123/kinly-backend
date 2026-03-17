@@ -2885,6 +2885,7 @@ BEGIN
     out_of_date = true,
     invalidated_at = now(),
     computed_at = now(),
+    coverage_answered = LEAST(coverage_answered, COALESCE(v_total, 0)),
     coverage_total = COALESCE(v_total, 0)
   WHERE home_id = p_home_id;
 
@@ -2940,40 +2941,31 @@ BEGIN
   IF TG_OP = 'INSERT' THEN
     v_new_home := NEW.home_id;
 
-    -- Only if inserted row is current.
     IF NEW.valid_to IS NULL THEN
       v_should_invalidate := true;
     END IF;
-
   ELSIF TG_OP = 'DELETE' THEN
     v_old_home := OLD.home_id;
 
-    -- Only if deleted row was current.
     IF OLD.valid_to IS NULL THEN
       v_should_invalidate := true;
     END IF;
-
   ELSE
-    -- UPDATE
     v_old_home := OLD.home_id;
     v_new_home := NEW.home_id;
 
-    -- 1) current -> not current (leave/kick): valid_to NULL -> NOT NULL
     IF OLD.valid_to IS NULL AND NEW.valid_to IS NOT NULL THEN
       v_should_invalidate := true;
     END IF;
 
-    -- 2) valid_from changed (rare, but affects validity window)
     IF OLD.valid_from IS DISTINCT FROM NEW.valid_from THEN
       v_should_invalidate := true;
     END IF;
 
-    -- 3) role changed (owner transfer etc.) – only matters for current row
     IF NEW.valid_to IS NULL AND OLD.role IS DISTINCT FROM NEW.role THEN
       v_should_invalidate := true;
     END IF;
 
-    -- 4) home_id changed (rare) – invalidate both homes
     IF OLD.home_id IS DISTINCT FROM NEW.home_id THEN
       v_should_invalidate := true;
     END IF;
@@ -2981,11 +2973,11 @@ BEGIN
 
   IF v_should_invalidate THEN
     IF v_old_home IS NOT NULL THEN
-      PERFORM public._house_vibes_mark_out_of_date(v_old_home);
+      PERFORM public._house_vibes_invalidate(v_old_home);
     END IF;
 
     IF v_new_home IS NOT NULL AND v_new_home IS DISTINCT FROM v_old_home THEN
-      PERFORM public._house_vibes_mark_out_of_date(v_new_home);
+      PERFORM public._house_vibes_invalidate(v_new_home);
     END IF;
   END IF;
 
@@ -3850,6 +3842,7 @@ BEGIN
         'home_id', v_note.home_id,
         'title', v_note.title,
         'details', v_note.details,
+        'note_type', v_note.note_type,
         'reference_url', v_note.reference_url,
         'photo_path', v_note.photo_path,
         'archived_at', v_note.archived_at,
@@ -3882,6 +3875,7 @@ BEGIN
       'home_id', v_existing.home_id,
       'title', v_existing.title,
       'details', v_existing.details,
+      'note_type', v_existing.note_type,
       'reference_url', v_existing.reference_url,
       'photo_path', v_existing.photo_path,
       'archived_at', v_existing.archived_at,
@@ -9889,6 +9883,7 @@ CREATE OR REPLACE FUNCTION "public"."get_home_directory_content"("p_home_id" "uu
 DECLARE
   v_services jsonb := '[]'::jsonb;
   v_notes jsonb := '[]'::jsonb;
+  v_tutorials jsonb := '[]'::jsonb;
 BEGIN
   PERFORM public._assert_authenticated();
   PERFORM public._assert_home_member(p_home_id);
@@ -9928,6 +9923,7 @@ BEGIN
                'home_id', n.home_id,
                'title', n.title,
                'details', n.details,
+               'note_type', n.note_type,
                'reference_url', n.reference_url,
                'photo_path', n.photo_path,
                'created_at', n.created_at,
@@ -9940,13 +9936,38 @@ BEGIN
     INTO v_notes
   FROM public.home_directory_notes n
   WHERE n.home_id = p_home_id
-    AND n.archived_at IS NULL;
+    AND n.archived_at IS NULL
+    AND n.note_type = 'general';
+
+  SELECT COALESCE(
+           jsonb_agg(
+             jsonb_build_object(
+               'id', n.id,
+               'home_id', n.home_id,
+               'title', n.title,
+               'details', n.details,
+               'note_type', n.note_type,
+               'reference_url', n.reference_url,
+               'photo_path', n.photo_path,
+               'created_at', n.created_at,
+               'updated_at', n.updated_at
+             )
+             ORDER BY lower(n.title), n.created_at DESC, n.id
+           ),
+           '[]'::jsonb
+         )
+    INTO v_tutorials
+  FROM public.home_directory_notes n
+  WHERE n.home_id = p_home_id
+    AND n.archived_at IS NULL
+    AND n.note_type = 'tutorial';
 
   RETURN jsonb_build_object(
     'ok', true,
     'home_id', p_home_id,
     'services', v_services,
-    'notes', v_notes
+    'notes', v_notes,
+    'tutorials', v_tutorials
   );
 END;
 $$;
@@ -11679,7 +11700,7 @@ BEGIN
       ORDER BY j.created_at DESC
       LIMIT 1;
 
-      v_publish_sync_status := COALESCE(v_publish_job_status, 'unknown');
+      v_publish_sync_status := COALESCE(v_publish_job_status, 'succeeded');
 
       IF v_publish_sync_status = 'failed' THEN
         v_publish_sync_error := jsonb_strip_nulls(jsonb_build_object(
@@ -18168,6 +18189,52 @@ $$;
 ALTER FUNCTION "public"."shopping_list_add_item"("p_home_id" "uuid", "p_name" "text", "p_quantity" "text", "p_details" "text", "p_reference_photo_path" "text") OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."shopping_list_archive_item"("p_item_id" "uuid") RETURNS "public"."shopping_list_items"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+DECLARE
+  v_user uuid := auth.uid();
+  v_existing public.shopping_list_items;
+  v_updated public.shopping_list_items;
+BEGIN
+  PERFORM public._assert_authenticated();
+
+  SELECT i.*
+  INTO v_existing
+  FROM public.shopping_list_items i
+  JOIN public.memberships m
+    ON m.home_id = i.home_id
+   AND m.user_id = v_user
+   AND m.is_current = TRUE
+  WHERE i.id = p_item_id
+    AND i.archived_at IS NULL
+  FOR UPDATE;
+
+  IF v_existing.id IS NULL THEN
+    PERFORM public.api_error(
+      'item_not_found',
+      'Shopping list item not found.',
+      'P0002',
+      jsonb_build_object('item_id', p_item_id)
+    );
+  END IF;
+
+  UPDATE public.shopping_list_items
+  SET
+    archived_at = now(),
+    archived_by_user_id = v_user
+  WHERE id = p_item_id
+  RETURNING * INTO v_updated;
+
+  RETURN v_updated;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."shopping_list_archive_item"("p_item_id" "uuid") OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."shopping_list_archive_items_for_user"("p_home_id" "uuid", "p_item_ids" "uuid"[]) RETURNS integer
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO ''
@@ -18857,7 +18924,7 @@ $$;
 ALTER FUNCTION "public"."today_onboarding_hints"() OWNER TO "postgres";
 
 
-CREATE OR REPLACE FUNCTION "public"."upsert_home_directory_note"("p_home_id" "uuid", "p_note_id" "uuid" DEFAULT NULL::"uuid", "p_title" "text" DEFAULT NULL::"text", "p_details" "text" DEFAULT NULL::"text", "p_reference_url" "text" DEFAULT NULL::"text", "p_photo_path" "text" DEFAULT NULL::"text") RETURNS "jsonb"
+CREATE OR REPLACE FUNCTION "public"."upsert_home_directory_note"("p_home_id" "uuid", "p_note_id" "uuid" DEFAULT NULL::"uuid", "p_title" "text" DEFAULT NULL::"text", "p_details" "text" DEFAULT NULL::"text", "p_note_type" "text" DEFAULT 'general'::"text", "p_reference_url" "text" DEFAULT NULL::"text", "p_photo_path" "text" DEFAULT NULL::"text") RETURNS "jsonb"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO ''
     AS $$
@@ -18867,6 +18934,7 @@ DECLARE
   v_existing public.home_directory_notes%ROWTYPE;
   v_title text := nullif(btrim(p_title), '');
   v_details text := nullif(btrim(p_details), '');
+  v_note_type text := lower(COALESCE(nullif(btrim(p_note_type), ''), 'general'));
   v_reference_url text := nullif(btrim(p_reference_url), '');
   v_photo_path text := nullif(btrim(p_photo_path), '');
   v_photo_delta integer := 0;
@@ -18876,9 +18944,9 @@ BEGIN
   PERFORM public._house_directory_assert_owner(p_home_id);
 
   PERFORM public.api_assert(
-    v_title IS NOT NULL AND v_details IS NOT NULL,
+    v_title IS NOT NULL,
     'HOUSE_DIRECTORY_NOTE_REQUIRED_FIELDS',
-    'title and details are required.',
+    'title is required.',
     '22023'
   );
 
@@ -18890,9 +18958,16 @@ BEGIN
   );
 
   PERFORM public.api_assert(
-    char_length(v_details) BETWEEN 1 AND 4000,
+    v_details IS NULL OR char_length(v_details) <= 4000,
     'HOUSE_DIRECTORY_NOTE_REQUIRED_FIELDS',
-    'details must be between 1 and 4000 characters.',
+    'details must be 4000 characters or fewer.',
+    '22023'
+  );
+
+  PERFORM public.api_assert(
+    v_note_type IN ('general', 'tutorial'),
+    'HOUSE_DIRECTORY_NOTE_INVALID_TYPE',
+    'note_type must be one of general or tutorial.',
     '22023'
   );
 
@@ -18928,6 +19003,7 @@ BEGIN
       home_id,
       title,
       details,
+      note_type,
       reference_url,
       photo_path,
       archived_at,
@@ -18938,6 +19014,7 @@ BEGIN
       p_home_id,
       v_title,
       v_details,
+      v_note_type,
       v_reference_url,
       v_photo_path,
       NULL,
@@ -18985,6 +19062,7 @@ BEGIN
     UPDATE public.home_directory_notes n
        SET title = v_title,
            details = v_details,
+           note_type = v_note_type,
            reference_url = v_reference_url,
            photo_path = v_photo_path,
            updated_by_user_id = v_user
@@ -19008,6 +19086,7 @@ BEGIN
       'home_id', v_note.home_id,
       'title', v_note.title,
       'details', v_note.details,
+      'note_type', v_note.note_type,
       'reference_url', v_note.reference_url,
       'photo_path', v_note.photo_path,
       'archived_at', v_note.archived_at,
@@ -19019,7 +19098,7 @@ END;
 $$;
 
 
-ALTER FUNCTION "public"."upsert_home_directory_note"("p_home_id" "uuid", "p_note_id" "uuid", "p_title" "text", "p_details" "text", "p_reference_url" "text", "p_photo_path" "text") OWNER TO "postgres";
+ALTER FUNCTION "public"."upsert_home_directory_note"("p_home_id" "uuid", "p_note_id" "uuid", "p_title" "text", "p_details" "text", "p_note_type" "text", "p_reference_url" "text", "p_photo_path" "text") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."upsert_home_directory_service"("p_home_id" "uuid", "p_service_id" "uuid" DEFAULT NULL::"uuid", "p_service_type" "text" DEFAULT NULL::"text", "p_custom_label" "text" DEFAULT NULL::"text", "p_provider_name" "text" DEFAULT NULL::"text", "p_account_reference" "text" DEFAULT NULL::"text", "p_link_url" "text" DEFAULT NULL::"text", "p_term_start_date" "date" DEFAULT NULL::"date", "p_term_end_date" "date" DEFAULT NULL::"date", "p_renewal_reminder_offset_value" integer DEFAULT NULL::integer, "p_renewal_reminder_offset_unit" "text" DEFAULT NULL::"text", "p_notes" "text" DEFAULT NULL::"text") RETURNS "jsonb"
@@ -19907,7 +19986,7 @@ CREATE TABLE IF NOT EXISTS "public"."home_directory_notes" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "home_id" "uuid" NOT NULL,
     "title" "text" NOT NULL,
-    "details" "text" NOT NULL,
+    "details" "text",
     "reference_url" "text",
     "photo_path" "text",
     "archived_at" timestamp with time zone,
@@ -19915,7 +19994,9 @@ CREATE TABLE IF NOT EXISTS "public"."home_directory_notes" (
     "updated_by_user_id" "uuid" NOT NULL,
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
-    CONSTRAINT "home_directory_notes_details_check" CHECK ((("char_length"("btrim"("details")) >= 1) AND ("char_length"("btrim"("details")) <= 4000))),
+    "note_type" "text" DEFAULT 'general'::"text" NOT NULL,
+    CONSTRAINT "home_directory_notes_details_check" CHECK ((("details" IS NULL) OR ("char_length"("details") <= 4000))),
+    CONSTRAINT "home_directory_notes_note_type_check" CHECK (("note_type" = ANY (ARRAY['general'::"text", 'tutorial'::"text"]))),
     CONSTRAINT "home_directory_notes_photo_path_check" CHECK ((("photo_path" IS NULL) OR (("char_length"("photo_path") <= 512) AND ("photo_path" ~~ 'households/%'::"text")))),
     CONSTRAINT "home_directory_notes_reference_url_check" CHECK ((("reference_url" IS NULL) OR (("char_length"("reference_url") <= 2048) AND ("reference_url" ~* '^https?://'::"text")))),
     CONSTRAINT "home_directory_notes_title_check" CHECK ((("char_length"("btrim"("title")) >= 1) AND ("char_length"("btrim"("title")) <= 120)))
@@ -19925,7 +20006,7 @@ CREATE TABLE IF NOT EXISTS "public"."home_directory_notes" (
 ALTER TABLE "public"."home_directory_notes" OWNER TO "postgres";
 
 
-COMMENT ON TABLE "public"."home_directory_notes" IS 'Shared home directory notes for operational home context. Optional reference_url and photo_path support lightweight annotations.';
+COMMENT ON TABLE "public"."home_directory_notes" IS 'Shared home directory notes and tutorials for operational home context. Optional reference_url and photo_path support lightweight annotations.';
 
 
 
@@ -26624,6 +26705,12 @@ GRANT ALL ON FUNCTION "public"."shopping_list_add_item"("p_home_id" "uuid", "p_n
 
 
 
+REVOKE ALL ON FUNCTION "public"."shopping_list_archive_item"("p_item_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."shopping_list_archive_item"("p_item_id" "uuid") TO "service_role";
+GRANT ALL ON FUNCTION "public"."shopping_list_archive_item"("p_item_id" "uuid") TO "authenticated";
+
+
+
 REVOKE ALL ON FUNCTION "public"."shopping_list_archive_items_for_user"("p_home_id" "uuid", "p_item_ids" "uuid"[]) FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."shopping_list_archive_items_for_user"("p_home_id" "uuid", "p_item_ids" "uuid"[]) TO "service_role";
 GRANT ALL ON FUNCTION "public"."shopping_list_archive_items_for_user"("p_home_id" "uuid", "p_item_ids" "uuid"[]) TO "authenticated";
@@ -26771,9 +26858,9 @@ GRANT ALL ON FUNCTION "public"."tstz_dist"(timestamp with time zone, timestamp w
 
 
 
-REVOKE ALL ON FUNCTION "public"."upsert_home_directory_note"("p_home_id" "uuid", "p_note_id" "uuid", "p_title" "text", "p_details" "text", "p_reference_url" "text", "p_photo_path" "text") FROM PUBLIC;
-GRANT ALL ON FUNCTION "public"."upsert_home_directory_note"("p_home_id" "uuid", "p_note_id" "uuid", "p_title" "text", "p_details" "text", "p_reference_url" "text", "p_photo_path" "text") TO "service_role";
-GRANT ALL ON FUNCTION "public"."upsert_home_directory_note"("p_home_id" "uuid", "p_note_id" "uuid", "p_title" "text", "p_details" "text", "p_reference_url" "text", "p_photo_path" "text") TO "authenticated";
+REVOKE ALL ON FUNCTION "public"."upsert_home_directory_note"("p_home_id" "uuid", "p_note_id" "uuid", "p_title" "text", "p_details" "text", "p_note_type" "text", "p_reference_url" "text", "p_photo_path" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."upsert_home_directory_note"("p_home_id" "uuid", "p_note_id" "uuid", "p_title" "text", "p_details" "text", "p_note_type" "text", "p_reference_url" "text", "p_photo_path" "text") TO "service_role";
+GRANT ALL ON FUNCTION "public"."upsert_home_directory_note"("p_home_id" "uuid", "p_note_id" "uuid", "p_title" "text", "p_details" "text", "p_note_type" "text", "p_reference_url" "text", "p_photo_path" "text") TO "authenticated";
 
 
 

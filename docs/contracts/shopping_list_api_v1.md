@@ -101,6 +101,13 @@ Archives caller-completed items without expense linkage.
 - Update WHERE: `home_id = p_home_id` AND `id = ANY(p_item_ids)` AND `archived_at IS NULL` AND `completed_by_user_id = auth.uid()`.
 - Sets `archived_at = now()`, `archived_by_user_id = auth.uid()`.
 
+### 2.7 `shopping_list_archive_item(p_item_id uuid)`
+Archives a single item so it stops showing in the active shopping list.
+- Loads the item by `p_item_id`; missing or already archived rows raise `item_not_found`.
+- Enforces home membership using the item's `home_id`.
+- Does not require `completed_by_user_id = auth.uid()`.
+- Sets `archived_at = now()`, `archived_by_user_id = auth.uid()`.
+
 ## 3. RLS / access control
 - Tables have RLS enabled and direct access revoked for `authenticated`; writes/reads are RPC-only.
 - Membership is enforced inside RPCs with `_assert_home_member` and scoped predicates.

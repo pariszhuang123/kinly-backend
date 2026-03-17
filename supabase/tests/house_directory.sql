@@ -169,6 +169,7 @@ SELECT pg_temp.expect_api_error(
        NULL,
        'Move-in details',
        'Parking is behind the house.',
+       'general',
        NULL,
        NULL
      ); $$,
@@ -427,11 +428,26 @@ SELECT pg_temp.expect_api_error(
        NULL,
        '  ',
        NULL,
+       'general',
        NULL,
        NULL
      ); $$,
   'HOUSE_DIRECTORY_NOTE_REQUIRED_FIELDS',
-  'note requires title and details'
+  'note requires title'
+);
+
+SELECT pg_temp.expect_api_error(
+  $$ SELECT public.upsert_home_directory_note(
+       (SELECT home_id FROM tmp_homes WHERE label = 'primary'),
+       NULL,
+       'Alarm',
+       NULL,
+       'checklist',
+       NULL,
+       NULL
+     ); $$,
+  'HOUSE_DIRECTORY_NOTE_INVALID_TYPE',
+  'note_type must be general or tutorial'
 );
 
 SELECT pg_temp.expect_api_error(
@@ -440,6 +456,7 @@ SELECT pg_temp.expect_api_error(
        NULL,
        'Alarm',
        'Use the side panel.',
+       'general',
        'ftp://example.com/alarm',
        NULL
      ); $$,
@@ -452,7 +469,8 @@ WITH note_z AS (
     (SELECT home_id FROM tmp_homes WHERE label = 'primary'),
     NULL,
     'Z Utilities',
-    'Gas meter is behind the bins.',
+    NULL,
+    'general',
     'https://example.com/utilities',
     NULL
   ) AS payload
@@ -467,6 +485,7 @@ WITH note_a AS (
     NULL,
     'A Bond Info',
     'Deposit receipt is filed in the entry drawer.',
+    'tutorial',
     NULL,
     'households/primary/notes/bond-info.jpg'
   ) AS payload
@@ -570,8 +589,14 @@ SELECT is(
 
 SELECT is(
   public.get_home_directory_content((SELECT home_id FROM tmp_homes WHERE label = 'primary'))->'notes'->0->>'title',
+  'Z Utilities',
+  'general notes are ordered by title'
+);
+
+SELECT is(
+  public.get_home_directory_content((SELECT home_id FROM tmp_homes WHERE label = 'primary'))->'tutorials'->0->>'title',
   'A Bond Info',
-  'notes are ordered by title'
+  'tutorial notes are split into a separate array'
 );
 
 SELECT ok(
@@ -597,7 +622,13 @@ SELECT ok(
 SELECT is(
   jsonb_array_length(public.get_home_directory_content((SELECT home_id FROM tmp_homes WHERE label = 'primary'))->'notes'),
   1,
-  'archived note is excluded from content reads'
+  'archived note is excluded from general note reads'
+);
+
+SELECT is(
+  jsonb_array_length(public.get_home_directory_content((SELECT home_id FROM tmp_homes WHERE label = 'primary'))->'tutorials'),
+  0,
+  'archived note is excluded from tutorial reads'
 );
 
 SELECT ok(

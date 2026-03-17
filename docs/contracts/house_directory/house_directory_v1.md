@@ -5,7 +5,7 @@ Scope: shared
 Artifact-Type: contract
 Stability: evolving
 Status: draft
-Version: v1.0
+Version: v1.1
 ---
 
 # House Directory Contract v1
@@ -30,7 +30,7 @@ operations.
 House Directory MUST support:
 - wifi access details
 - home service references
-- simple shared house notes
+- simple shared house notes and tutorials
 - due renewal reminders for time-bound services
 
 ## 2. Scope and boundaries
@@ -82,11 +82,14 @@ Out of scope:
   service row.
 - Each note includes:
   - `title`
-  - `details`
+  - optional `details`
+  - `note_type` — either `general` or `tutorial` (default `general`)
   - optional `reference_url`
   - optional `photo_path`
-- Notes are intended for household context such as move-in instructions,
-  parking details, appliance tips, alarm steps, or access guidance.
+- `note_type` determines UI grouping:
+  - `general` — standard household notes (move-in instructions, parking
+    details, alarm steps, access guidance)
+  - `tutorial` — appliance how-tos, troubleshooting guides, video walkthroughs
 - If `reference_url` is present it MUST be a valid `http` or `https` URL.
 - `photo_path` is a storage reference under `households/%`, not a public CDN URL.
 - A note MAY exist without a URL or photo.
@@ -158,7 +161,9 @@ Out of scope:
 - Member can read wifi/content and acknowledge due reminders.
 - Wifi read returns `ssid` and `qr_payload` but not raw password.
 - Rent service creation without term dates is rejected.
-- House note creation without `title` or `details` is rejected.
+- House note creation without `title` is rejected.
+- House note with invalid `note_type` is rejected.
+- Content reads return services, notes, and tutorials as three separate sections.
 - House note URL must be valid when present.
 - First note photo add enforces the note-photo paywall limit on non-premium homes; replacement does not
   add a second usage charge.

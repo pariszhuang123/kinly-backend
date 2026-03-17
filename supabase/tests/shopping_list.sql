@@ -596,5 +596,86 @@ SELECT is(
   'archive RPC ignores already archived rows'
 );
 
+-- Single-item archive can be performed by another home member.
+SELECT set_config(
+  'request.jwt.claim.sub',
+  (SELECT user_id::text FROM tmp_users WHERE label = 'owner'),
+  true
+);
+SELECT set_config('request.jwt.claim.role', 'authenticated', true);
+
+WITH item AS (
+  SELECT public.shopping_list_add_item(
+    (SELECT home_id FROM tmp_homes WHERE label = 'primary'),
+    'Apples',
+    NULL,
+    NULL,
+    NULL
+  ) AS item
+)
+INSERT INTO tmp_items (label, item_id)
+SELECT 'apples', (item).id
+FROM item;
+
+SELECT set_config(
+  'request.jwt.claim.sub',
+  (SELECT user_id::text FROM tmp_users WHERE label = 'member'),
+  true
+);
+SELECT set_config('request.jwt.claim.role', 'authenticated', true);
+
+SELECT public.shopping_list_update_item(
+  (SELECT item_id FROM tmp_items WHERE label = 'apples'),
+  NULL,
+  NULL,
+  NULL,
+  TRUE,
+  NULL,
+  FALSE
+);
+
+SELECT set_config(
+  'request.jwt.claim.sub',
+  (SELECT user_id::text FROM tmp_users WHERE label = 'owner'),
+  true
+);
+SELECT set_config('request.jwt.claim.role', 'authenticated', true);
+
+SELECT ok(
+  (
+    SELECT (public.shopping_list_archive_item((SELECT item_id FROM tmp_items WHERE label = 'apples'))).archived_at IS NOT NULL
+  ),
+  'single-item archive sets archived_at'
+);
+
+SELECT is(
+  (
+    SELECT archived_by_user_id::text
+    FROM public.shopping_list_items
+    WHERE id = (SELECT item_id FROM tmp_items WHERE label = 'apples')
+  ),
+  (SELECT user_id::text FROM tmp_users WHERE label = 'owner'),
+  'single-item archive records archiving member'
+);
+
+SELECT ok(
+  (
+    SELECT NOT EXISTS (
+      SELECT 1
+      FROM jsonb_array_elements(public.shopping_list_get_for_home((SELECT home_id FROM tmp_homes WHERE label = 'primary'))->'items') item
+      WHERE item->>'id' = (SELECT item_id::text FROM tmp_items WHERE label = 'apples')
+    )
+  ),
+  'single-item archive removes item from active list'
+);
+
+SELECT pg_temp.expect_api_error(
+  $$ SELECT public.shopping_list_archive_item(
+      (SELECT item_id FROM tmp_items WHERE label = 'apples')
+    ); $$,
+  'item_not_found',
+  'single-item archive raises item_not_found for already archived item'
+);
+
 SELECT * FROM finish();
 ROLLBACK;

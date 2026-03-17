@@ -5,7 +5,7 @@ Scope: backend
 Artifact-Type: contract
 Stability: evolving
 Status: draft
-Version: v1.0
+Version: v1.1
 ---
 
 # House Directory API v1
@@ -167,7 +167,8 @@ Required fields:
 - `id uuid pk`
 - `home_id uuid fk homes(id)`
 - `title text`
-- `details text`
+- `details text null`
+- `note_type text not null default 'general'`
 - `reference_url text null`
 - `photo_path text null`
 - `archived_at timestamptz null`
@@ -178,7 +179,8 @@ Required fields:
 
 Required constraints:
 - `title` must be non-empty after trim
-- `details` must be non-empty after trim
+- `details` may be null
+- `note_type` must be `general` or `tutorial` (check constraint, not enum)
 - `reference_url` may be null; if present it must be `http/https`
 - `photo_path` may be null; if present it must be a storage reference under `households/%`
 - at most one photo path may be attached per active note row in v1
@@ -244,7 +246,9 @@ Caller: member.
 
 Returns:
 - `services` array ordered by `provider_name` asc, then `created_at` desc, then `id`
-- `notes` array ordered by `title` asc, then `created_at` desc, then `id`
+- `notes` array (note_type=`general`) ordered by `title` asc, then `created_at` desc, then `id`
+- `tutorials` array (note_type=`tutorial`) ordered by `title` asc, then `created_at` desc, then `id`
+- both `notes` and `tutorials` come from the `home_directory_notes` table, split by `note_type`
 - archived services and notes are excluded
 
 ### 5.4 `upsert_home_directory_service(p_home_id uuid, p_service_id uuid|null default null, p_service_type text, p_custom_label text|null default null, p_provider_name text, p_account_reference text|null default null, p_link_url text|null default null, p_term_start_date date|null default null, p_term_end_date date|null default null, p_renewal_reminder_offset_value integer|null default null, p_renewal_reminder_offset_unit text|null default null, p_notes text|null default null) -> jsonb`
@@ -265,13 +269,14 @@ Behavior:
 - retires associated reminder rows
 - idempotent shape via `already_archived`
 
-### 5.6 `upsert_home_directory_note(p_home_id uuid, p_note_id uuid|null default null, p_title text, p_details text, p_reference_url text|null default null, p_photo_path text|null default null) -> jsonb`
+### 5.6 `upsert_home_directory_note(p_home_id uuid, p_note_id uuid|null default null, p_title text, p_details text|null default null, p_note_type text default 'general', p_reference_url text|null default null, p_photo_path text|null default null) -> jsonb`
 
 Caller: owner-only.
 
 Behavior:
 - create/update note using replace semantics
-- `title` and `details` are required and trimmed for validation
+- `note_type` defaults to `general`; owner may change type on update
+- `title` is required and trimmed for validation; `details` is optional
 - `reference_url` may be null, but if present it must be `http/https`
 - `photo_path` may be null; when present it stores a storage reference only
 - `photo_path` must match `households/%` when present
@@ -345,6 +350,7 @@ Required codes:
 - `HOUSE_DIRECTORY_OTHER_LABEL_FORBIDDEN`
 - `HOUSE_DIRECTORY_ACTIVE_SERVICE_CONFLICT`
 - `HOUSE_DIRECTORY_SERVICE_NOT_FOUND`
+- `HOUSE_DIRECTORY_NOTE_INVALID_TYPE`
 - `HOUSE_DIRECTORY_NOTE_REQUIRED_FIELDS`
 - `HOUSE_DIRECTORY_NOTE_INVALID_URL`
 - `HOUSE_DIRECTORY_NOTE_NOT_FOUND`
@@ -364,7 +370,9 @@ Required codes:
 - Non-owner cannot mutate wifi, services, notes, or dismiss reminders.
 - Wifi upsert rejects whitespace-only password and read omits password.
 - Rent service without term dates fails with `HOUSE_DIRECTORY_RENT_TERM_REQUIRED`.
-- Note create/update without `title` or `details` fails with `HOUSE_DIRECTORY_NOTE_REQUIRED_FIELDS`.
+- Note create/update without `title` fails with `HOUSE_DIRECTORY_NOTE_REQUIRED_FIELDS`.
+- Note with invalid `note_type` fails with `HOUSE_DIRECTORY_NOTE_INVALID_TYPE`.
+- `get_home_directory_content` returns `notes` and `tutorials` as separate arrays split by `note_type`.
 - Note with invalid `reference_url` fails with `HOUSE_DIRECTORY_NOTE_INVALID_URL`.
 - Invalid reminder offset pair or invalid offset range fails with `HOUSE_DIRECTORY_INVALID_REMINDER_OFFSET`.
 - Due reminders appear only when current UTC date is on/after `due_at`.
@@ -457,7 +465,8 @@ Required codes:
         "p_home_id": "uuid",
         "p_note_id": "uuid|null",
         "p_title": "text",
-        "p_details": "text",
+        "p_details": "text|null",
+        "p_note_type": "text",
         "p_reference_url": "text|null",
         "p_photo_path": "text|null"
       },

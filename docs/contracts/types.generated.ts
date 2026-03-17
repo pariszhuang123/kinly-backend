@@ -953,9 +953,10 @@ export type Database = {
           archived_at: string | null
           created_at: string
           created_by_user_id: string
-          details: string
+          details: string | null
           home_id: string
           id: string
+          note_type: string
           photo_path: string | null
           reference_url: string | null
           title: string
@@ -966,9 +967,10 @@ export type Database = {
           archived_at?: string | null
           created_at?: string
           created_by_user_id: string
-          details: string
+          details?: string | null
           home_id: string
           id?: string
+          note_type?: string
           photo_path?: string | null
           reference_url?: string | null
           title: string
@@ -979,9 +981,10 @@ export type Database = {
           archived_at?: string | null
           created_at?: string
           created_by_user_id?: string
-          details?: string
+          details?: string | null
           home_id?: string
           id?: string
+          note_type?: string
           photo_path?: string | null
           reference_url?: string | null
           title?: string
@@ -5912,6 +5915,34 @@ export type Database = {
           isSetofReturn: false
         }
       }
+      shopping_list_archive_item: {
+        Args: { p_item_id: string }
+        Returns: {
+          archived_at: string | null
+          archived_by_user_id: string | null
+          completed_at: string | null
+          completed_by_user_id: string | null
+          created_at: string
+          created_by_user_id: string
+          details: string | null
+          home_id: string
+          id: string
+          is_completed: boolean
+          linked_expense_id: string | null
+          name: string
+          quantity: string | null
+          reference_added_by_user_id: string | null
+          reference_photo_path: string | null
+          shopping_list_id: string
+          updated_at: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "shopping_list_items"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
       shopping_list_archive_items_for_user: {
         Args: { p_home_id: string; p_item_ids: string[] }
         Returns: number
@@ -5990,6 +6021,7 @@ export type Database = {
           p_details?: string
           p_home_id: string
           p_note_id?: string
+          p_note_type?: string
           p_photo_path?: string
           p_reference_url?: string
           p_title?: string
