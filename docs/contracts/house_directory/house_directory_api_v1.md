@@ -28,6 +28,11 @@ Depends on:
 - Owner mutations require active home and owner role for the target home.
 - Reminder acknowledgement requires current member access.
 - Direct client table DML MUST be denied; tables are RPC-only.
+- Member-card roster payloads for navigating to Personal Directory are
+  exposed by a dedicated House Directory read RPC; underlying membership
+  truth still comes from Homes v2.
+- `get_home_directory_member_cards` is identity-only and MUST NOT expand to
+  bank-detail payloads.
 
 ## 2. Canonical enums
 
@@ -115,6 +120,22 @@ Required constraints:
   - `renewal_reminder_offset_value >= 1`
   - unit in `day|week|month`
   - term dates must exist
+
+## 4. Member-card RPC
+
+### 4.1 `get_home_directory_member_cards()`
+- Returns only identity/navigation data:
+  - `user_id`
+  - `username`
+  - `avatar_storage_path`
+  - `is_owner`
+  - `has_personal_directory_content`
+- The caller's active home is resolved server-side.
+- The caller MUST always receive their own member card.
+- Other current members are returned only when
+  `has_personal_directory_content=true`.
+- `has_personal_directory_content` is a boolean inclusion hint only; it MUST
+  NOT cause bank-account payload expansion.
   - computed due date must fall within the inclusive term window
 - only one active `rent`, `internet`, and `electricity` service per home
 
@@ -251,7 +272,39 @@ Returns:
 - both `notes` and `tutorials` come from the `home_directory_notes` table, split by `note_type`
 - archived services and notes are excluded
 
-### 5.4 `upsert_home_directory_service(p_home_id uuid, p_service_id uuid|null default null, p_service_type text, p_custom_label text|null default null, p_provider_name text, p_account_reference text|null default null, p_link_url text|null default null, p_term_start_date date|null default null, p_term_end_date date|null default null, p_renewal_reminder_offset_value integer|null default null, p_renewal_reminder_offset_unit text|null default null, p_notes text|null default null) -> jsonb`
+### 5.4 `get_home_directory_member_cards() -> jsonb`
+
+Caller: member.
+
+Behavior:
+- resolves the caller's active home internally
+- always includes the caller's own member card
+- returns other current home member cards only for members who have
+  published any personal-directory content
+- personal-directory content means:
+  - a bank account row exists, or
+  - at least one active personal note exists
+- cards are ordered with owner first, then by username, then `user_id`
+
+Canonical response shape:
+
+```json
+{
+  "ok": true,
+  "home_id": "uuid",
+  "members": [
+    {
+      "user_id": "uuid",
+      "username": "text",
+      "avatar_storage_path": "text|null",
+      "is_owner": true,
+      "has_personal_directory_content": true
+    }
+  ]
+}
+```
+
+### 5.5 `upsert_home_directory_service(p_home_id uuid, p_service_id uuid|null default null, p_service_type text, p_custom_label text|null default null, p_provider_name text, p_account_reference text|null default null, p_link_url text|null default null, p_term_start_date date|null default null, p_term_end_date date|null default null, p_renewal_reminder_offset_value integer|null default null, p_renewal_reminder_offset_unit text|null default null, p_notes text|null default null) -> jsonb`
 
 Caller: owner-only.
 
@@ -260,7 +313,7 @@ Behavior:
 - recompute reminder state on every write
 - returns current service plus current non-retired reminder for the matching term, or `null`
 
-### 5.5 `archive_home_directory_service(p_home_id uuid, p_service_id uuid) -> jsonb`
+### 5.6 `archive_home_directory_service(p_home_id uuid, p_service_id uuid) -> jsonb`
 
 Caller: owner-only.
 
@@ -269,7 +322,7 @@ Behavior:
 - retires associated reminder rows
 - idempotent shape via `already_archived`
 
-### 5.6 `upsert_home_directory_note(p_home_id uuid, p_note_id uuid|null default null, p_title text, p_details text|null default null, p_note_type text default 'general', p_reference_url text|null default null, p_photo_path text|null default null) -> jsonb`
+### 5.7 `upsert_home_directory_note(p_home_id uuid, p_note_id uuid|null default null, p_title text, p_details text|null default null, p_note_type text default 'general', p_reference_url text|null default null, p_photo_path text|null default null) -> jsonb`
 
 Caller: owner-only.
 
@@ -284,7 +337,7 @@ Behavior:
 - clearing or archiving a note photo does not refund prior usage
 - replacing an existing `photo_path` MUST NOT count as a second paid usage event
 
-### 5.7 `archive_home_directory_note(p_home_id uuid, p_note_id uuid) -> jsonb`
+### 5.8 `archive_home_directory_note(p_home_id uuid, p_note_id uuid) -> jsonb`
 
 Caller: owner-only.
 
@@ -292,7 +345,7 @@ Behavior:
 - soft-archives the note
 - idempotent shape via `already_archived`
 
-### 5.8 `list_due_home_directory_reminders(p_home_id uuid) -> jsonb`
+### 5.9 `list_due_home_directory_reminders(p_home_id uuid) -> jsonb`
 
 Caller: member.
 
@@ -309,7 +362,7 @@ Canonical response shape:
 }
 ```
 
-### 5.9 `acknowledge_home_directory_reminder(p_home_id uuid, p_reminder_id uuid) -> jsonb`
+### 5.10 `acknowledge_home_directory_reminder(p_home_id uuid, p_reminder_id uuid) -> jsonb`
 
 Caller: member.
 
@@ -317,7 +370,7 @@ Behavior:
 - acknowledges an actionable due reminder for the caller only
 - idempotent on repeated acknowledgement of the same reminder by the same user
 
-### 5.10 `dismiss_home_directory_reminder(p_home_id uuid, p_reminder_id uuid) -> jsonb`
+### 5.11 `dismiss_home_directory_reminder(p_home_id uuid, p_reminder_id uuid) -> jsonb`
 
 Caller: owner-only.
 
@@ -367,6 +420,7 @@ Required codes:
 ## 8. Contract test scenarios
 
 - Member reads wifi/content/due reminders successfully.
+- Member reads house-directory member cards successfully.
 - Non-owner cannot mutate wifi, services, notes, or dismiss reminders.
 - Wifi upsert rejects whitespace-only password and read omits password.
 - Rent service without term dates fails with `HOUSE_DIRECTORY_RENT_TERM_REQUIRED`.
@@ -380,11 +434,14 @@ Required codes:
 - Owner dismissal removes the reminder from due-reminder results.
 - Archived services and notes disappear from content reads.
 - Active rent/internet/electricity uniqueness conflicts surface `HOUSE_DIRECTORY_ACTIVE_SERVICE_CONFLICT`.
+- Member cards exclude members with no published personal-directory content.
+- Member cards include owner flag, username, and avatar path for included
+  members.
 
 ## 9. References
 
 - [House Directory Contract v1](../../../product/kinly/shared/house_directory_v1.md)
-- [Homes v2](./homes_v2.md)
+- [Homes v2](homes_v2.md)
 
 ```contracts-json
 {
@@ -425,6 +482,13 @@ Required codes:
       "args": {
         "p_home_id": "uuid"
       },
+      "returns": "jsonb"
+    },
+    "houseDirectory.getMemberCards": {
+      "type": "rpc",
+      "caller": "member",
+      "impl": "public.get_home_directory_member_cards",
+      "args": {},
       "returns": "jsonb"
     },
     "houseDirectory.upsertService": {

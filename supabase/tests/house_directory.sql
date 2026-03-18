@@ -122,6 +122,23 @@ SELECT ok(
   'member can read directory content'
 );
 
+SELECT ok(
+  (public.get_home_directory_member_cards()->>'ok')::boolean,
+  'member can read house directory member cards'
+);
+
+SELECT is(
+  jsonb_array_length(public.get_home_directory_member_cards()->'members'),
+  1,
+  'member cards include the caller even when no member has personal directory content'
+);
+
+SELECT is(
+  public.get_home_directory_member_cards()->'members'->0->>'user_id',
+  (SELECT user_id::text FROM tmp_users WHERE label = 'member'),
+  'caller sees their own member card before adding personal directory content'
+);
+
 SELECT is(
   jsonb_array_length(public.get_home_directory_content((SELECT home_id FROM tmp_homes WHERE label = 'primary'))->'services'),
   0,
@@ -196,6 +213,12 @@ SELECT pg_temp.expect_api_error(
 );
 
 SELECT pg_temp.expect_api_error(
+  $$ SELECT public.get_home_directory_member_cards(); $$,
+  'NOT_HOME_MEMBER',
+  'outsider cannot read member cards'
+);
+
+SELECT pg_temp.expect_api_error(
   $$ SELECT public.list_due_home_directory_reminders((SELECT home_id FROM tmp_homes WHERE label = 'primary')); $$,
   'NOT_HOME_MEMBER',
   'outsider cannot list due reminders'
@@ -234,12 +257,77 @@ SELECT ok(
   'wifi upsert returns escaped QR payload'
 );
 
+SELECT ok(
+  (public.upsert_member_directory_bank_account(
+    'Owner Housemate',
+    '11-2222-3333333-44'
+  )->>'ok')::boolean,
+  'owner can add personal directory content used by member cards'
+);
+
 SELECT set_config('request.jwt.claim.sub', (SELECT user_id::text FROM tmp_users WHERE label = 'member'), true);
 SELECT set_config('request.jwt.claim.role', 'authenticated', true);
 
 SELECT ok(
   NOT ((public.get_home_directory_wifi((SELECT home_id FROM tmp_homes WHERE label = 'primary'))->'wifi') ? 'password'),
   'wifi read omits raw password'
+);
+
+SELECT is(
+  jsonb_array_length(public.get_home_directory_member_cards()->'members'),
+  2,
+  'member cards include caller and owner after owner adds personal directory content'
+);
+
+SELECT is(
+  public.get_home_directory_member_cards()->'members'->0->>'user_id',
+  (SELECT user_id::text FROM tmp_users WHERE label = 'owner'),
+  'owner is returned in member cards when they have content'
+);
+
+SELECT ok(
+  (public.get_home_directory_member_cards()->'members'->0->>'is_owner')::boolean,
+  'owner card is flagged as owner'
+);
+
+SELECT ok(
+  nullif(public.get_home_directory_member_cards()->'members'->0->>'username', '') IS NOT NULL,
+  'member card includes username'
+);
+
+SELECT ok(
+  nullif(public.get_home_directory_member_cards()->'members'->0->>'avatar_storage_path', '') IS NOT NULL,
+  'member card includes avatar storage path'
+);
+
+SELECT ok(
+  (public.create_member_directory_note(
+    'allergy',
+    'Cats',
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+    NULL
+  )->>'ok')::boolean,
+  'member can add personal directory content used by member cards'
+);
+
+SELECT is(
+  jsonb_array_length(public.get_home_directory_member_cards()->'members'),
+  2,
+  'member cards still return two members once caller also has personal directory content'
+);
+
+SELECT is(
+  public.get_home_directory_member_cards()->'members'->1->>'user_id',
+  (SELECT user_id::text FROM tmp_users WHERE label = 'member'),
+  'non-owner member appears after owner in member cards ordering'
+);
+
+SELECT ok(
+  NOT (public.get_home_directory_member_cards()->'members'->1->>'is_owner')::boolean,
+  'non-owner member card is not flagged as owner'
 );
 
 SELECT set_config('request.jwt.claim.sub', (SELECT user_id::text FROM tmp_users WHERE label = 'owner'), true);

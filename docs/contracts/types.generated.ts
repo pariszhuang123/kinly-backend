@@ -2221,6 +2221,127 @@ export type Database = {
           },
         ]
       }
+      member_directory_bank_accounts: {
+        Row: {
+          account_holder_name: string
+          account_number: string
+          created_at: string
+          id: string
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          account_holder_name: string
+          account_number: string
+          created_at?: string
+          id?: string
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          account_holder_name?: string
+          account_number?: string
+          created_at?: string
+          id?: string
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "member_directory_bank_accounts_user_id_fkey"
+            columns: ["user_id"]
+            isOneToOne: true
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      member_directory_notes: {
+        Row: {
+          archived_at: string | null
+          contact_name: string | null
+          created_at: string
+          custom_title: string | null
+          details: string | null
+          id: string
+          label: string | null
+          note_type: string
+          phone_number: string | null
+          photo_path: string | null
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          archived_at?: string | null
+          contact_name?: string | null
+          created_at?: string
+          custom_title?: string | null
+          details?: string | null
+          id?: string
+          label?: string | null
+          note_type: string
+          phone_number?: string | null
+          photo_path?: string | null
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          archived_at?: string | null
+          contact_name?: string | null
+          created_at?: string
+          custom_title?: string | null
+          details?: string | null
+          id?: string
+          label?: string | null
+          note_type?: string
+          phone_number?: string | null
+          photo_path?: string | null
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "member_directory_notes_user_id_fkey"
+            columns: ["user_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      member_directory_nudge_dismissals: {
+        Row: {
+          dismissed_at: string
+          home_id: string
+          user_id: string
+        }
+        Insert: {
+          dismissed_at?: string
+          home_id: string
+          user_id: string
+        }
+        Update: {
+          dismissed_at?: string
+          home_id?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "member_directory_nudge_dismissals_home_id_fkey"
+            columns: ["home_id"]
+            isOneToOne: false
+            referencedRelation: "homes"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "member_directory_nudge_dismissals_user_id_fkey"
+            columns: ["user_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       memberships: {
         Row: {
           created_at: string
@@ -4333,6 +4454,18 @@ export type Database = {
         }
         Returns: undefined
       }
+      _member_directory_assert_same_active_home: {
+        Args: { p_target_user_id: string }
+        Returns: undefined
+      }
+      _member_directory_assert_valid_photo_path: {
+        Args: { p_photo_path: string; p_user_id: string }
+        Returns: undefined
+      }
+      _member_directory_get_current_active_home_id: {
+        Args: { p_user_id: string }
+        Returns: string
+      }
       _outreach_rate_limit_bucketed: {
         Args: { p_bucket_start: string; p_key: string; p_limit: number }
         Returns: boolean
@@ -4420,6 +4553,10 @@ export type Database = {
       }
       archive_home_directory_service: {
         Args: { p_home_id: string; p_service_id: string }
+        Returns: Json
+      }
+      archive_member_directory_note: {
+        Args: { p_note_id: string }
         Returns: Json
       }
       avatars_list_for_home: {
@@ -4800,10 +4937,23 @@ export type Database = {
         }
         Returns: undefined
       }
+      create_member_directory_note: {
+        Args: {
+          p_contact_name?: string
+          p_custom_title?: string
+          p_details?: string
+          p_label?: string
+          p_note_type: string
+          p_phone_number?: string
+          p_photo_path?: string
+        }
+        Returns: Json
+      }
       dismiss_home_directory_reminder: {
         Args: { p_home_id: string; p_reminder_id: string }
         Returns: Json
       }
+      dismiss_member_directory_nudge: { Args: never; Returns: Json }
       expense_plans_generate_due_cycles: { Args: never; Returns: undefined }
       expense_plans_terminate: {
         Args: { p_plan_id: string }
@@ -5221,7 +5371,18 @@ export type Database = {
         Returns: undefined
       }
       get_home_directory_content: { Args: { p_home_id: string }; Returns: Json }
+      get_home_directory_member_cards: { Args: never; Returns: Json }
       get_home_directory_wifi: { Args: { p_home_id: string }; Returns: Json }
+      get_member_bank_account: {
+        Args: { p_target_user_id: string }
+        Returns: Json
+      }
+      get_member_directory_bank_account: { Args: never; Returns: Json }
+      get_member_directory_notes: {
+        Args: { p_target_user_id?: string }
+        Returns: Json
+      }
+      get_member_directory_nudge: { Args: never; Returns: Json }
       get_plan_status: { Args: never; Returns: Json }
       gratitude_wall_list: {
         Args: {
@@ -6016,6 +6177,18 @@ export type Database = {
         Returns: boolean
       }
       today_onboarding_hints: { Args: never; Returns: Json }
+      update_member_directory_note: {
+        Args: {
+          p_contact_name?: string
+          p_custom_title?: string
+          p_details?: string
+          p_label?: string
+          p_note_id: string
+          p_phone_number?: string
+          p_photo_path?: string
+        }
+        Returns: Json
+      }
       upsert_home_directory_note: {
         Args: {
           p_details?: string
@@ -6047,6 +6220,10 @@ export type Database = {
       }
       upsert_home_directory_wifi: {
         Args: { p_home_id: string; p_password?: string; p_ssid: string }
+        Returns: Json
+      }
+      upsert_member_directory_bank_account: {
+        Args: { p_account_holder_name: string; p_account_number: string }
         Returns: Json
       }
       user_context_v1: {

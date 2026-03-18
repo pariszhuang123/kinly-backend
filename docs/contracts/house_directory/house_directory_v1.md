@@ -31,6 +31,7 @@ House Directory MUST support:
 - wifi access details
 - home service references
 - simple shared house notes and tutorials
+- member cards for navigating to personal-directory surfaces
 - due renewal reminders for time-bound services
 
 ## 2. Scope and boundaries
@@ -39,6 +40,8 @@ In scope:
 - shared home operations, not person-specific records
 - optional URL references attached to service or house-note records
 - one optional photo attachment per house note
+- derived member cards for current home members who have published
+  personal-directory content
 - reminder timing derived from service term windows and configured offsets
 - per-member acknowledgement of due reminders
 
@@ -116,6 +119,25 @@ Out of scope:
 - Acknowledgement hides that reminder from that member’s due-reminder list.
 - Material reminder changes reopen visibility by clearing acknowledgements.
 
+### 3.6 Member card
+- Member cards are derived, not stored.
+- The caller's active home is resolved server-side.
+- The caller always sees their own member card.
+- A member card is shown only for a current member whose personal directory
+  has any content, except that the caller is always included.
+- Personal-directory content means at least one of:
+  - a bank account row exists
+  - at least one active personal note exists
+- Each card includes:
+  - `user_id`
+  - `username`
+  - `avatar_storage_path`
+  - `is_owner`
+  - `has_personal_directory_content`
+- Cards are used as the entry point from House Directory to Personal
+  Directory.
+- Cards are ordered with owner first, then by username.
+
 ## 4. Reminder lifecycle invariants
 
 - Reminder identity is scoped to:
@@ -137,6 +159,7 @@ Out of scope:
 - Read access:
   - wifi read: current home members on active homes
   - directory content read: current home members on active homes
+  - member cards read: current home members on active homes
   - due reminders read: current home members on active homes
 - Write access:
   - wifi/service/note create-update-archive: current home owner only
@@ -151,6 +174,9 @@ Out of scope:
 ## 6. Cross-capability relationships
 
 - House Directory stores shared operational facts.
+- House Directory exposes the filtered member-card read surface used to
+  navigate to person-scoped surfaces.
+- Homes v2 remains the source of membership truth and owner state.
 - House Norms stores shared behavioral expectations.
 - Personal Directory stores person-specific records.
 - Contracts MUST remain separated; cross-links are allowed, duplication is not.
@@ -159,6 +185,8 @@ Out of scope:
 
 - Non-owner cannot mutate wifi, services, notes, or dismiss reminders.
 - Member can read wifi/content and acknowledge due reminders.
+- Member can read member cards for current home members who have personal
+  directory content, with the caller always included.
 - Wifi read returns `ssid` and `qr_payload` but not raw password.
 - Rent service creation without term dates is rejected.
 - House note creation without `title` is rejected.
@@ -174,11 +202,14 @@ Out of scope:
 - Owner dismissal removes the reminder from due-reminder results.
 - Archiving a service retires its reminder and removes it from content reads.
 - Archived notes are excluded from content reads.
+- Members without personal-directory content are excluded from member-card
+  results.
+- Owner card includes owner flag, username, and avatar path.
 
 ## 8. References
 
-- [House Directory API v1](../../../api/kinly/homes/house_directory_api_v1.md)
-- [Homes v2](../../../api/kinly/homes/homes_v2.md)
+- [House Directory API v1](house_directory_api_v1.md)
+- [Homes v2](../homes_v2.md)
 
 ```contracts-json
 {
