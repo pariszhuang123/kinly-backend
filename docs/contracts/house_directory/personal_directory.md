@@ -39,6 +39,8 @@ Personal Directory MUST support:
 - one bank account per user
 - repeatable personal notes per user
 - read visibility to active members of the user's current home
+- owner access from the Start-screen personal-profile sheet when the owner has
+  existing Personal Directory content, even with no active home
 
 ## 2. Scope and boundaries
 
@@ -49,6 +51,7 @@ In scope:
 - owner-only mutation rights
 - soft archive lifecycle for notes
 - dismissible completeness nudge
+- payment-specific bank-detail presentation in owed-payment flows only
 
 Out of scope:
 - home-member roster discovery
@@ -56,6 +59,26 @@ Out of scope:
 - multiple bank accounts per user
 - cross-country payment validation rules
 - file-upload orchestration
+- exposing another member's bank details inside their Personal Directory screen
+
+## 2.1 Visibility rules
+
+- The owner MAY read and edit their own Personal Directory records whenever
+  content exists.
+- Other current home members MAY open a read-only Personal Directory view for
+  that member.
+- Other-member Personal Directory views MUST show notes only.
+- Bank details MUST NOT be shown on another member's Personal Directory screen.
+- Bank details MAY be shown only in payment-specific owed-detail flows where the
+  current user owes that payee money.
+- In that owed-detail flow the app MAY show:
+  - `account_holder_name`
+  - `account_number`
+  - `reference`, derived from the payee username in v1
+- If the payee has no bank account on file, the payer-facing owed-detail screen
+  MUST show calm fallback copy instead of bank details.
+- A self-only Today nudge MAY route directly to bank-account setup when the
+  owner has not added bank details.
 
 ## 3. Core entities
 
@@ -81,6 +104,24 @@ Lifecycle:
 - the owner can manage their own bank account without a home
 - other members do not read bank account details via the directory notes
   API; payment-specific access is via `get_member_bank_account`
+
+
+Copy-paste UX:
+- When a housemate owes money to the user, the Today expenses-to-pay
+  surface MUST show the payee's `account_holder_name` and
+  `account_number` inline.
+- Both values MUST support a single-tap copy action so the payer can
+  paste directly into their banking app.
+- The owner always sees their own bank account in their personal directory
+  view for management (add/edit).
+- Other members do NOT see bank account details in the personal directory
+  view — they appear only on the expenses-to-pay surface when there is
+  an outstanding balance.
+
+No bank account empty state:
+- If the payee has not added a bank account, the expenses-to-pay surface
+  MUST show a message prompting the payer to contact the payee verbally
+  and suggest they add their bank details via their personal directory.
 
 Privacy:
 - `account_number` is sensitive operational data
@@ -142,11 +183,12 @@ Validation rules:
 ## 4. Navigation and entry point
 
 - With an active home: users access personal directory from the house
-  directory member-card surface.
-- Without an active home: the owner can still access their own directory.
-- Member identity and roster ordering come from the House Directory
-  member-card RPC or adjacent home-membership surfaces, not from personal
-  directory storage.
+  directory member surface.
+- Without an active home: the owner can access their own directory from the
+  Start-screen personal-profile sheet only when they already have Personal
+  Directory content.
+- Member identity and roster ordering come from Homes v2 or adjacent
+  membership surfaces, not from personal directory storage.
 
 ## 5. Completeness nudge
 
@@ -209,9 +251,9 @@ Rules:
 
 ## 10. References
 
-- [Personal Directory API v1](personal_directory_api_v1.md)
+- [Personal Directory API v1](../../../api/kinly/identity/personal_directory_api_v1.md)
 - [House Directory Contract v1](house_directory_v1.md)
-- [Homes v2](../homes_v2.md)
+- [Homes v2](../../../api/kinly/homes/homes_v2.md)
 
 ```contracts-json
 {

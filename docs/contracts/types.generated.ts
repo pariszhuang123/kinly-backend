@@ -6226,17 +6226,7 @@ export type Database = {
         Args: { p_account_holder_name: string; p_account_number: string }
         Returns: Json
       }
-      user_context_v1: {
-        Args: never
-        Returns: {
-          avatar_storage_path: string
-          display_name: string
-          has_personal_mentions: boolean
-          has_preference_report: boolean
-          show_avatar: boolean
-          user_id: string
-        }[]
-      }
+      user_context_v1: { Args: never; Returns: Json }
     }
     Enums: {
       chore_event_type: "create" | "activate" | "update" | "complete" | "cancel"

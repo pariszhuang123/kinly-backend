@@ -2,17 +2,12 @@ SET search_path = pgtap, public, auth, extensions;
 
 BEGIN;
 
-SELECT plan(10);
+SELECT plan(16);
 
 CREATE TEMP TABLE tmp_users (
   label   text PRIMARY KEY,
   user_id uuid,
   email   text
-);
-
-CREATE TEMP TABLE tmp_homes (
-  label   text PRIMARY KEY,
-  home_id uuid
 );
 
 INSERT INTO public.avatars (id, storage_path, category, name)
@@ -37,30 +32,35 @@ VALUES
   ('00000000-0000-4000-8000-000000000502', 'ctx_other', '00000000-0000-4000-8000-000000000801', now(), now())
 ON CONFLICT (id) DO NOTHING;
 
--- 1) No artifacts -> avatar hidden, no path
+-- 1) No artifacts -> no avatar and no personal-directory content
 SELECT set_config('request.jwt.claim.sub', (SELECT user_id::text FROM tmp_users WHERE label = 'owner'), true);
 WITH ctx AS (SELECT * FROM public.user_context_v1())
-SELECT is((SELECT has_preference_report FROM ctx), false, 'no preference report by default');
+SELECT is(((SELECT user_context_v1 FROM ctx)->>'has_preference_report')::boolean, false, 'no preference report by default');
 
 WITH ctx AS (SELECT * FROM public.user_context_v1())
-SELECT is((SELECT has_personal_mentions FROM ctx), false, 'no personal mentions by default');
+SELECT is(((SELECT user_context_v1 FROM ctx)->>'has_personal_mentions')::boolean, false, 'no personal mentions by default');
 
 WITH ctx AS (SELECT * FROM public.user_context_v1())
-SELECT is((SELECT show_avatar FROM ctx), false, 'avatar hidden when no artifacts');
+SELECT is(((SELECT user_context_v1 FROM ctx)->>'has_personal_directory_content')::boolean, false, 'personal directory flag is false by default');
 
 WITH ctx AS (SELECT * FROM public.user_context_v1())
-SELECT is(
-  (SELECT avatar_storage_path FROM ctx),
-  NULL,
-  'avatar path is NULL when avatar hidden'
-);
+SELECT is((SELECT user_context_v1->>'avatar_storage_path' FROM ctx), NULL, 'avatar path is NULL when the caller has no personal artifacts');
+
+WITH ctx AS (SELECT * FROM public.user_context_v1())
+SELECT is((SELECT user_context_v1->>'display_name' FROM ctx), 'ctx_owner', 'display_name mirrors profiles.username');
+
+WITH ctx AS (SELECT * FROM public.user_context_v1())
+SELECT is((SELECT (user_context_v1->>'user_id')::uuid FROM ctx), (SELECT user_id FROM tmp_users WHERE label = 'owner'), 'user_id matches auth.uid()');
+
+WITH ctx AS (SELECT * FROM public.user_context_v1())
+SELECT is(((SELECT user_context_v1 FROM ctx)->>'show_avatar')::boolean, false, 'show_avatar is false when all artifact flags are false');
 
 -- Seed a home for FK on personal mentions
 SELECT set_config('request.jwt.claim.sub', (SELECT user_id::text FROM tmp_users WHERE label = 'owner'), true);
-INSERT INTO tmp_homes (label, home_id)
-SELECT 'home', (public.homes_create_with_invite()->'home'->>'id')::uuid;
+CREATE TEMP TABLE tmp_homes AS
+SELECT 'home'::text AS label, (public.homes_create_with_invite()->'home'->>'id')::uuid AS home_id;
 
--- 2) Preference report without a home should count as artifact
+-- 2) Preference report should count as artifact
 INSERT INTO public.preference_reports (
   subject_user_id,
   template_key,
@@ -76,15 +76,30 @@ INSERT INTO public.preference_reports (
 ) ON CONFLICT DO NOTHING;
 
 WITH ctx AS (SELECT * FROM public.user_context_v1())
-SELECT is((SELECT has_preference_report FROM ctx), true, 'preference report toggles artifact flag');
+SELECT is(((SELECT user_context_v1 FROM ctx)->>'has_preference_report')::boolean, true, 'preference report toggles artifact flag');
+
+-- 3) Personal-directory bank account should set directory-content flag
+INSERT INTO public.member_directory_bank_accounts (
+  user_id,
+  account_holder_name,
+  account_number
+) VALUES (
+  (SELECT user_id FROM tmp_users WHERE label = 'owner'),
+  'Ctx Owner',
+  '12-3456-7890123-00'
+)
+ON CONFLICT (user_id) DO NOTHING;
 
 WITH ctx AS (SELECT * FROM public.user_context_v1())
-SELECT ok((SELECT show_avatar FROM ctx), 'avatar shown when preference report published');
+SELECT is(((SELECT user_context_v1 FROM ctx)->>'has_personal_directory_content')::boolean, true, 'bank account toggles personal directory content flag');
 
 WITH ctx AS (SELECT * FROM public.user_context_v1())
-SELECT is((SELECT avatar_storage_path FROM ctx), 'avatars/default_ctx.png', 'avatar path returned when shown');
+SELECT is((SELECT user_context_v1->>'avatar_storage_path' FROM ctx), 'avatars/default_ctx.png', 'avatar path is returned when personal directory content exists');
 
--- 3) Personal mention should set mention flag
+WITH ctx AS (SELECT * FROM public.user_context_v1())
+SELECT is(((SELECT user_context_v1 FROM ctx)->>'show_avatar')::boolean, true, 'show_avatar is true when any artifact exists');
+
+-- 4) Personal mention should set mention flag
 -- Seed a mood entry to satisfy source_entry_id FK
 SELECT set_config('request.jwt.claim.sub', (SELECT user_id::text FROM tmp_users WHERE label = 'other'), true);
 INSERT INTO public.home_mood_entries (
@@ -129,9 +144,9 @@ INSERT INTO public.gratitude_wall_personal_items (
 );
 
 WITH ctx AS (SELECT * FROM public.user_context_v1())
-SELECT is((SELECT has_personal_mentions FROM ctx), true, 'personal mention toggles mention flag');
+SELECT is(((SELECT user_context_v1 FROM ctx)->>'has_personal_mentions')::boolean, true, 'personal mention toggles mention flag');
 
--- 4) Personal preference fetch should succeed without home id
+-- 5) Personal preference fetch should succeed without home id
 SELECT is(
   (public.preference_reports_get_personal_v1('personal_preferences_v1', 'en')->>'found')::boolean,
   true,
@@ -141,7 +156,13 @@ SELECT is(
 -- Sanity check: other user sees no artifacts
 SELECT set_config('request.jwt.claim.sub', (SELECT user_id::text FROM tmp_users WHERE label = 'other'), true);
 WITH ctx AS (SELECT * FROM public.user_context_v1())
-SELECT is((SELECT has_preference_report FROM ctx), false, 'other user has no preference report flagged');
+SELECT is(((SELECT user_context_v1 FROM ctx)->>'has_preference_report')::boolean, false, 'other user has no preference report flagged');
+
+WITH ctx AS (SELECT * FROM public.user_context_v1())
+SELECT is(((SELECT user_context_v1 FROM ctx)->>'has_personal_directory_content')::boolean, false, 'other user has no personal directory content flagged');
+
+WITH ctx AS (SELECT * FROM public.user_context_v1())
+SELECT is((SELECT user_context_v1->>'avatar_storage_path' FROM ctx), NULL, 'other user has no avatar path when no artifacts exist');
 
 SELECT * FROM finish();
 ROLLBACK;

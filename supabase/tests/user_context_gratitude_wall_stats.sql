@@ -2,17 +2,12 @@ SET search_path = pgtap, public, auth, extensions;
 
 BEGIN;
 
-SELECT plan(9);
+SELECT plan(7);
 
 CREATE TEMP TABLE tmp_users (
   label   text PRIMARY KEY,
   user_id uuid,
   email   text
-);
-
-CREATE TEMP TABLE tmp_homes (
-  label   text PRIMARY KEY,
-  home_id uuid
 );
 
 INSERT INTO public.avatars (id, storage_path, category, name)
@@ -41,21 +36,18 @@ ON CONFLICT (id) DO NOTHING;
 
 -- Seed a home + invite upfront for mentions/stats
 SELECT set_config('request.jwt.claim.sub', (SELECT user_id::text FROM tmp_users WHERE label = 'owner'), true);
+CREATE TEMP TABLE tmp_homes AS
 WITH new_home AS (
   SELECT (public.homes_create_with_invite()->'home'->>'id')::uuid AS home_id
 )
-INSERT INTO tmp_homes (label, home_id)
-SELECT 'home', home_id FROM new_home;
+SELECT 'home'::text AS label, home_id FROM new_home;
 
--- 1) No artifacts -> no avatar
+-- 1) No artifacts -> avatar hidden
 SELECT set_config('request.jwt.claim.sub', (SELECT user_id::text FROM tmp_users WHERE label = 'owner'), true);
 WITH ctx AS (SELECT * FROM public.user_context_v1())
-SELECT is((SELECT show_avatar FROM ctx), false, 'show_avatar is false with no artifacts');
+SELECT is((SELECT user_context_v1->>'avatar_storage_path' FROM ctx), NULL, 'avatar path is NULL when the owner has no personal artifacts');
 
-WITH ctx AS (SELECT * FROM public.user_context_v1())
-SELECT is((SELECT avatar_storage_path FROM ctx), NULL, 'avatar path is NULL when avatar not shown');
-
--- 2) Preference report published -> avatar visible, path present
+-- 2) Preference report published -> identity path remains present
 INSERT INTO public.preference_reports (
   subject_user_id,
   template_key,
@@ -75,13 +67,10 @@ INSERT INTO public.preference_reports (
 ) ON CONFLICT DO NOTHING;
 
 WITH ctx AS (SELECT * FROM public.user_context_v1())
-SELECT is((SELECT has_preference_report FROM ctx), true, 'has_preference_report flips to true');
+SELECT is(((SELECT user_context_v1 FROM ctx)->>'has_preference_report')::boolean, true, 'has_preference_report flips to true');
 
 WITH ctx AS (SELECT * FROM public.user_context_v1())
-SELECT ok((SELECT show_avatar FROM ctx), 'show_avatar true when preference report exists');
-
-WITH ctx AS (SELECT * FROM public.user_context_v1())
-SELECT is((SELECT avatar_storage_path FROM ctx), 'avatars/ctx_default.png', 'avatar path returned when avatar shown');
+SELECT is((SELECT user_context_v1->>'avatar_storage_path' FROM ctx), 'avatars/ctx_default.png', 'avatar path returned once an artifact exists');
 
 -- 3) Member joins, seeds a mood entry, and mention toggles mention flag
 SELECT set_config('request.jwt.claim.sub', (SELECT user_id::text FROM tmp_users WHERE label = 'member'), true);
@@ -129,7 +118,7 @@ INSERT INTO public.gratitude_wall_personal_items (
 
 SELECT set_config('request.jwt.claim.sub', (SELECT user_id::text FROM tmp_users WHERE label = 'owner'), true);
 WITH ctx AS (SELECT * FROM public.user_context_v1())
-SELECT is((SELECT has_personal_mentions FROM ctx), true, 'has_personal_mentions is true after a mention');
+SELECT is(((SELECT user_context_v1 FROM ctx)->>'has_personal_mentions')::boolean, true, 'has_personal_mentions is true after a mention');
 
 -- 4) gratitude_wall_stats aggregates
 

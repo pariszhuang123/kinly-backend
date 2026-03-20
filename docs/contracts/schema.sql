@@ -20480,50 +20480,79 @@ COMMENT ON FUNCTION "public"."upsert_member_directory_bank_account"("p_account_h
 
 
 
-CREATE OR REPLACE FUNCTION "public"."user_context_v1"() RETURNS TABLE("user_id" "uuid", "has_preference_report" boolean, "has_personal_mentions" boolean, "show_avatar" boolean, "avatar_storage_path" "text", "display_name" "text")
+CREATE OR REPLACE FUNCTION "public"."user_context_v1"() RETURNS "jsonb"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO ''
     AS $$
 DECLARE
   v_user uuid;
+  v_show_avatar boolean;
+  v_has_preference_report boolean;
+  v_has_personal_mentions boolean;
+  v_has_personal_directory_content boolean;
+  v_avatar_storage_path text;
+  v_display_name text;
 BEGIN
   PERFORM public._assert_authenticated();
   v_user := auth.uid();
 
-  -- Broad existence check: any published personal preference report (any template/locale)
-  has_preference_report := EXISTS (
+  v_has_preference_report := EXISTS (
     SELECT 1
     FROM public.preference_reports pr
     WHERE pr.subject_user_id = v_user
       AND pr.status = 'published'
   );
 
-  -- Personal mentions exist (self-only existence check)
-  has_personal_mentions := EXISTS (
+  v_has_personal_mentions := EXISTS (
     SELECT 1
     FROM public.gratitude_wall_personal_items i
     WHERE i.recipient_user_id = v_user
       AND i.author_user_id <> v_user
   );
 
-  show_avatar := (has_preference_report OR has_personal_mentions);
+  v_has_personal_directory_content := (
+    EXISTS (
+      SELECT 1
+      FROM public.member_directory_bank_accounts b
+      WHERE b.user_id = v_user
+    )
+    OR EXISTS (
+      SELECT 1
+      FROM public.member_directory_notes n
+      WHERE n.user_id = v_user
+        AND n.archived_at IS NULL
+    )
+  );
 
-  -- Only return avatar storage path if the avatar should be shown
+  v_show_avatar := (
+    v_has_preference_report
+    OR v_has_personal_mentions
+    OR v_has_personal_directory_content
+  );
+
   SELECT
     p.username,
     a.storage_path
-  INTO display_name, avatar_storage_path
+  INTO v_display_name, v_avatar_storage_path
   FROM public.profiles p
   LEFT JOIN public.avatars a
     ON a.id = p.avatar_id
   WHERE p.id = v_user;
 
-  IF NOT show_avatar THEN
-    avatar_storage_path := NULL;
+  IF NOT v_show_avatar THEN
+    v_avatar_storage_path := NULL;
   END IF;
 
-  user_id := v_user;
-  RETURN NEXT;
+  RETURN jsonb_build_object(
+    'ok', true,
+    'user_id', v_user,
+    'has_preference_report', v_has_preference_report,
+    'has_personal_mentions', v_has_personal_mentions,
+    'has_personal_directory_content', v_has_personal_directory_content,
+    'show_avatar', v_show_avatar,
+    'avatar_storage_path', v_avatar_storage_path,
+    'display_name', v_display_name
+  );
 END;
 $$;
 
@@ -20531,7 +20560,7 @@ $$;
 ALTER FUNCTION "public"."user_context_v1"() OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "public"."user_context_v1"() IS 'Self-only context for Start Page avatar menu + personal profile access. No home fields are returned. show_avatar gates avatar rendering; avatar_storage_path is NULL when show_avatar=false. display_name mirrors profiles.username.';
+COMMENT ON FUNCTION "public"."user_context_v1"() IS 'Self-only Start-surface context as jsonb. Returns caller-scoped artifact flags, derived show_avatar, avatar_storage_path, and display_name; no home fields are exposed.';
 
 
 

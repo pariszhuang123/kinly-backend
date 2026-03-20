@@ -1,10 +1,10 @@
 ---
-Domain: IDENTITY
-Capability: Users Auth & Lifecycle
+Domain: Identity
+Capability: Users
 Scope: backend
 Artifact-Type: contract
-Stability: stable
-Status: Approved
+Stability: evolving
+Status: draft
 Version: v1.0
 ---
 
@@ -68,6 +68,30 @@ Scope: User authentication via Supabase OAuth (Google, Apple), logout, and accou
       "notes": [
         "SECURITY DEFINER + `_assert_authenticated`",
         "Filters out deactivated profiles and joins avatars table for storage_path"
+      ]
+    },
+    "users.userContext": {
+      "type": "rpc",
+      "auth": "authenticated",
+      "caller": "member",
+      "impl": "public.user_context_v1",
+      "args": {},
+      "returns": {
+        "jsonb": {
+          "ok": "boolean",
+          "user_id": "uuid",
+          "has_preference_report": "boolean",
+          "has_personal_mentions": "boolean",
+          "has_personal_directory_content": "boolean",
+          "show_avatar": "boolean",
+          "avatar_storage_path": "text|null",
+          "display_name": "text|null"
+        }
+      },
+      "notes": [
+        "SECURITY DEFINER + `_assert_authenticated`",
+        "Returns only caller-scoped existence flags and identity fields",
+        "has_personal_directory_content is true when the caller has either a member_directory_bank_accounts row or at least one non-archived member_directory_notes row"
       ]
     },
     "profile.identityUpdate": {
@@ -142,6 +166,26 @@ Scope: User authentication via Supabase OAuth (Google, Apple), logout, and accou
         "security": "definer",
         "volatility": "stable",
         "grants": {"execute": ["authenticated"]}
+      },
+      "public.user_context_v1": {
+        "type": "rpc",
+        "args": {},
+        "returns": {
+          "jsonb": {
+            "ok": "boolean",
+            "user_id": "uuid",
+            "has_preference_report": "boolean",
+            "has_personal_mentions": "boolean",
+            "has_personal_directory_content": "boolean",
+            "show_avatar": "boolean",
+            "avatar_storage_path": "text|null",
+            "display_name": "text|null"
+          }
+        },
+        "security": "definer",
+        "volatility": "stable",
+        "grants": {"execute": ["authenticated"]},
+        "notes": "Start-surface RPC returns jsonb so additional caller-scoped fields can be added without changing a table signature. show_avatar must equal the OR of has_preference_report, has_personal_mentions, and has_personal_directory_content. has_personal_directory_content must be derived from existence of a bank-account row or any non-archived personal-directory note for auth.uid()."
       },
       "public.avatars_list_for_home": {
         "type": "rpc",
@@ -234,6 +278,19 @@ ReservedUsername
 - On self delete, `username` is kept (not anonymized) so it can be displayed in gratitude/history views.
 
 ## RPCs / Edge Functions
+
+users.userContext()
+- Caller: authenticated user.
+- Impl: `public.user_context_v1`.
+- Returns caller-scoped identity and existence flags for Start/profile entry
+  decisions.
+- `hasPersonalDirectoryContent` must map from
+  `has_personal_directory_content`.
+- `has_personal_directory_content` is true iff:
+  - a row exists in `public.member_directory_bank_accounts` for the caller, or
+  - a row exists in `public.member_directory_notes` for the caller with
+    `archived_at IS NULL`
+- This flag is independent of active-home membership.
 
 users.selfDelete()
 - Caller: authenticated user (must delete self only). Runs as service role inside Edge Function.
