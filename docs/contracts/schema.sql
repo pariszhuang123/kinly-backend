@@ -1121,6 +1121,745 @@ $$;
 ALTER FUNCTION "public"."_expenses_prepare_split_buffer"("p_home_id" "uuid", "p_creator_id" "uuid", "p_amount_cents" bigint, "p_split_mode" "public"."expense_split_type", "p_member_ids" "uuid"[], "p_splits" "jsonb") OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."_fit_check_anonymous_session_hash"() RETURNS "text"
+    LANGUAGE "sql" STABLE
+    SET "search_path" TO ''
+    AS $$
+  select public._sha256_hex(public._fit_check_anonymous_session_id());
+$$;
+
+
+ALTER FUNCTION "public"."_fit_check_anonymous_session_hash"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_fit_check_anonymous_session_id"() RETURNS "text"
+    LANGUAGE "plpgsql" STABLE
+    SET "search_path" TO ''
+    AS $_$
+declare
+  v_headers jsonb := public._fit_check_request_headers();
+  v_session_id text := nullif(
+    coalesce(
+      v_headers ->> 'x-fit-check-session-id',
+      v_headers ->> 'X-Fit-Check-Session-Id'
+    ),
+    ''
+  );
+begin
+  perform public.api_assert(
+    v_session_id is not null
+    and v_session_id ~ '^anon_[A-Za-z0-9_-]{16,64}$',
+    'FIT_CHECK_INVALID_INPUTS',
+    'Missing or invalid anonymous fit-check session header.',
+    '22023',
+    jsonb_build_object('header', 'x-fit-check-session-id')
+  );
+
+  return v_session_id;
+end;
+$_$;
+
+
+ALTER FUNCTION "public"."_fit_check_anonymous_session_id"() OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."fit_check_drafts" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "owner_user_id" "uuid",
+    "home_id" "uuid",
+    "owner_answers" "jsonb" NOT NULL,
+    "requested_locale_base" "text" DEFAULT 'en'::"text" NOT NULL,
+    "draft_session_token_hash" "text",
+    "claim_token_hash" "text" NOT NULL,
+    "claim_token_used_at" timestamp with time zone,
+    "claimed_at" timestamp with time zone,
+    "home_attached_at" timestamp with time zone,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "fit_check_drafts_claim_token_hash_check" CHECK (("char_length"("claim_token_hash") = 64)),
+    CONSTRAINT "fit_check_drafts_draft_session_token_hash_check" CHECK ((("draft_session_token_hash" IS NULL) OR ("char_length"("draft_session_token_hash") = 64))),
+    CONSTRAINT "fit_check_drafts_owner_answers_object_check" CHECK (("jsonb_typeof"("owner_answers") = 'object'::"text")),
+    CONSTRAINT "fit_check_drafts_requested_locale_base_check" CHECK (("requested_locale_base" ~ '^[a-z]{2}$'::"text"))
+);
+
+
+ALTER TABLE "public"."fit_check_drafts" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."fit_check_drafts" IS 'Anonymous and claimed owner draft state for Flatmate Fit Check. Only token hashes are stored.';
+
+
+
+CREATE OR REPLACE FUNCTION "public"."_fit_check_assert_owner"("p_draft_id" "uuid") RETURNS "public"."fit_check_drafts"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+declare
+  v_draft public.fit_check_drafts;
+begin
+  perform public._assert_authenticated();
+
+  select *
+    into v_draft
+  from public.fit_check_drafts d
+  where d.id = p_draft_id
+  limit 1;
+
+  perform public.api_assert(
+    v_draft.id is not null,
+    'FIT_CHECK_NOT_FOUND',
+    'Flatmate fit-check draft not found.',
+    'P0001',
+    jsonb_build_object('draft_id', p_draft_id)
+  );
+
+  perform public.api_assert(
+    v_draft.owner_user_id = auth.uid(),
+    'FORBIDDEN_OWNER_ONLY',
+    'Only the draft owner can access this fit-check draft.',
+    '42501',
+    jsonb_build_object('draft_id', p_draft_id)
+  );
+
+  if v_draft.home_id is not null then
+    perform public.api_assert(
+      public.is_home_owner(v_draft.home_id, auth.uid()),
+      'FORBIDDEN_OWNER_ONLY',
+      'Only the current home owner can access this fit-check draft.',
+      '42501',
+      jsonb_build_object('draft_id', p_draft_id, 'home_id', v_draft.home_id)
+    );
+  end if;
+
+  return v_draft;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."_fit_check_assert_owner"("p_draft_id" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_fit_check_build_continue_in_app_url"("p_claim_token" "text") RETURNS "text"
+    LANGUAGE "sql" IMMUTABLE
+    SET "search_path" TO ''
+    AS $$
+  select 'https://go.makinglifeeasie.com/kinly/app/fit-check/claim/' || p_claim_token;
+$$;
+
+
+ALTER FUNCTION "public"."_fit_check_build_continue_in_app_url"("p_claim_token" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_fit_check_build_share_url"("p_share_token" "text") RETURNS "text"
+    LANGUAGE "sql" IMMUTABLE
+    SET "search_path" TO ''
+    AS $$
+  select 'https://go.makinglifeeasie.com/kinly/fit-check/' || p_share_token;
+$$;
+
+
+ALTER FUNCTION "public"."_fit_check_build_share_url"("p_share_token" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_fit_check_candidate_cta_url"() RETURNS "text"
+    LANGUAGE "sql" IMMUTABLE
+    SET "search_path" TO ''
+    AS $$
+  select 'https://go.makinglifeeasie.com/kinly';
+$$;
+
+
+ALTER FUNCTION "public"."_fit_check_candidate_cta_url"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_fit_check_claim_token_ttl"() RETURNS interval
+    LANGUAGE "sql" IMMUTABLE
+    SET "search_path" TO ''
+    AS $$
+  select interval '30 days';
+$$;
+
+
+ALTER FUNCTION "public"."_fit_check_claim_token_ttl"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_fit_check_generate_briefing_payload"("p_owner_answers" "jsonb", "p_candidate_answers" "jsonb") RETURNS "jsonb"
+    LANGUAGE "plpgsql" IMMUTABLE
+    SET "search_path" TO ''
+    AS $$
+declare
+  v_scenarios text[] := array['fit_cleanliness', 'fit_rhythm', 'fit_chores', 'fit_conflict'];
+  v_primary_candidates text[] := array[]::text[];
+  v_primary_focus text[] := array[]::text[];
+  v_alignments jsonb := '[]'::jsonb;
+  v_watchouts jsonb := '[]'::jsonb;
+  v_scenario text;
+  v_owner_idx integer;
+  v_candidate_idx integer;
+  v_distance integer;
+  v_direction text;
+begin
+  for v_scenario in select unnest(v_scenarios)
+  loop
+    v_owner_idx := (p_owner_answers ->> v_scenario)::integer;
+    v_candidate_idx := (p_candidate_answers ->> v_scenario)::integer;
+    v_distance := abs(v_owner_idx - v_candidate_idx);
+
+    if v_distance = 0 then
+      v_alignments := v_alignments || jsonb_build_array(
+        jsonb_build_object('scenario_id', v_scenario)
+      );
+    else
+      v_direction := case
+        when v_owner_idx > v_candidate_idx then 'owner_higher'
+        else 'candidate_higher'
+      end;
+
+      v_watchouts := v_watchouts || jsonb_build_array(
+        jsonb_build_object(
+          'scenario_id', v_scenario,
+          'distance', v_distance,
+          'direction', v_direction,
+          'watchout_key', 'fit_check.watchout.' || v_scenario || '.' || v_direction || '.' || v_distance,
+          'question_keys', jsonb_build_array(
+            'fit_check.question.' || v_scenario || '.q1',
+            'fit_check.question.' || v_scenario || '.q2'
+          ),
+          'is_primary_focus', false
+        )
+      );
+
+      if v_distance = 2 then
+        v_primary_candidates := array_append(v_primary_candidates, v_scenario);
+      end if;
+    end if;
+  end loop;
+
+  if cardinality(v_primary_candidates) = 0 then
+    for v_scenario in select unnest(v_scenarios)
+    loop
+      if abs((p_owner_answers ->> v_scenario)::integer - (p_candidate_answers ->> v_scenario)::integer) = 1 then
+        v_primary_candidates := array_append(v_primary_candidates, v_scenario);
+      end if;
+    end loop;
+  end if;
+
+  v_primary_focus := coalesce(v_primary_candidates[1:2], array[]::text[]);
+
+  return jsonb_build_object(
+    'context_key', 'fit_check.briefing.context',
+    'limitation_key', 'fit_check.briefing.limitation',
+    'focus_key', 'fit_check.briefing.focus',
+    'alignments', v_alignments,
+    'watchouts',
+      (
+        select coalesce(jsonb_agg(
+          case
+            when (elem ->> 'scenario_id') = any(v_primary_focus) then
+              jsonb_set(elem, '{is_primary_focus}', 'true'::jsonb)
+            else elem
+          end
+          order by case elem ->> 'scenario_id'
+            when 'fit_cleanliness' then 1
+            when 'fit_rhythm' then 2
+            when 'fit_chores' then 3
+            when 'fit_conflict' then 4
+            else 99
+          end
+        ), '[]'::jsonb)
+        from jsonb_array_elements(v_watchouts) with ordinality as e(elem, ordinality)
+      )
+  );
+end;
+$$;
+
+
+ALTER FUNCTION "public"."_fit_check_generate_briefing_payload"("p_owner_answers" "jsonb", "p_candidate_answers" "jsonb") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_fit_check_generate_token"("p_prefix" "text") RETURNS "text"
+    LANGUAGE "sql"
+    SET "search_path" TO ''
+    AS $$
+  select lower(
+    p_prefix
+    || '_'
+    || substring(replace(gen_random_uuid()::text, '-', '') || replace(gen_random_uuid()::text, '-', '') from 1 for 32)
+  );
+$$;
+
+
+ALTER FUNCTION "public"."_fit_check_generate_token"("p_prefix" "text") OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."fit_check_share_tokens" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "draft_id" "uuid" NOT NULL,
+    "token_hash" "text" NOT NULL,
+    "status" "text" DEFAULT 'active'::"text" NOT NULL,
+    "expires_at" timestamp with time zone NOT NULL,
+    "revoked_at" timestamp with time zone,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "fit_check_share_tokens_hash_check" CHECK (("char_length"("token_hash") = 64)),
+    CONSTRAINT "fit_check_share_tokens_status_check" CHECK (("status" = ANY (ARRAY['active'::"text", 'revoked'::"text", 'expired'::"text"])))
+);
+
+
+ALTER TABLE "public"."fit_check_share_tokens" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."fit_check_share_tokens" IS 'Public share tokens for candidate fit-check access; only one active token per draft; only token hashes are stored.';
+
+
+
+CREATE OR REPLACE FUNCTION "public"."_fit_check_get_active_share_token_for_draft"("p_draft_id" "uuid") RETURNS "public"."fit_check_share_tokens"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+declare
+  v_row public.fit_check_share_tokens;
+begin
+  select *
+    into v_row
+  from public.fit_check_share_tokens st
+  where st.draft_id = p_draft_id
+    and st.status = 'active'
+  order by st.created_at desc
+  limit 1;
+
+  if v_row.id is null then
+    return null;
+  end if;
+
+  if v_row.expires_at <= now() then
+    update public.fit_check_share_tokens
+       set status = 'expired'
+     where id = v_row.id
+     returning * into v_row;
+
+    return null;
+  end if;
+
+  return v_row;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."_fit_check_get_active_share_token_for_draft"("p_draft_id" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_fit_check_get_effective_share_token_by_hash"("p_token_hash" "text") RETURNS "public"."fit_check_share_tokens"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+declare
+  v_row public.fit_check_share_tokens;
+begin
+  select *
+    into v_row
+  from public.fit_check_share_tokens st
+  where st.token_hash = p_token_hash
+  limit 1;
+
+  if v_row.id is null then
+    return null;
+  end if;
+
+  if v_row.status = 'active' and v_row.expires_at <= now() then
+    update public.fit_check_share_tokens
+       set status = 'expired'
+     where id = v_row.id
+     returning * into v_row;
+  end if;
+
+  return v_row;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."_fit_check_get_effective_share_token_by_hash"("p_token_hash" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_fit_check_onboarding_seed"("p_answers" "jsonb") RETURNS "jsonb"
+    LANGUAGE "sql" IMMUTABLE
+    SET "search_path" TO ''
+    AS $$
+  select jsonb_build_object(
+    'house_norms', jsonb_build_object(
+      'initial_responses', jsonb_build_object(
+        'norms_shared_spaces', (p_answers ->> 'fit_cleanliness')::integer,
+        'norms_rhythm_quiet', (p_answers ->> 'fit_rhythm')::integer,
+        'norms_responsibility_flow', (p_answers ->> 'fit_chores')::integer,
+        'norms_repair_style', (p_answers ->> 'fit_conflict')::integer
+      )
+    ),
+    'preferences', jsonb_build_object(
+      'initial_responses', jsonb_build_object()
+    )
+  );
+$$;
+
+
+ALTER FUNCTION "public"."_fit_check_onboarding_seed"("p_answers" "jsonb") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_fit_check_prefill_payload"("p_answers" "jsonb") RETURNS "jsonb"
+    LANGUAGE "sql" IMMUTABLE
+    SET "search_path" TO ''
+    AS $$
+  select jsonb_build_object(
+    'norms_shared_spaces',
+      (array['clear_now', 'reset_later', 'relaxed'])[((p_answers ->> 'fit_cleanliness')::integer) + 1],
+    'norms_rhythm_quiet',
+      (array['wind_down', 'variable', 'flexible'])[((p_answers ->> 'fit_rhythm')::integer) + 1],
+    'norms_responsibility_flow',
+      (array['clear_agreements', 'notice_and_do', 'own_areas'])[((p_answers ->> 'fit_chores')::integer) + 1],
+    'norms_repair_style',
+      (array['talk_soon', 'gentle_check_in', 'let_small_pass'])[((p_answers ->> 'fit_conflict')::integer) + 1]
+  );
+$$;
+
+
+ALTER FUNCTION "public"."_fit_check_prefill_payload"("p_answers" "jsonb") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_fit_check_purge_unclaimed_drafts"() RETURNS integer
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+declare
+  v_deleted integer := 0;
+begin
+  with deleted_rows as (
+    delete from public.fit_check_drafts d
+    where d.owner_user_id is null
+      and d.claimed_at is null
+      and d.created_at < now() - public._fit_check_unclaimed_purge_ttl()
+    returning 1
+  )
+  select count(*) into v_deleted from deleted_rows;
+
+  return v_deleted;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."_fit_check_purge_unclaimed_drafts"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_fit_check_rate_limit_bucketed"("p_key" "text", "p_bucket" timestamp with time zone, "p_limit" integer) RETURNS boolean
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+declare
+  v_n integer;
+begin
+  insert into public.fit_check_rate_limits (k, bucket_at, n, updated_at)
+  values (p_key, p_bucket, 1, now())
+  on conflict (k) do update
+    set n = case
+              when public.fit_check_rate_limits.bucket_at = excluded.bucket_at
+                then public.fit_check_rate_limits.n + 1
+              else 1
+            end,
+        bucket_at = excluded.bucket_at,
+        updated_at = now()
+  returning n into v_n;
+
+  return v_n <= p_limit;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."_fit_check_rate_limit_bucketed"("p_key" "text", "p_bucket" timestamp with time zone, "p_limit" integer) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_fit_check_reflection_key"("p_answers" "jsonb") RETURNS "text"
+    LANGUAGE "plpgsql" IMMUTABLE
+    SET "search_path" TO ''
+    AS $$
+declare
+  v_avg numeric;
+begin
+  v_avg := (
+    ((p_answers ->> 'fit_cleanliness')::numeric
+    + (p_answers ->> 'fit_rhythm')::numeric
+    + (p_answers ->> 'fit_chores')::numeric
+    + (p_answers ->> 'fit_conflict')::numeric) / 4.0
+  );
+
+  if v_avg <= 0.50 then
+    return 'fit_check.candidate.reflection.structured';
+  elsif v_avg >= 1.50 then
+    return 'fit_check.candidate.reflection.flexible';
+  end if;
+
+  return 'fit_check.candidate.reflection.balanced';
+end;
+$$;
+
+
+ALTER FUNCTION "public"."_fit_check_reflection_key"("p_answers" "jsonb") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_fit_check_request_headers"() RETURNS "jsonb"
+    LANGUAGE "sql" STABLE
+    SET "search_path" TO ''
+    AS $$
+  select coalesce(
+    nullif(current_setting('request.headers', true), ''),
+    '{}'
+  )::jsonb;
+$$;
+
+
+ALTER FUNCTION "public"."_fit_check_request_headers"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_fit_check_requested_locale_base"("p_locale" "text") RETURNS "text"
+    LANGUAGE "plpgsql" IMMUTABLE
+    SET "search_path" TO ''
+    AS $_$
+declare
+  v_requested_locale_base text;
+begin
+  perform public.api_assert(
+    p_locale is not null
+    and p_locale ~ '^[a-z]{2}(-[A-Z]{2})?$',
+    'FIT_CHECK_INVALID_LOCALE',
+    'Locale must be ISO 639-1 (e.g. en) or ISO 639-1 + "-" + ISO 3166-1 (e.g. en-NZ).',
+    '22023'
+  );
+
+  v_requested_locale_base := lower(coalesce(public.locale_base(p_locale), 'en'));
+
+  perform public.api_assert(
+    v_requested_locale_base ~ '^[a-z]{2}$',
+    'FIT_CHECK_INVALID_LOCALE',
+    'Locale base must be ISO 639-1 lowercase (e.g. en).',
+    '22023',
+    jsonb_build_object('locale_base', v_requested_locale_base)
+  );
+
+  return v_requested_locale_base;
+end;
+$_$;
+
+
+ALTER FUNCTION "public"."_fit_check_requested_locale_base"("p_locale" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_fit_check_resolved_locale_base"("p_requested_locale_base" "text") RETURNS "text"
+    LANGUAGE "sql" STABLE
+    SET "search_path" TO ''
+    AS $$
+  select case
+    when exists (
+      select 1
+      from public.fit_check_templates t
+      where t.locale_base = p_requested_locale_base
+    ) then p_requested_locale_base
+    else 'en'
+  end;
+$$;
+
+
+ALTER FUNCTION "public"."_fit_check_resolved_locale_base"("p_requested_locale_base" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_fit_check_review_summary_label"("p_briefing_payload" "jsonb", "p_requested_locale_base" "text") RETURNS "text"
+    LANGUAGE "plpgsql" STABLE
+    SET "search_path" TO ''
+    AS $$
+declare
+  v_watchouts jsonb := coalesce(p_briefing_payload -> 'watchouts', '[]'::jsonb);
+  v_has_distance_two boolean := false;
+begin
+  select exists (
+    select 1
+    from jsonb_array_elements(v_watchouts) elem
+    where (elem ->> 'distance')::integer = 2
+  )
+    into v_has_distance_two;
+
+  if jsonb_array_length(v_watchouts) = 0 then
+    return public._fit_check_template_value('fit_check.review.summary.aligned', p_requested_locale_base);
+  elsif v_has_distance_two then
+    return public._fit_check_template_value('fit_check.review.summary.high_risk', p_requested_locale_base);
+  end if;
+
+  return public._fit_check_template_value('fit_check.review.summary.discuss', p_requested_locale_base);
+end;
+$$;
+
+
+ALTER FUNCTION "public"."_fit_check_review_summary_label"("p_briefing_payload" "jsonb", "p_requested_locale_base" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_fit_check_share_token_ttl"() RETURNS interval
+    LANGUAGE "sql" IMMUTABLE
+    SET "search_path" TO ''
+    AS $$
+  select interval '30 days';
+$$;
+
+
+ALTER FUNCTION "public"."_fit_check_share_token_ttl"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_fit_check_submission_cap"() RETURNS integer
+    LANGUAGE "sql" IMMUTABLE
+    SET "search_path" TO ''
+    AS $$
+  select 20;
+$$;
+
+
+ALTER FUNCTION "public"."_fit_check_submission_cap"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_fit_check_summary_labels"("p_answers" "jsonb", "p_requested_locale_base" "text") RETURNS "jsonb"
+    LANGUAGE "sql" STABLE
+    SET "search_path" TO ''
+    AS $$
+  select jsonb_build_array(
+    public._fit_check_template_value(
+      'fit_check.scenario.fit_cleanliness.option.' || (p_answers ->> 'fit_cleanliness'),
+      p_requested_locale_base
+    ),
+    public._fit_check_template_value(
+      'fit_check.scenario.fit_rhythm.option.' || (p_answers ->> 'fit_rhythm'),
+      p_requested_locale_base
+    ),
+    public._fit_check_template_value(
+      'fit_check.scenario.fit_chores.option.' || (p_answers ->> 'fit_chores'),
+      p_requested_locale_base
+    ),
+    public._fit_check_template_value(
+      'fit_check.scenario.fit_conflict.option.' || (p_answers ->> 'fit_conflict'),
+      p_requested_locale_base
+    )
+  );
+$$;
+
+
+ALTER FUNCTION "public"."_fit_check_summary_labels"("p_answers" "jsonb", "p_requested_locale_base" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_fit_check_template_value"("p_template_key" "text", "p_requested_locale_base" "text") RETURNS "text"
+    LANGUAGE "plpgsql" STABLE
+    SET "search_path" TO ''
+    AS $$
+declare
+  v_template_value text;
+begin
+  select t.template_value
+    into v_template_value
+  from public.fit_check_templates t
+  where t.template_key = p_template_key
+    and t.locale_base = p_requested_locale_base
+  limit 1;
+
+  if v_template_value is null then
+    select t.template_value
+      into v_template_value
+    from public.fit_check_templates t
+    where t.template_key = p_template_key
+      and t.locale_base = 'en'
+    limit 1;
+  end if;
+
+  perform public.api_assert(
+    v_template_value is not null,
+    'FIT_CHECK_NOT_FOUND',
+    'Missing fit-check template.',
+    'P0001',
+    jsonb_build_object(
+      'template_key', p_template_key,
+      'requested_locale_base', p_requested_locale_base
+    )
+  );
+
+  return v_template_value;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."_fit_check_template_value"("p_template_key" "text", "p_requested_locale_base" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_fit_check_unclaimed_purge_ttl"() RETURNS interval
+    LANGUAGE "sql" IMMUTABLE
+    SET "search_path" TO ''
+    AS $$
+  select interval '90 days';
+$$;
+
+
+ALTER FUNCTION "public"."_fit_check_unclaimed_purge_ttl"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_fit_check_validate_answers"("p_answers" "jsonb") RETURNS "jsonb"
+    LANGUAGE "plpgsql" IMMUTABLE
+    SET "search_path" TO ''
+    AS $_$
+declare
+  v_answers jsonb := p_answers;
+  v_key text;
+  v_keys text[];
+begin
+  perform public.api_assert(
+    v_answers is not null
+    and jsonb_typeof(v_answers) = 'object',
+    'FIT_CHECK_INVALID_INPUTS',
+    'answers must be a JSON object.',
+    '22023'
+  );
+
+  perform public.api_assert(
+    pg_column_size(v_answers) <= 2048,
+    'FIT_CHECK_INVALID_INPUTS',
+    'answers payload too large.',
+    '22023'
+  );
+
+  v_keys := array(
+    select jsonb_object_keys(v_answers)
+    order by 1
+  );
+
+  perform public.api_assert(
+    v_keys = array['fit_chores', 'fit_cleanliness', 'fit_conflict', 'fit_rhythm'],
+    'FIT_CHECK_INVALID_INPUTS',
+    'answers must contain exactly fit_cleanliness, fit_rhythm, fit_chores, and fit_conflict.',
+    '22023',
+    jsonb_build_object('keys', coalesce(v_keys, array[]::text[]))
+  );
+
+  foreach v_key in array array['fit_cleanliness', 'fit_rhythm', 'fit_chores', 'fit_conflict']
+  loop
+    perform public.api_assert(
+      (v_answers ->> v_key) ~ '^[012]$',
+      'FIT_CHECK_INVALID_INPUTS',
+      'answer values must be integers 0..2.',
+      '22023',
+      jsonb_build_object('scenario_id', v_key, 'value', v_answers ->> v_key)
+    );
+  end loop;
+
+  return jsonb_build_object(
+    'fit_cleanliness', (v_answers ->> 'fit_cleanliness')::integer,
+    'fit_rhythm', (v_answers ->> 'fit_rhythm')::integer,
+    'fit_chores', (v_answers ->> 'fit_chores')::integer,
+    'fit_conflict', (v_answers ->> 'fit_conflict')::integer
+  );
+end;
+$_$;
+
+
+ALTER FUNCTION "public"."_fit_check_validate_answers"("p_answers" "jsonb") OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."_gen_invite_code"() RETURNS "public"."citext"
     LANGUAGE "plpgsql"
     SET "search_path" TO ''
@@ -6648,6 +7387,191 @@ COMMENT ON FUNCTION "public"."create_member_directory_note"("p_note_type" "text"
 
 
 
+CREATE OR REPLACE FUNCTION "public"."create_member_directory_note_v2"("p_note_type" "text", "p_label" "text" DEFAULT NULL::"text", "p_custom_title" "text" DEFAULT NULL::"text", "p_contact_name" "text" DEFAULT NULL::"text", "p_phone_number" "text" DEFAULT NULL::"text", "p_details" "text" DEFAULT NULL::"text", "p_reference_url" "text" DEFAULT NULL::"text", "p_photo_path" "text" DEFAULT NULL::"text") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $_$
+DECLARE
+  v_user uuid := auth.uid();
+  v_note_type text := lower(COALESCE(nullif(btrim(p_note_type), ''), ''));
+  v_label text := nullif(btrim(p_label), '');
+  v_custom_title text := nullif(btrim(p_custom_title), '');
+  v_contact_name text := nullif(btrim(p_contact_name), '');
+  v_phone_number text := nullif(btrim(p_phone_number), '');
+  v_details text := nullif(btrim(p_details), '');
+  v_reference_url text := nullif(btrim(p_reference_url), '');
+  v_photo_path text := nullif(btrim(p_photo_path), '');
+  v_active_other_count integer;
+  v_row public.member_directory_notes%ROWTYPE;
+BEGIN
+  PERFORM public._assert_authenticated();
+
+  PERFORM public.api_assert(
+    v_note_type IN ('emergency_contact', 'allergy', 'other'),
+    'MEMBER_DIRECTORY_INVALID_ENUM',
+    'note_type must be emergency_contact, allergy, or other.',
+    '22023'
+  );
+
+  PERFORM public.api_assert(
+    v_reference_url IS NULL
+    OR (
+      char_length(v_reference_url) <= 2048
+      AND v_reference_url ~* '^https?://'
+    ),
+    'MEMBER_DIRECTORY_INVALID_REFERENCE_URL',
+    'reference_url must be null or an http/https URL.',
+    '22023'
+  );
+
+  PERFORM public._member_directory_assert_valid_photo_path(v_user, v_photo_path);
+
+  IF v_note_type = 'allergy' THEN
+    PERFORM public.api_assert(
+      v_label IS NOT NULL,
+      'MEMBER_DIRECTORY_ALLERGY_LABEL_REQUIRED',
+      'label is required for allergy notes.',
+      '22023'
+    );
+  ELSE
+    PERFORM public.api_assert(
+      v_label IS NULL,
+      'MEMBER_DIRECTORY_ALLERGY_LABEL_FORBIDDEN',
+      'label is only allowed for allergy notes.',
+      '22023'
+    );
+  END IF;
+
+  IF v_note_type = 'other' THEN
+    PERFORM public.api_assert(
+      v_custom_title IS NOT NULL,
+      'MEMBER_DIRECTORY_OTHER_TITLE_REQUIRED',
+      'custom_title is required for other notes.',
+      '22023'
+    );
+  ELSE
+    PERFORM public.api_assert(
+      v_custom_title IS NULL,
+      'MEMBER_DIRECTORY_OTHER_TITLE_FORBIDDEN',
+      'custom_title is only allowed for other notes.',
+      '22023'
+    );
+  END IF;
+
+  IF v_note_type = 'emergency_contact' THEN
+    PERFORM public.api_assert(
+      v_contact_name IS NOT NULL AND v_phone_number IS NOT NULL,
+      'MEMBER_DIRECTORY_EMERGENCY_CONTACT_REQUIRED_FIELDS',
+      'contact_name and phone_number are required for emergency_contact notes.',
+      '22023'
+    );
+  ELSE
+    PERFORM public.api_assert(
+      v_contact_name IS NULL AND v_phone_number IS NULL,
+      'MEMBER_DIRECTORY_CONTACT_FIELDS_FORBIDDEN',
+      'contact_name and phone_number are only allowed for emergency_contact notes.',
+      '22023'
+    );
+  END IF;
+
+  PERFORM public.api_assert(
+    v_phone_number IS NULL
+    OR (
+      v_phone_number ~ '^[0-9+()\- ]{1,30}$'
+      AND v_phone_number ~ '[0-9]'
+    ),
+    'MEMBER_DIRECTORY_INVALID_PHONE_NUMBER',
+    'phone_number must use digits, spaces, plus, parentheses, or hyphen and contain at least one digit.',
+    '22023'
+  );
+
+  IF v_note_type = 'allergy' THEN
+    PERFORM public.api_assert(
+      v_details IS NULL,
+      'MEMBER_DIRECTORY_DETAILS_FORBIDDEN',
+      'details is not allowed for allergy notes.',
+      '22023'
+    );
+  END IF;
+
+  IF v_note_type = 'other' THEN
+    SELECT count(*)
+      INTO v_active_other_count
+    FROM public.member_directory_notes n
+    WHERE n.user_id = v_user
+      AND n.note_type = 'other'
+      AND n.archived_at IS NULL;
+
+    PERFORM public.api_assert(
+      v_active_other_count < 20,
+      'MEMBER_DIRECTORY_OTHER_NOTE_LIMIT_REACHED',
+      'At most 20 active other notes are allowed.',
+      '22023'
+    );
+  END IF;
+
+  INSERT INTO public.member_directory_notes (
+    user_id,
+    note_type,
+    label,
+    custom_title,
+    contact_name,
+    phone_number,
+    details,
+    reference_url,
+    photo_path
+  )
+  VALUES (
+    v_user,
+    v_note_type,
+    v_label,
+    v_custom_title,
+    v_contact_name,
+    v_phone_number,
+    v_details,
+    v_reference_url,
+    v_photo_path
+  )
+  RETURNING * INTO v_row;
+
+  RETURN jsonb_build_object(
+    'ok', true,
+    'note', jsonb_build_object(
+      'id', v_row.id,
+      'note_type', v_row.note_type,
+      'label', v_row.label,
+      'custom_title', v_row.custom_title,
+      'contact_name', v_row.contact_name,
+      'phone_number', v_row.phone_number,
+      'details', v_row.details,
+      'reference_url', v_row.reference_url,
+      'photo_path', v_row.photo_path,
+      'created_at', v_row.created_at,
+      'updated_at', v_row.updated_at
+    )
+  );
+
+EXCEPTION
+  WHEN unique_violation THEN
+    IF v_note_type = 'emergency_contact' THEN
+      PERFORM public.api_error(
+        'MEMBER_DIRECTORY_NOTE_TYPE_CONFLICT',
+        'An active emergency_contact note already exists.',
+        '23505'
+      );
+    END IF;
+    RAISE;
+END;
+$_$;
+
+
+ALTER FUNCTION "public"."create_member_directory_note_v2"("p_note_type" "text", "p_label" "text", "p_custom_title" "text", "p_contact_name" "text", "p_phone_number" "text", "p_details" "text", "p_reference_url" "text", "p_photo_path" "text") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."create_member_directory_note_v2"("p_note_type" "text", "p_label" "text", "p_custom_title" "text", "p_contact_name" "text", "p_phone_number" "text", "p_details" "text", "p_reference_url" "text", "p_photo_path" "text") IS 'Creates a new member-directory note for the authenticated user. v2 adds optional reference_url support while preserving v1 validation and note-type semantics.';
+
+
+
 CREATE OR REPLACE FUNCTION "public"."dismiss_home_directory_reminder"("p_home_id" "uuid", "p_reminder_id" "uuid") RETURNS "jsonb"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'pg_catalog', 'public'
@@ -10348,6 +11272,851 @@ $$;
 ALTER FUNCTION "public"."fail_complaint_rewrite_job"("p_job_id" "uuid", "p_error" "text") OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."fit_check_attach_draft_to_home"("p_draft_id" "uuid", "p_home_id" "uuid") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+declare
+  v_draft public.fit_check_drafts;
+begin
+  v_draft := public._fit_check_assert_owner(p_draft_id);
+
+  perform public._assert_home_active(p_home_id);
+
+  perform public.api_assert(
+    public.is_home_owner(p_home_id, auth.uid()),
+    'FORBIDDEN_OWNER_ONLY',
+    'Only the target home owner can attach this draft.',
+    '42501',
+    jsonb_build_object('home_id', p_home_id)
+  );
+
+  perform public.api_assert(
+    v_draft.claimed_at is not null,
+    'FIT_CHECK_INVALID_CLAIM_TOKEN',
+    'Draft must be claimed before it can be attached to a home.',
+    '42501',
+    jsonb_build_object('draft_id', p_draft_id)
+  );
+
+  perform public.api_assert(
+    not exists (
+      select 1
+      from public.fit_check_drafts d
+      where d.home_id = p_home_id
+        and d.id <> p_draft_id
+    ),
+    'FIT_CHECK_HOME_ATTACHMENT_CONFLICT',
+    'This home already has another fit-check draft attached.',
+    '23505',
+    jsonb_build_object('home_id', p_home_id)
+  );
+
+  update public.fit_check_drafts
+     set home_id = p_home_id,
+         home_attached_at = now(),
+         updated_at = now()
+   where id = p_draft_id
+   returning * into v_draft;
+
+  return jsonb_build_object(
+    'ok', true,
+    'draft_id', v_draft.id,
+    'home_id', v_draft.home_id,
+    'attached_at', v_draft.home_attached_at,
+    'setup_prefill_ready', true
+  );
+end;
+$$;
+
+
+ALTER FUNCTION "public"."fit_check_attach_draft_to_home"("p_draft_id" "uuid", "p_home_id" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."fit_check_claim_draft"("p_claim_token" "text") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+declare
+  v_draft public.fit_check_drafts;
+  v_owner_home_count integer := 0;
+  v_submission_count integer := 0;
+  v_claim_hash text;
+begin
+  perform public._assert_authenticated();
+
+  perform public.api_assert(
+    p_claim_token is not null and char_length(trim(p_claim_token)) between 8 and 128,
+    'FIT_CHECK_INVALID_CLAIM_TOKEN',
+    'Claim token is invalid.',
+    '22023'
+  );
+
+  v_claim_hash := public._sha256_hex(trim(p_claim_token));
+
+  update public.fit_check_drafts
+     set owner_user_id = auth.uid(),
+         claimed_at = now(),
+         claim_token_used_at = now(),
+         draft_session_token_hash = null,
+         updated_at = now()
+   where claim_token_hash = v_claim_hash
+     and claim_token_used_at is null
+     and created_at > now() - public._fit_check_claim_token_ttl()
+  returning * into v_draft;
+
+  perform public.api_assert(
+    v_draft.id is not null,
+    'FIT_CHECK_INVALID_OR_USED_CLAIM_TOKEN',
+    'Claim token is invalid or has already been used.',
+    '42501'
+  );
+
+  select count(*)
+    into v_owner_home_count
+  from public.memberships m
+  where m.user_id = auth.uid()
+    and m.role = 'owner'
+    and m.is_current = true;
+
+  select count(*)
+    into v_submission_count
+  from public.candidate_fit_submissions s
+  where s.draft_id = v_draft.id;
+
+  return jsonb_build_object(
+    'ok', true,
+    'draft_id', v_draft.id,
+    'owner_user_id', v_draft.owner_user_id,
+    'home_attachment_required', v_draft.home_id is null,
+    'owner_home_count', v_owner_home_count,
+    'seed_house_norms_prefill_available', true,
+    'seed_preferences_prefill_available', false,
+    'setup_handoff_recommended', true,
+    'submission_count', v_submission_count
+  );
+end;
+$$;
+
+
+ALTER FUNCTION "public"."fit_check_claim_draft"("p_claim_token" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."fit_check_cleanup_rate_limits"("p_older_than" interval DEFAULT '00:15:00'::interval) RETURNS integer
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+declare
+  v_deleted integer := 0;
+begin
+  with deleted_rows as (
+    delete from public.fit_check_rate_limits
+    where updated_at < now() - p_older_than
+    returning 1
+  )
+  select count(*) into v_deleted from deleted_rows;
+
+  return v_deleted;
+end;
+$$;
+
+
+ALTER FUNCTION "public"."fit_check_cleanup_rate_limits"("p_older_than" interval) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."fit_check_get_owner_briefing"("p_submission_id" "uuid", "p_locale" "text" DEFAULT 'en'::"text") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+declare
+  v_requested_locale_base text;
+  v_resolved_locale_base text;
+  v_submission public.candidate_fit_submissions;
+  v_draft public.fit_check_drafts;
+  v_briefing public.candidate_fit_briefings;
+begin
+  v_requested_locale_base := public._fit_check_requested_locale_base(p_locale);
+  v_resolved_locale_base := public._fit_check_resolved_locale_base(v_requested_locale_base);
+
+  select *
+    into v_submission
+  from public.candidate_fit_submissions s
+  where s.id = p_submission_id
+  limit 1;
+
+  perform public.api_assert(
+    v_submission.id is not null,
+    'FIT_CHECK_NOT_FOUND',
+    'Candidate fit-check submission not found.',
+    'P0001',
+    jsonb_build_object('submission_id', p_submission_id)
+  );
+
+  v_draft := public._fit_check_assert_owner(v_submission.draft_id);
+
+  select *
+    into v_briefing
+  from public.candidate_fit_briefings b
+  where b.submission_id = v_submission.id
+  limit 1;
+
+  perform public.api_assert(
+    v_briefing.id is not null,
+    'FIT_CHECK_NOT_FOUND',
+    'Candidate fit-check briefing not found.',
+    'P0001',
+    jsonb_build_object('submission_id', p_submission_id)
+  );
+
+  return jsonb_build_object(
+    'ok', true,
+    'submission_id', v_submission.id,
+    'draft_id', v_draft.id,
+    'requested_locale_base', v_requested_locale_base,
+    'resolved_locale_base', v_resolved_locale_base,
+    'candidate', jsonb_build_object(
+      'display_name', v_submission.display_name,
+      'submitted_at', v_submission.submitted_at,
+      'answers', v_submission.answers
+    ),
+    'briefing', v_briefing.briefing_payload
+  );
+end;
+$$;
+
+
+ALTER FUNCTION "public"."fit_check_get_owner_briefing"("p_submission_id" "uuid", "p_locale" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."fit_check_get_owner_review"("p_draft_id" "uuid", "p_locale" "text" DEFAULT 'en'::"text") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+declare
+  v_requested_locale_base text;
+  v_resolved_locale_base text;
+  v_draft public.fit_check_drafts;
+  v_share public.fit_check_share_tokens;
+  v_latest_share_status text := 'revoked';
+  v_latest_share_expires_at timestamptz := null;
+  v_submissions jsonb := '[]'::jsonb;
+  v_submission_count integer := 0;
+begin
+  v_requested_locale_base := public._fit_check_requested_locale_base(p_locale);
+  v_resolved_locale_base := public._fit_check_resolved_locale_base(v_requested_locale_base);
+  v_draft := public._fit_check_assert_owner(p_draft_id);
+  v_share := public._fit_check_get_active_share_token_for_draft(v_draft.id);
+
+  select count(*)
+    into v_submission_count
+  from public.candidate_fit_submissions s
+  where s.draft_id = v_draft.id;
+
+  select st.status, st.expires_at
+    into v_latest_share_status, v_latest_share_expires_at
+  from public.fit_check_share_tokens st
+  where st.draft_id = v_draft.id
+  order by st.created_at desc
+  limit 1;
+
+  select coalesce(jsonb_agg(
+    jsonb_build_object(
+      'submission_id', s.id,
+      'display_name', s.display_name,
+      'review_label', s.display_name || ' · ' || to_char(s.submitted_at at time zone 'utc', 'YYYY-MM-DD HH24:MI'),
+      'submitted_at', s.submitted_at,
+      'preview', jsonb_build_object(
+        'top_watchouts', coalesce(
+          (
+            select jsonb_agg(w.elem ->> 'scenario_id')
+            from (
+              select elem
+              from jsonb_array_elements(coalesce(b.briefing_payload -> 'watchouts', '[]'::jsonb)) with ordinality as e(elem, ordinality)
+              order by ordinality
+              limit 2
+            ) w
+          ),
+          '[]'::jsonb
+        ),
+        'summary_label', public._fit_check_review_summary_label(b.briefing_payload, v_requested_locale_base)
+      )
+    )
+    order by s.submitted_at desc
+  ), '[]'::jsonb)
+    into v_submissions
+  from public.candidate_fit_submissions s
+  join public.candidate_fit_briefings b
+    on b.submission_id = s.id
+  where s.draft_id = v_draft.id;
+
+  return jsonb_build_object(
+    'ok', true,
+    'draft_id', v_draft.id,
+    'home_id', v_draft.home_id,
+    'requested_locale_base', v_requested_locale_base,
+    'resolved_locale_base', v_resolved_locale_base,
+    'owner_summary', jsonb_build_object(
+      'labels', public._fit_check_summary_labels(v_draft.owner_answers, v_requested_locale_base)
+    ),
+    'share', jsonb_build_object(
+      'share_token_status', coalesce(v_share.status, v_latest_share_status, 'revoked'),
+      'share_url', null,
+      'link_reveal_requires_rotation', true,
+      'expires_at', case when v_share.id is null then v_latest_share_expires_at else v_share.expires_at end,
+      'submissions_remaining', greatest(public._fit_check_submission_cap() - v_submission_count, 0)
+    ),
+    'submissions', v_submissions
+  );
+end;
+$$;
+
+
+ALTER FUNCTION "public"."fit_check_get_owner_review"("p_draft_id" "uuid", "p_locale" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."fit_check_get_prefill_payload"("p_draft_id" "uuid") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+declare
+  v_draft public.fit_check_drafts;
+begin
+  v_draft := public._fit_check_assert_owner(p_draft_id);
+
+  return jsonb_build_object(
+    'ok', true,
+    'draft_id', v_draft.id,
+    'house_norms_prefill', public._fit_check_prefill_payload(v_draft.owner_answers),
+    'onboarding_seed', public._fit_check_onboarding_seed(v_draft.owner_answers),
+    'preference_flow_hints', jsonb_build_object(
+      'supported', false,
+      'answers', jsonb_build_object()
+    )
+  );
+end;
+$$;
+
+
+ALTER FUNCTION "public"."fit_check_get_prefill_payload"("p_draft_id" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."fit_check_get_public_by_token"("p_share_token" "text", "p_locale" "text" DEFAULT 'en'::"text") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+declare
+  v_requested_locale_base text;
+  v_resolved_locale_base text;
+  v_token_hash text;
+  v_share public.fit_check_share_tokens;
+  v_error_code text := null;
+  v_error_message text := null;
+  v_submission_count integer := 0;
+begin
+  v_requested_locale_base := public._fit_check_requested_locale_base(p_locale);
+  v_resolved_locale_base := public._fit_check_resolved_locale_base(v_requested_locale_base);
+
+  perform public.api_assert(
+    p_share_token is not null and char_length(trim(p_share_token)) between 8 and 128,
+    'FIT_CHECK_INVALID_TOKEN',
+    'Share token is invalid.',
+    '22023'
+  );
+
+  v_token_hash := public._sha256_hex(trim(p_share_token));
+  v_share := public._fit_check_get_effective_share_token_by_hash(v_token_hash);
+
+  if v_share.id is not null then
+    select count(*)
+      into v_submission_count
+    from public.candidate_fit_submissions s
+    where s.share_token_id = v_share.id;
+  end if;
+
+  if v_share.id is null then
+    v_error_code := 'FIT_CHECK_INVALID_TOKEN';
+    v_error_message := public._fit_check_template_value('fit_check.error.link_unavailable', v_requested_locale_base);
+  elsif v_share.status = 'expired' then
+    v_error_code := 'FIT_CHECK_TOKEN_EXPIRED';
+    v_error_message := public._fit_check_template_value('fit_check.error.link_expired', v_requested_locale_base);
+  elsif v_share.status = 'revoked' then
+    v_error_code := 'FIT_CHECK_TOKEN_REVOKED';
+    v_error_message := public._fit_check_template_value('fit_check.error.link_revoked', v_requested_locale_base);
+  elsif v_submission_count >= public._fit_check_submission_cap() then
+    v_error_code := 'FIT_CHECK_TOKEN_SUBMISSION_LIMIT_REACHED';
+    v_error_message := public._fit_check_template_value('fit_check.error.link_exhausted', v_requested_locale_base);
+  end if;
+
+  if v_error_code is not null then
+    return jsonb_build_object(
+      'ok', true,
+      'available', false,
+      'requested_locale_base', v_requested_locale_base,
+      'resolved_locale_base', v_resolved_locale_base,
+      'fit_check_public', null,
+      'error', jsonb_build_object(
+        'code', v_error_code,
+        'message', v_error_message
+      )
+    );
+  end if;
+
+  return jsonb_build_object(
+    'ok', true,
+    'available', true,
+    'requested_locale_base', v_requested_locale_base,
+    'resolved_locale_base', v_resolved_locale_base,
+    'token_status', v_share.status,
+    'fit_check_public', jsonb_build_object(
+      'entry_prompt_key', 'fit_check.candidate.entry_prompt',
+      'scenarios', jsonb_build_array(
+        jsonb_build_object(
+          'scenario_id', 'fit_cleanliness',
+          'prompt_key', 'fit_check.scenario.fit_cleanliness.prompt',
+          'option_keys', jsonb_build_array(
+            'fit_check.scenario.fit_cleanliness.option.0',
+            'fit_check.scenario.fit_cleanliness.option.1',
+            'fit_check.scenario.fit_cleanliness.option.2'
+          )
+        ),
+        jsonb_build_object(
+          'scenario_id', 'fit_rhythm',
+          'prompt_key', 'fit_check.scenario.fit_rhythm.prompt',
+          'option_keys', jsonb_build_array(
+            'fit_check.scenario.fit_rhythm.option.0',
+            'fit_check.scenario.fit_rhythm.option.1',
+            'fit_check.scenario.fit_rhythm.option.2'
+          )
+        ),
+        jsonb_build_object(
+          'scenario_id', 'fit_chores',
+          'prompt_key', 'fit_check.scenario.fit_chores.prompt',
+          'option_keys', jsonb_build_array(
+            'fit_check.scenario.fit_chores.option.0',
+            'fit_check.scenario.fit_chores.option.1',
+            'fit_check.scenario.fit_chores.option.2'
+          )
+        ),
+        jsonb_build_object(
+          'scenario_id', 'fit_conflict',
+          'prompt_key', 'fit_check.scenario.fit_conflict.prompt',
+          'option_keys', jsonb_build_array(
+            'fit_check.scenario.fit_conflict.option.0',
+            'fit_check.scenario.fit_conflict.option.1',
+            'fit_check.scenario.fit_conflict.option.2'
+          )
+        )
+      )
+    )
+  );
+end;
+$$;
+
+
+ALTER FUNCTION "public"."fit_check_get_public_by_token"("p_share_token" "text", "p_locale" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."fit_check_revoke_share_token"("p_draft_id" "uuid") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+declare
+  v_draft public.fit_check_drafts;
+begin
+  v_draft := public._fit_check_assert_owner(p_draft_id);
+
+  update public.fit_check_share_tokens
+     set status = 'revoked',
+         revoked_at = now()
+   where draft_id = v_draft.id
+     and status = 'active';
+
+  return jsonb_build_object(
+    'ok', true,
+    'draft_id', v_draft.id,
+    'share_token_status', 'revoked'
+  );
+end;
+$$;
+
+
+ALTER FUNCTION "public"."fit_check_revoke_share_token"("p_draft_id" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."fit_check_rotate_share_token"("p_draft_id" "uuid") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+declare
+  v_draft public.fit_check_drafts;
+  v_share public.fit_check_share_tokens;
+  v_new_share_token text;
+begin
+  v_draft := public._fit_check_assert_owner(p_draft_id);
+
+  update public.fit_check_share_tokens
+     set status = case when status = 'active' then 'revoked' else status end,
+         revoked_at = case when status = 'active' then now() else revoked_at end
+   where draft_id = v_draft.id
+     and status = 'active';
+
+  v_new_share_token := public._fit_check_generate_token('fitshare');
+
+  insert into public.fit_check_share_tokens (
+    draft_id,
+    token_hash,
+    status,
+    expires_at
+  )
+  values (
+    v_draft.id,
+    public._sha256_hex(v_new_share_token),
+    'active',
+    now() + public._fit_check_share_token_ttl()
+  )
+  returning * into v_share;
+
+  return jsonb_build_object(
+    'ok', true,
+    'draft_id', v_draft.id,
+    'share_token_status', v_share.status,
+    'share_token', v_new_share_token,
+    'share_url', public._fit_check_build_share_url(v_new_share_token),
+    'expires_at', v_share.expires_at
+  );
+end;
+$$;
+
+
+ALTER FUNCTION "public"."fit_check_rotate_share_token"("p_draft_id" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."fit_check_submit_candidate_by_token"("p_share_token" "text", "p_locale" "text" DEFAULT 'en'::"text", "p_display_name" "text" DEFAULT NULL::"text", "p_answers" "jsonb" DEFAULT '{}'::"jsonb") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+declare
+  v_requested_locale_base text;
+  v_resolved_locale_base text;
+  v_answers jsonb;
+  v_share public.fit_check_share_tokens;
+  v_draft public.fit_check_drafts;
+  v_submission public.candidate_fit_submissions;
+  v_briefing_payload jsonb;
+  v_session_hash text;
+  v_display_name text := trim(coalesce(p_display_name, ''));
+  v_submission_count integer;
+  v_token_hash text;
+  v_bucket_minute timestamptz := date_trunc('minute', now());
+begin
+  v_requested_locale_base := public._fit_check_requested_locale_base(p_locale);
+  v_resolved_locale_base := public._fit_check_resolved_locale_base(v_requested_locale_base);
+  v_answers := public._fit_check_validate_answers(p_answers);
+
+  perform public.api_assert(
+    v_display_name <> '' and char_length(v_display_name) <= 80,
+    'FIT_CHECK_INVALID_INPUTS',
+    'display_name is required.',
+    '22023'
+  );
+
+  perform public.api_assert(
+    p_share_token is not null and char_length(trim(p_share_token)) between 8 and 128,
+    'FIT_CHECK_INVALID_TOKEN',
+    'Share token is invalid.',
+    '22023'
+  );
+
+  v_token_hash := public._sha256_hex(trim(p_share_token));
+
+  select *
+    into v_share
+  from public.fit_check_share_tokens st
+  where st.token_hash = v_token_hash
+  for update;
+
+  perform public.api_assert(
+    v_share.id is not null,
+    'FIT_CHECK_INVALID_TOKEN',
+    'Share token is invalid.',
+    '42501'
+  );
+
+  if v_share.status = 'active' and v_share.expires_at <= now() then
+    update public.fit_check_share_tokens
+       set status = 'expired'
+     where id = v_share.id
+     returning * into v_share;
+  end if;
+
+  perform public.api_assert(
+    v_share.status <> 'expired',
+    'FIT_CHECK_TOKEN_EXPIRED',
+    'Share token has expired.',
+    '42501'
+  );
+
+  perform public.api_assert(
+    v_share.status <> 'revoked',
+    'FIT_CHECK_TOKEN_REVOKED',
+    'Share token has been revoked.',
+    '42501'
+  );
+
+  v_session_hash := public._fit_check_anonymous_session_hash();
+
+  perform public.api_assert(
+    public._fit_check_rate_limit_bucketed('fit_check:token:' || v_share.token_hash, v_bucket_minute, 30),
+    'FIT_CHECK_RATE_LIMITED',
+    'Too many submissions for this link. Please try again shortly.',
+    '42901'
+  );
+
+  perform public.api_assert(
+    public._fit_check_rate_limit_bucketed('fit_check:session:' || v_session_hash, v_bucket_minute, 5),
+    'FIT_CHECK_RATE_LIMITED',
+    'Too many submissions from this session. Please try again shortly.',
+    '42901'
+  );
+
+  select *
+    into v_draft
+  from public.fit_check_drafts d
+  where d.id = v_share.draft_id
+  limit 1;
+
+  select count(*)
+    into v_submission_count
+  from public.candidate_fit_submissions s
+  where s.share_token_id = v_share.id;
+
+  perform public.api_assert(
+    v_submission_count < public._fit_check_submission_cap(),
+    'FIT_CHECK_TOKEN_SUBMISSION_LIMIT_REACHED',
+    'This link is no longer accepting submissions.',
+    '42501',
+    jsonb_build_object('submission_cap', public._fit_check_submission_cap())
+  );
+
+  begin
+    insert into public.candidate_fit_submissions (
+      draft_id,
+      share_token_id,
+      display_name,
+      answers,
+      anonymous_session_hash
+    )
+    values (
+      v_draft.id,
+      v_share.id,
+      v_display_name,
+      v_answers,
+      v_session_hash
+    )
+    returning * into v_submission;
+  exception when unique_violation then
+    perform public.api_error(
+      'FIT_CHECK_DUPLICATE_SUBMISSION',
+      'This anonymous session has already submitted for this link.',
+      '23505'
+    );
+  end;
+
+  v_briefing_payload := public._fit_check_generate_briefing_payload(v_draft.owner_answers, v_answers);
+
+  insert into public.candidate_fit_briefings (
+    submission_id,
+    draft_id,
+    owner_answers_snapshot,
+    briefing_payload
+  )
+  values (
+    v_submission.id,
+    v_draft.id,
+    v_draft.owner_answers,
+    v_briefing_payload
+  );
+
+  return jsonb_build_object(
+    'ok', true,
+    'submission_id', v_submission.id,
+    'requested_locale_base', v_requested_locale_base,
+    'resolved_locale_base', v_resolved_locale_base,
+    'candidate', jsonb_build_object(
+      'display_name', v_submission.display_name
+    ),
+    'confirmation', jsonb_build_object(
+      'message_key', 'fit_check.candidate.submitted',
+      'reflection', jsonb_build_object(
+        'show', true,
+        'text_key', public._fit_check_reflection_key(v_answers)
+      ),
+      'cta', jsonb_build_object(
+        'text_key', 'fit_check.candidate.create_own_cta',
+        'target_url', public._fit_check_candidate_cta_url()
+      )
+    )
+  );
+end;
+$$;
+
+
+ALTER FUNCTION "public"."fit_check_submit_candidate_by_token"("p_share_token" "text", "p_locale" "text", "p_display_name" "text", "p_answers" "jsonb") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."fit_check_upsert_draft"("p_draft_id" "uuid" DEFAULT NULL::"uuid", "p_draft_session_token" "text" DEFAULT NULL::"text", "p_locale" "text" DEFAULT 'en'::"text", "p_answers" "jsonb" DEFAULT '{}'::"jsonb") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+declare
+  v_requested_locale_base text;
+  v_resolved_locale_base text;
+  v_answers jsonb;
+  v_draft public.fit_check_drafts;
+  v_share public.fit_check_share_tokens;
+  v_share_token text := null;
+  v_claim_token text := null;
+  v_draft_session_token text := null;
+  v_is_new boolean := false;
+  v_share_json jsonb;
+  v_draft_session_json jsonb;
+  v_claim_json jsonb;
+begin
+  v_requested_locale_base := public._fit_check_requested_locale_base(p_locale);
+  v_resolved_locale_base := public._fit_check_resolved_locale_base(v_requested_locale_base);
+  v_answers := public._fit_check_validate_answers(p_answers);
+
+  perform public._fit_check_purge_unclaimed_drafts();
+
+  if p_draft_id is null then
+    v_is_new := true;
+    v_claim_token := public._fit_check_generate_token('fitclaim');
+    v_draft_session_token := public._fit_check_generate_token('fitdraft');
+
+    insert into public.fit_check_drafts (
+      owner_answers,
+      draft_session_token_hash,
+      claim_token_hash,
+      requested_locale_base
+    )
+    values (
+      v_answers,
+      public._sha256_hex(v_draft_session_token),
+      public._sha256_hex(v_claim_token),
+      v_requested_locale_base
+    )
+    returning * into v_draft;
+
+    v_share_token := public._fit_check_generate_token('fitshare');
+
+    insert into public.fit_check_share_tokens (
+      draft_id,
+      token_hash,
+      status,
+      expires_at
+    )
+    values (
+      v_draft.id,
+      public._sha256_hex(v_share_token),
+      'active',
+      now() + public._fit_check_share_token_ttl()
+    )
+    returning * into v_share;
+  else
+    select *
+      into v_draft
+    from public.fit_check_drafts d
+    where d.id = p_draft_id
+    limit 1;
+
+    perform public.api_assert(
+      v_draft.id is not null,
+      'FIT_CHECK_NOT_FOUND',
+      'Flatmate fit-check draft not found.',
+      'P0001',
+      jsonb_build_object('draft_id', p_draft_id)
+    );
+
+    perform public.api_assert(
+      v_draft.claimed_at is null
+      and v_draft.draft_session_token_hash is not null
+      and p_draft_session_token is not null
+      and public._sha256_hex(trim(p_draft_session_token)) = v_draft.draft_session_token_hash,
+      'FIT_CHECK_INVALID_DRAFT_SESSION',
+      'Draft session token is missing, invalid, or expired.',
+      '42501',
+      jsonb_build_object('draft_id', p_draft_id)
+    );
+
+    update public.fit_check_drafts
+       set owner_answers = v_answers,
+           requested_locale_base = v_requested_locale_base,
+           updated_at = now()
+     where id = v_draft.id
+     returning * into v_draft;
+
+    v_share := public._fit_check_get_active_share_token_for_draft(v_draft.id);
+  end if;
+
+  v_share_json := jsonb_build_object(
+    'expires_at', v_share.expires_at
+  );
+
+  if v_is_new then
+    v_share_json := v_share_json || jsonb_build_object(
+      'share_token', v_share_token,
+      'share_url', public._fit_check_build_share_url(v_share_token),
+      'reveal_once', true
+    );
+
+    v_draft_session_json := jsonb_build_object(
+      'resume_available', true,
+      'draft_session_token', v_draft_session_token,
+      'reveal_once', true
+    );
+
+    v_claim_json := jsonb_build_object(
+      'claim_required', true,
+      'claim_token', v_claim_token,
+      'continue_in_app_url', public._fit_check_build_continue_in_app_url(v_claim_token),
+      'reveal_once', true
+    );
+  else
+    v_share_json := v_share_json || jsonb_build_object(
+      'reveal_once', false
+    );
+
+    v_draft_session_json := jsonb_build_object(
+      'resume_available', true,
+      'reveal_once', false
+    );
+
+    v_claim_json := jsonb_build_object(
+      'claim_required', true,
+      'reveal_once', false
+    );
+  end if;
+
+  return jsonb_build_object(
+    'ok', true,
+    'draft_id', v_draft.id,
+    'requested_locale_base', v_requested_locale_base,
+    'resolved_locale_base', v_resolved_locale_base,
+    'owner_answers', v_answers,
+    'summary', jsonb_build_object(
+      'labels', public._fit_check_summary_labels(v_answers, v_requested_locale_base)
+    ),
+    'share', v_share_json,
+    'draft_session', v_draft_session_json,
+    'claim', v_claim_json
+  );
+end;
+$$;
+
+
+ALTER FUNCTION "public"."fit_check_upsert_draft"("p_draft_id" "uuid", "p_draft_session_token" "text", "p_locale" "text", "p_answers" "jsonb") OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."get_home_directory_content"("p_home_id" "uuid") RETURNS "jsonb"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO ''
@@ -10695,6 +12464,7 @@ BEGIN
                'contact_name', n.contact_name,
                'phone_number', n.phone_number,
                'details', n.details,
+               'reference_url', n.reference_url,
                'photo_path', n.photo_path,
                'created_at', n.created_at,
                'updated_at', n.updated_at
@@ -10734,7 +12504,7 @@ $$;
 ALTER FUNCTION "public"."get_member_directory_notes"("p_target_user_id" "uuid") OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "public"."get_member_directory_notes"("p_target_user_id" "uuid") IS 'Returns active member-directory notes for the target user when the caller is the same user or shares the same active home. Client owns localization for note_type labels.';
+COMMENT ON FUNCTION "public"."get_member_directory_notes"("p_target_user_id" "uuid") IS 'Returns active member-directory notes for the target user when the caller is the same user or shares the same active home. Includes reference_url and photo_path when present. Client owns localization for note_type labels.';
 
 
 
@@ -19847,6 +21617,169 @@ COMMENT ON FUNCTION "public"."update_member_directory_note"("p_note_id" "uuid", 
 
 
 
+CREATE OR REPLACE FUNCTION "public"."update_member_directory_note_v2"("p_note_id" "uuid", "p_label" "text" DEFAULT NULL::"text", "p_custom_title" "text" DEFAULT NULL::"text", "p_contact_name" "text" DEFAULT NULL::"text", "p_phone_number" "text" DEFAULT NULL::"text", "p_details" "text" DEFAULT NULL::"text", "p_reference_url" "text" DEFAULT NULL::"text", "p_photo_path" "text" DEFAULT NULL::"text") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $_$
+DECLARE
+  v_user uuid := auth.uid();
+  v_label text := nullif(btrim(p_label), '');
+  v_custom_title text := nullif(btrim(p_custom_title), '');
+  v_contact_name text := nullif(btrim(p_contact_name), '');
+  v_phone_number text := nullif(btrim(p_phone_number), '');
+  v_details text := nullif(btrim(p_details), '');
+  v_reference_url text := nullif(btrim(p_reference_url), '');
+  v_photo_path text := nullif(btrim(p_photo_path), '');
+  v_existing public.member_directory_notes%ROWTYPE;
+  v_row public.member_directory_notes%ROWTYPE;
+BEGIN
+  PERFORM public._assert_authenticated();
+
+  PERFORM public.api_assert(
+    p_note_id IS NOT NULL,
+    'MEMBER_DIRECTORY_INVALID_INPUT',
+    'note_id is required.',
+    '22023'
+  );
+
+  SELECT *
+    INTO v_existing
+  FROM public.member_directory_notes n
+  WHERE n.id = p_note_id
+    AND n.user_id = v_user
+    AND n.archived_at IS NULL
+  FOR UPDATE;
+
+  IF NOT FOUND THEN
+    PERFORM public.api_error(
+      'MEMBER_DIRECTORY_NOTE_NOT_FOUND',
+      'Member directory note was not found.',
+      'P0002',
+      jsonb_build_object('note_id', p_note_id)
+    );
+  END IF;
+
+  PERFORM public.api_assert(
+    v_reference_url IS NULL
+    OR (
+      char_length(v_reference_url) <= 2048
+      AND v_reference_url ~* '^https?://'
+    ),
+    'MEMBER_DIRECTORY_INVALID_REFERENCE_URL',
+    'reference_url must be null or an http/https URL.',
+    '22023'
+  );
+
+  PERFORM public._member_directory_assert_valid_photo_path(v_user, v_photo_path);
+
+  IF v_existing.note_type = 'allergy' THEN
+    PERFORM public.api_assert(
+      v_label IS NOT NULL,
+      'MEMBER_DIRECTORY_ALLERGY_LABEL_REQUIRED',
+      'label is required for allergy notes.',
+      '22023'
+    );
+  ELSE
+    PERFORM public.api_assert(
+      v_label IS NULL,
+      'MEMBER_DIRECTORY_ALLERGY_LABEL_FORBIDDEN',
+      'label is only allowed for allergy notes.',
+      '22023'
+    );
+  END IF;
+
+  IF v_existing.note_type = 'other' THEN
+    PERFORM public.api_assert(
+      v_custom_title IS NOT NULL,
+      'MEMBER_DIRECTORY_OTHER_TITLE_REQUIRED',
+      'custom_title is required for other notes.',
+      '22023'
+    );
+  ELSE
+    PERFORM public.api_assert(
+      v_custom_title IS NULL,
+      'MEMBER_DIRECTORY_OTHER_TITLE_FORBIDDEN',
+      'custom_title is only allowed for other notes.',
+      '22023'
+    );
+  END IF;
+
+  IF v_existing.note_type = 'emergency_contact' THEN
+    PERFORM public.api_assert(
+      v_contact_name IS NOT NULL AND v_phone_number IS NOT NULL,
+      'MEMBER_DIRECTORY_EMERGENCY_CONTACT_REQUIRED_FIELDS',
+      'contact_name and phone_number are required for emergency_contact notes.',
+      '22023'
+    );
+  ELSE
+    PERFORM public.api_assert(
+      v_contact_name IS NULL AND v_phone_number IS NULL,
+      'MEMBER_DIRECTORY_CONTACT_FIELDS_FORBIDDEN',
+      'contact_name and phone_number are only allowed for emergency_contact notes.',
+      '22023'
+    );
+  END IF;
+
+  PERFORM public.api_assert(
+    v_phone_number IS NULL
+    OR (
+      v_phone_number ~ '^[0-9+()\- ]{1,30}$'
+      AND v_phone_number ~ '[0-9]'
+    ),
+    'MEMBER_DIRECTORY_INVALID_PHONE_NUMBER',
+    'phone_number must use digits, spaces, plus, parentheses, or hyphen and contain at least one digit.',
+    '22023'
+  );
+
+  IF v_existing.note_type = 'allergy' THEN
+    PERFORM public.api_assert(
+      v_details IS NULL,
+      'MEMBER_DIRECTORY_DETAILS_FORBIDDEN',
+      'details is not allowed for allergy notes.',
+      '22023'
+    );
+  END IF;
+
+  UPDATE public.member_directory_notes n
+     SET label = v_label,
+         custom_title = v_custom_title,
+         contact_name = v_contact_name,
+         phone_number = v_phone_number,
+         details = v_details,
+         reference_url = v_reference_url,
+         photo_path = v_photo_path
+   WHERE n.id = p_note_id
+     AND n.user_id = v_user
+     AND n.archived_at IS NULL
+  RETURNING * INTO v_row;
+
+  RETURN jsonb_build_object(
+    'ok', true,
+    'note', jsonb_build_object(
+      'id', v_row.id,
+      'note_type', v_row.note_type,
+      'label', v_row.label,
+      'custom_title', v_row.custom_title,
+      'contact_name', v_row.contact_name,
+      'phone_number', v_row.phone_number,
+      'details', v_row.details,
+      'reference_url', v_row.reference_url,
+      'photo_path', v_row.photo_path,
+      'created_at', v_row.created_at,
+      'updated_at', v_row.updated_at
+    )
+  );
+END;
+$_$;
+
+
+ALTER FUNCTION "public"."update_member_directory_note_v2"("p_note_id" "uuid", "p_label" "text", "p_custom_title" "text", "p_contact_name" "text", "p_phone_number" "text", "p_details" "text", "p_reference_url" "text", "p_photo_path" "text") OWNER TO "postgres";
+
+
+COMMENT ON FUNCTION "public"."update_member_directory_note_v2"("p_note_id" "uuid", "p_label" "text", "p_custom_title" "text", "p_contact_name" "text", "p_phone_number" "text", "p_details" "text", "p_reference_url" "text", "p_photo_path" "text") IS 'Updates an existing active member-directory note owned by the authenticated user. v2 adds optional reference_url support while preserving v1 validation and immutable note_type semantics.';
+
+
+
 CREATE OR REPLACE FUNCTION "public"."upsert_home_directory_note"("p_home_id" "uuid", "p_note_id" "uuid" DEFAULT NULL::"uuid", "p_title" "text" DEFAULT NULL::"text", "p_details" "text" DEFAULT NULL::"text", "p_note_type" "text" DEFAULT 'general'::"text", "p_reference_url" "text" DEFAULT NULL::"text", "p_photo_path" "text" DEFAULT NULL::"text") RETURNS "jsonb"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO ''
@@ -20710,6 +22643,46 @@ COMMENT ON CONSTRAINT "avatars_category_check" ON "public"."avatars" IS 'Restric
 
 
 
+CREATE TABLE IF NOT EXISTS "public"."candidate_fit_briefings" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "submission_id" "uuid" NOT NULL,
+    "draft_id" "uuid" NOT NULL,
+    "owner_answers_snapshot" "jsonb" NOT NULL,
+    "briefing_payload" "jsonb" NOT NULL,
+    "generated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "candidate_fit_briefings_briefing_payload_object_check" CHECK (("jsonb_typeof"("briefing_payload") = 'object'::"text")),
+    CONSTRAINT "candidate_fit_briefings_owner_answers_snapshot_object_check" CHECK (("jsonb_typeof"("owner_answers_snapshot") = 'object'::"text"))
+);
+
+
+ALTER TABLE "public"."candidate_fit_briefings" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."candidate_fit_briefings" IS 'Frozen owner-facing briefings generated from candidate submissions.';
+
+
+
+CREATE TABLE IF NOT EXISTS "public"."candidate_fit_submissions" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "draft_id" "uuid" NOT NULL,
+    "share_token_id" "uuid" NOT NULL,
+    "display_name" "text" NOT NULL,
+    "answers" "jsonb" NOT NULL,
+    "anonymous_session_hash" "text" NOT NULL,
+    "submitted_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "candidate_fit_submissions_anonymous_session_hash_check" CHECK (("char_length"("anonymous_session_hash") = 64)),
+    CONSTRAINT "candidate_fit_submissions_answers_object_check" CHECK (("jsonb_typeof"("answers") = 'object'::"text")),
+    CONSTRAINT "candidate_fit_submissions_display_name_check" CHECK ((("char_length"(TRIM(BOTH FROM "display_name")) >= 1) AND ("char_length"(TRIM(BOTH FROM "display_name")) <= 80)))
+);
+
+
+ALTER TABLE "public"."candidate_fit_submissions" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."candidate_fit_submissions" IS 'Anonymous candidate scenario submissions keyed by share token + opaque session.';
+
+
+
 CREATE TABLE IF NOT EXISTS "public"."chore_events" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "chore_id" "uuid" NOT NULL,
@@ -20886,6 +22859,41 @@ COMMENT ON COLUMN "public"."expense_splits"."marked_paid_at" IS 'Timestamp when 
 
 
 COMMENT ON COLUMN "public"."expense_splits"."recipient_viewed_at" IS 'When the expense creator viewed this paid split (NULL = unseen).';
+
+
+
+CREATE TABLE IF NOT EXISTS "public"."fit_check_rate_limits" (
+    "k" "text" NOT NULL,
+    "bucket_at" timestamp with time zone NOT NULL,
+    "n" integer DEFAULT 0 NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "fit_check_rate_limits_n_check" CHECK (("n" >= 0))
+);
+
+
+ALTER TABLE "public"."fit_check_rate_limits" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."fit_check_rate_limits" IS 'Short-lived anti-abuse buckets; cleaned by scheduled job.';
+
+
+
+CREATE TABLE IF NOT EXISTS "public"."fit_check_templates" (
+    "template_key" "text" NOT NULL,
+    "locale_base" "text" NOT NULL,
+    "template_value" "text" NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "fit_check_templates_locale_base_check" CHECK (("locale_base" ~ '^[a-z]{2}$'::"text")),
+    CONSTRAINT "fit_check_templates_template_key_check" CHECK (("template_key" ~ '^[a-z0-9._-]{1,160}$'::"text")),
+    CONSTRAINT "fit_check_templates_template_value_check" CHECK ((("char_length"(TRIM(BOTH FROM "template_value")) >= 1) AND ("char_length"(TRIM(BOTH FROM "template_value")) <= 1000)))
+);
+
+
+ALTER TABLE "public"."fit_check_templates" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."fit_check_templates" IS 'Locale-backed template catalog for fit-check summaries, watchouts, and prompts.';
 
 
 
@@ -21614,13 +23622,15 @@ CREATE TABLE IF NOT EXISTS "public"."member_directory_notes" (
     "archived_at" timestamp with time zone,
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "reference_url" "text",
     CONSTRAINT "member_directory_notes_details_check" CHECK (((("note_type" = 'emergency_contact'::"text") AND (("details" IS NULL) OR ("char_length"("btrim"("details")) <= 2000))) OR (("note_type" = 'allergy'::"text") AND ("details" IS NULL)) OR (("note_type" = 'other'::"text") AND (("details" IS NULL) OR (("char_length"("btrim"("details")) >= 1) AND ("char_length"("btrim"("details")) <= 2000)))))),
     CONSTRAINT "member_directory_notes_emergency_fields_check" CHECK (((("note_type" = 'emergency_contact'::"text") AND (("char_length"("btrim"(COALESCE("contact_name", ''::"text"))) >= 1) AND ("char_length"("btrim"(COALESCE("contact_name", ''::"text"))) <= 120)) AND (("char_length"("btrim"(COALESCE("phone_number", ''::"text"))) >= 1) AND ("char_length"("btrim"(COALESCE("phone_number", ''::"text"))) <= 30))) OR (("note_type" <> 'emergency_contact'::"text") AND ("contact_name" IS NULL) AND ("phone_number" IS NULL)))),
     CONSTRAINT "member_directory_notes_label_check" CHECK (((("note_type" = 'allergy'::"text") AND (("char_length"("btrim"(COALESCE("label", ''::"text"))) >= 1) AND ("char_length"("btrim"(COALESCE("label", ''::"text"))) <= 120))) OR (("note_type" <> 'allergy'::"text") AND ("label" IS NULL)))),
     CONSTRAINT "member_directory_notes_note_type_check" CHECK (("note_type" = ANY (ARRAY['emergency_contact'::"text", 'allergy'::"text", 'other'::"text"]))),
     CONSTRAINT "member_directory_notes_other_title_check" CHECK (((("note_type" = 'other'::"text") AND (("char_length"("btrim"(COALESCE("custom_title", ''::"text"))) >= 1) AND ("char_length"("btrim"(COALESCE("custom_title", ''::"text"))) <= 80))) OR (("note_type" <> 'other'::"text") AND ("custom_title" IS NULL)))),
     CONSTRAINT "member_directory_notes_phone_number_format_check" CHECK ((("phone_number" IS NULL) OR (("phone_number" ~ '^[0-9+()\- ]{1,30}$'::"text") AND ("phone_number" ~ '[0-9]'::"text")))),
-    CONSTRAINT "member_directory_notes_photo_path_check" CHECK ((("photo_path" IS NULL) OR ("char_length"("photo_path") <= 512)))
+    CONSTRAINT "member_directory_notes_photo_path_check" CHECK ((("photo_path" IS NULL) OR ("char_length"("photo_path") <= 512))),
+    CONSTRAINT "member_directory_notes_reference_url_check" CHECK ((("reference_url" IS NULL) OR (("char_length"("reference_url") <= 2048) AND ("reference_url" ~* '^https?://'::"text"))))
 );
 
 
@@ -21660,6 +23670,10 @@ COMMENT ON COLUMN "public"."member_directory_notes"."photo_path" IS 'Optional an
 
 
 COMMENT ON COLUMN "public"."member_directory_notes"."archived_at" IS 'Soft-delete timestamp. Active reads exclude archived rows. Hard delete is forbidden by trigger.';
+
+
+
+COMMENT ON COLUMN "public"."member_directory_notes"."reference_url" IS 'Optional http/https URL attached to a member-directory note for supporting context or follow-up.';
 
 
 
@@ -22674,6 +24688,21 @@ ALTER TABLE ONLY "public"."avatars"
 
 
 
+ALTER TABLE ONLY "public"."candidate_fit_briefings"
+    ADD CONSTRAINT "candidate_fit_briefings_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."candidate_fit_briefings"
+    ADD CONSTRAINT "candidate_fit_briefings_submission_id_key" UNIQUE ("submission_id");
+
+
+
+ALTER TABLE ONLY "public"."candidate_fit_submissions"
+    ADD CONSTRAINT "candidate_fit_submissions_pkey" PRIMARY KEY ("id");
+
+
+
 ALTER TABLE ONLY "public"."chore_events"
     ADD CONSTRAINT "chore_events_pkey" PRIMARY KEY ("id");
 
@@ -22711,6 +24740,26 @@ ALTER TABLE ONLY "public"."expense_plans"
 
 ALTER TABLE ONLY "public"."expenses"
     ADD CONSTRAINT "expenses_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."fit_check_drafts"
+    ADD CONSTRAINT "fit_check_drafts_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."fit_check_rate_limits"
+    ADD CONSTRAINT "fit_check_rate_limits_pkey" PRIMARY KEY ("k");
+
+
+
+ALTER TABLE ONLY "public"."fit_check_share_tokens"
+    ADD CONSTRAINT "fit_check_share_tokens_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."fit_check_templates"
+    ADD CONSTRAINT "fit_check_templates_pkey" PRIMARY KEY ("template_key", "locale_base");
 
 
 
@@ -23223,6 +25272,14 @@ CREATE INDEX "idx_analytics_events_user_event_time" ON "public"."analytics_event
 
 
 
+CREATE INDEX "idx_candidate_fit_briefings_draft_generated_at" ON "public"."candidate_fit_briefings" USING "btree" ("draft_id", "generated_at" DESC);
+
+
+
+CREATE INDEX "idx_candidate_fit_submissions_draft_submitted_at" ON "public"."candidate_fit_submissions" USING "btree" ("draft_id", "submitted_at" DESC);
+
+
+
 CREATE INDEX "idx_chore_events_chore" ON "public"."chore_events" USING "btree" ("chore_id", "occurred_at" DESC);
 
 
@@ -23292,6 +25349,22 @@ CREATE INDEX "idx_expenses_home_status_created_at" ON "public"."expenses" USING 
 
 
 CREATE INDEX "idx_expenses_plan_id" ON "public"."expenses" USING "btree" ("plan_id");
+
+
+
+CREATE INDEX "idx_fit_check_drafts_created_at" ON "public"."fit_check_drafts" USING "btree" ("created_at" DESC);
+
+
+
+CREATE INDEX "idx_fit_check_drafts_owner_user_id" ON "public"."fit_check_drafts" USING "btree" ("owner_user_id");
+
+
+
+CREATE INDEX "idx_fit_check_rate_limits_updated_at" ON "public"."fit_check_rate_limits" USING "btree" ("updated_at");
+
+
+
+CREATE INDEX "idx_fit_check_share_tokens_draft_created_at" ON "public"."fit_check_share_tokens" USING "btree" ("draft_id", "created_at" DESC);
 
 
 
@@ -23555,6 +25628,30 @@ CREATE UNIQUE INDEX "uq_app_version_is_current_true" ON "public"."app_version" U
 
 
 
+CREATE UNIQUE INDEX "uq_candidate_fit_submissions_token_session" ON "public"."candidate_fit_submissions" USING "btree" ("share_token_id", "anonymous_session_hash");
+
+
+
+CREATE UNIQUE INDEX "uq_fit_check_drafts_claim_token_hash" ON "public"."fit_check_drafts" USING "btree" ("claim_token_hash");
+
+
+
+CREATE UNIQUE INDEX "uq_fit_check_drafts_draft_session_token_hash" ON "public"."fit_check_drafts" USING "btree" ("draft_session_token_hash") WHERE ("draft_session_token_hash" IS NOT NULL);
+
+
+
+CREATE UNIQUE INDEX "uq_fit_check_drafts_home_id" ON "public"."fit_check_drafts" USING "btree" ("home_id") WHERE ("home_id" IS NOT NULL);
+
+
+
+CREATE UNIQUE INDEX "uq_fit_check_share_tokens_active_per_draft" ON "public"."fit_check_share_tokens" USING "btree" ("draft_id") WHERE ("status" = 'active'::"text");
+
+
+
+CREATE UNIQUE INDEX "uq_fit_check_share_tokens_token_hash" ON "public"."fit_check_share_tokens" USING "btree" ("token_hash");
+
+
+
 CREATE UNIQUE INDEX "uq_gratitude_wall_posts_source_entry_id" ON "public"."gratitude_wall_posts" USING "btree" ("source_entry_id") WHERE ("source_entry_id" IS NOT NULL);
 
 
@@ -23684,6 +25781,14 @@ CREATE OR REPLACE TRIGGER "trg_complaint_rewrite_triggers_notify_requeue" AFTER 
 
 
 CREATE OR REPLACE TRIGGER "trg_complaint_rewrite_triggers_touch" BEFORE UPDATE ON "public"."complaint_rewrite_triggers" FOR EACH ROW EXECUTE FUNCTION "public"."_touch_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_fit_check_drafts_touch_updated_at" BEFORE UPDATE ON "public"."fit_check_drafts" FOR EACH ROW EXECUTE FUNCTION "public"."_touch_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_fit_check_templates_touch_updated_at" BEFORE UPDATE ON "public"."fit_check_templates" FOR EACH ROW EXECUTE FUNCTION "public"."_touch_updated_at"();
 
 
 
@@ -23849,6 +25954,26 @@ ALTER TABLE ONLY "public"."analytics_events"
 
 
 
+ALTER TABLE ONLY "public"."candidate_fit_briefings"
+    ADD CONSTRAINT "candidate_fit_briefings_draft_id_fkey" FOREIGN KEY ("draft_id") REFERENCES "public"."fit_check_drafts"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."candidate_fit_briefings"
+    ADD CONSTRAINT "candidate_fit_briefings_submission_id_fkey" FOREIGN KEY ("submission_id") REFERENCES "public"."candidate_fit_submissions"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."candidate_fit_submissions"
+    ADD CONSTRAINT "candidate_fit_submissions_draft_id_fkey" FOREIGN KEY ("draft_id") REFERENCES "public"."fit_check_drafts"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."candidate_fit_submissions"
+    ADD CONSTRAINT "candidate_fit_submissions_share_token_id_fkey" FOREIGN KEY ("share_token_id") REFERENCES "public"."fit_check_share_tokens"("id") ON DELETE RESTRICT;
+
+
+
 ALTER TABLE ONLY "public"."chore_events"
     ADD CONSTRAINT "chore_events_actor_user_id_fkey" FOREIGN KEY ("actor_user_id") REFERENCES "public"."profiles"("id") ON DELETE RESTRICT;
 
@@ -23941,6 +26066,21 @@ ALTER TABLE ONLY "public"."expenses"
 
 ALTER TABLE ONLY "public"."expenses"
     ADD CONSTRAINT "expenses_home_id_fkey" FOREIGN KEY ("home_id") REFERENCES "public"."homes"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."fit_check_drafts"
+    ADD CONSTRAINT "fit_check_drafts_home_id_fkey" FOREIGN KEY ("home_id") REFERENCES "public"."homes"("id") ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "public"."fit_check_drafts"
+    ADD CONSTRAINT "fit_check_drafts_owner_user_id_fkey" FOREIGN KEY ("owner_user_id") REFERENCES "auth"."users"("id") ON DELETE SET NULL;
+
+
+
+ALTER TABLE ONLY "public"."fit_check_share_tokens"
+    ADD CONSTRAINT "fit_check_share_tokens_draft_id_fkey" FOREIGN KEY ("draft_id") REFERENCES "public"."fit_check_drafts"("id") ON DELETE CASCADE;
 
 
 
@@ -24527,6 +26667,12 @@ CREATE POLICY "avatars_select_authenticated" ON "public"."avatars" FOR SELECT US
 
 
 
+ALTER TABLE "public"."candidate_fit_briefings" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."candidate_fit_submissions" ENABLE ROW LEVEL SECURITY;
+
+
 ALTER TABLE "public"."chore_events" ENABLE ROW LEVEL SECURITY;
 
 
@@ -24552,6 +26698,18 @@ ALTER TABLE "public"."expense_splits" ENABLE ROW LEVEL SECURITY;
 
 
 ALTER TABLE "public"."expenses" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."fit_check_drafts" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."fit_check_rate_limits" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."fit_check_share_tokens" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."fit_check_templates" ENABLE ROW LEVEL SECURITY;
 
 
 ALTER TABLE "public"."gratitude_wall_mentions" ENABLE ROW LEVEL SECURITY;
@@ -25226,6 +27384,144 @@ GRANT ALL ON FUNCTION "public"."_expense_plans_terminate_for_member_change"("p_h
 REVOKE ALL ON FUNCTION "public"."_expenses_prepare_split_buffer"("p_home_id" "uuid", "p_creator_id" "uuid", "p_amount_cents" bigint, "p_split_mode" "public"."expense_split_type", "p_member_ids" "uuid"[], "p_splits" "jsonb") FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."_expenses_prepare_split_buffer"("p_home_id" "uuid", "p_creator_id" "uuid", "p_amount_cents" bigint, "p_split_mode" "public"."expense_split_type", "p_member_ids" "uuid"[], "p_splits" "jsonb") TO "service_role";
 GRANT ALL ON FUNCTION "public"."_expenses_prepare_split_buffer"("p_home_id" "uuid", "p_creator_id" "uuid", "p_amount_cents" bigint, "p_split_mode" "public"."expense_split_type", "p_member_ids" "uuid"[], "p_splits" "jsonb") TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_fit_check_anonymous_session_hash"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_fit_check_anonymous_session_hash"() TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_fit_check_anonymous_session_id"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_fit_check_anonymous_session_id"() TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."fit_check_drafts" TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_fit_check_assert_owner"("p_draft_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_fit_check_assert_owner"("p_draft_id" "uuid") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_fit_check_build_continue_in_app_url"("p_claim_token" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_fit_check_build_continue_in_app_url"("p_claim_token" "text") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_fit_check_build_share_url"("p_share_token" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_fit_check_build_share_url"("p_share_token" "text") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_fit_check_candidate_cta_url"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_fit_check_candidate_cta_url"() TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_fit_check_claim_token_ttl"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_fit_check_claim_token_ttl"() TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_fit_check_generate_briefing_payload"("p_owner_answers" "jsonb", "p_candidate_answers" "jsonb") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_fit_check_generate_briefing_payload"("p_owner_answers" "jsonb", "p_candidate_answers" "jsonb") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_fit_check_generate_token"("p_prefix" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_fit_check_generate_token"("p_prefix" "text") TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."fit_check_share_tokens" TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_fit_check_get_active_share_token_for_draft"("p_draft_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_fit_check_get_active_share_token_for_draft"("p_draft_id" "uuid") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_fit_check_get_effective_share_token_by_hash"("p_token_hash" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_fit_check_get_effective_share_token_by_hash"("p_token_hash" "text") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_fit_check_onboarding_seed"("p_answers" "jsonb") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_fit_check_onboarding_seed"("p_answers" "jsonb") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_fit_check_prefill_payload"("p_answers" "jsonb") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_fit_check_prefill_payload"("p_answers" "jsonb") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_fit_check_purge_unclaimed_drafts"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_fit_check_purge_unclaimed_drafts"() TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_fit_check_rate_limit_bucketed"("p_key" "text", "p_bucket" timestamp with time zone, "p_limit" integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_fit_check_rate_limit_bucketed"("p_key" "text", "p_bucket" timestamp with time zone, "p_limit" integer) TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_fit_check_reflection_key"("p_answers" "jsonb") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_fit_check_reflection_key"("p_answers" "jsonb") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_fit_check_request_headers"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_fit_check_request_headers"() TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_fit_check_requested_locale_base"("p_locale" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_fit_check_requested_locale_base"("p_locale" "text") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_fit_check_resolved_locale_base"("p_requested_locale_base" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_fit_check_resolved_locale_base"("p_requested_locale_base" "text") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_fit_check_review_summary_label"("p_briefing_payload" "jsonb", "p_requested_locale_base" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_fit_check_review_summary_label"("p_briefing_payload" "jsonb", "p_requested_locale_base" "text") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_fit_check_share_token_ttl"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_fit_check_share_token_ttl"() TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_fit_check_submission_cap"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_fit_check_submission_cap"() TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_fit_check_summary_labels"("p_answers" "jsonb", "p_requested_locale_base" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_fit_check_summary_labels"("p_answers" "jsonb", "p_requested_locale_base" "text") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_fit_check_template_value"("p_template_key" "text", "p_requested_locale_base" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_fit_check_template_value"("p_template_key" "text", "p_requested_locale_base" "text") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_fit_check_unclaimed_purge_ttl"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_fit_check_unclaimed_purge_ttl"() TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_fit_check_validate_answers"("p_answers" "jsonb") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_fit_check_validate_answers"("p_answers" "jsonb") TO "service_role";
 
 
 
@@ -25930,6 +28226,12 @@ GRANT ALL ON FUNCTION "public"."create_member_directory_note"("p_note_type" "tex
 
 
 
+REVOKE ALL ON FUNCTION "public"."create_member_directory_note_v2"("p_note_type" "text", "p_label" "text", "p_custom_title" "text", "p_contact_name" "text", "p_phone_number" "text", "p_details" "text", "p_reference_url" "text", "p_photo_path" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."create_member_directory_note_v2"("p_note_type" "text", "p_label" "text", "p_custom_title" "text", "p_contact_name" "text", "p_phone_number" "text", "p_details" "text", "p_reference_url" "text", "p_photo_path" "text") TO "service_role";
+GRANT ALL ON FUNCTION "public"."create_member_directory_note_v2"("p_note_type" "text", "p_label" "text", "p_custom_title" "text", "p_contact_name" "text", "p_phone_number" "text", "p_details" "text", "p_reference_url" "text", "p_photo_path" "text") TO "authenticated";
+
+
+
 GRANT ALL ON FUNCTION "public"."date_dist"("date", "date") TO "postgres";
 GRANT ALL ON FUNCTION "public"."date_dist"("date", "date") TO "anon";
 GRANT ALL ON FUNCTION "public"."date_dist"("date", "date") TO "authenticated";
@@ -26065,6 +28367,81 @@ REVOKE ALL ON FUNCTION "public"."fail_complaint_rewrite_job"("p_job_id" "uuid", 
 GRANT ALL ON FUNCTION "public"."fail_complaint_rewrite_job"("p_job_id" "uuid", "p_error" "text") TO "anon";
 GRANT ALL ON FUNCTION "public"."fail_complaint_rewrite_job"("p_job_id" "uuid", "p_error" "text") TO "authenticated";
 GRANT ALL ON FUNCTION "public"."fail_complaint_rewrite_job"("p_job_id" "uuid", "p_error" "text") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."fit_check_attach_draft_to_home"("p_draft_id" "uuid", "p_home_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."fit_check_attach_draft_to_home"("p_draft_id" "uuid", "p_home_id" "uuid") TO "anon";
+GRANT ALL ON FUNCTION "public"."fit_check_attach_draft_to_home"("p_draft_id" "uuid", "p_home_id" "uuid") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."fit_check_attach_draft_to_home"("p_draft_id" "uuid", "p_home_id" "uuid") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."fit_check_claim_draft"("p_claim_token" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."fit_check_claim_draft"("p_claim_token" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."fit_check_claim_draft"("p_claim_token" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."fit_check_claim_draft"("p_claim_token" "text") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."fit_check_cleanup_rate_limits"("p_older_than" interval) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."fit_check_cleanup_rate_limits"("p_older_than" interval) TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."fit_check_get_owner_briefing"("p_submission_id" "uuid", "p_locale" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."fit_check_get_owner_briefing"("p_submission_id" "uuid", "p_locale" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."fit_check_get_owner_briefing"("p_submission_id" "uuid", "p_locale" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."fit_check_get_owner_briefing"("p_submission_id" "uuid", "p_locale" "text") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."fit_check_get_owner_review"("p_draft_id" "uuid", "p_locale" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."fit_check_get_owner_review"("p_draft_id" "uuid", "p_locale" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."fit_check_get_owner_review"("p_draft_id" "uuid", "p_locale" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."fit_check_get_owner_review"("p_draft_id" "uuid", "p_locale" "text") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."fit_check_get_prefill_payload"("p_draft_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."fit_check_get_prefill_payload"("p_draft_id" "uuid") TO "anon";
+GRANT ALL ON FUNCTION "public"."fit_check_get_prefill_payload"("p_draft_id" "uuid") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."fit_check_get_prefill_payload"("p_draft_id" "uuid") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."fit_check_get_public_by_token"("p_share_token" "text", "p_locale" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."fit_check_get_public_by_token"("p_share_token" "text", "p_locale" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."fit_check_get_public_by_token"("p_share_token" "text", "p_locale" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."fit_check_get_public_by_token"("p_share_token" "text", "p_locale" "text") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."fit_check_revoke_share_token"("p_draft_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."fit_check_revoke_share_token"("p_draft_id" "uuid") TO "anon";
+GRANT ALL ON FUNCTION "public"."fit_check_revoke_share_token"("p_draft_id" "uuid") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."fit_check_revoke_share_token"("p_draft_id" "uuid") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."fit_check_rotate_share_token"("p_draft_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."fit_check_rotate_share_token"("p_draft_id" "uuid") TO "anon";
+GRANT ALL ON FUNCTION "public"."fit_check_rotate_share_token"("p_draft_id" "uuid") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."fit_check_rotate_share_token"("p_draft_id" "uuid") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."fit_check_submit_candidate_by_token"("p_share_token" "text", "p_locale" "text", "p_display_name" "text", "p_answers" "jsonb") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."fit_check_submit_candidate_by_token"("p_share_token" "text", "p_locale" "text", "p_display_name" "text", "p_answers" "jsonb") TO "anon";
+GRANT ALL ON FUNCTION "public"."fit_check_submit_candidate_by_token"("p_share_token" "text", "p_locale" "text", "p_display_name" "text", "p_answers" "jsonb") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."fit_check_submit_candidate_by_token"("p_share_token" "text", "p_locale" "text", "p_display_name" "text", "p_answers" "jsonb") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."fit_check_upsert_draft"("p_draft_id" "uuid", "p_draft_session_token" "text", "p_locale" "text", "p_answers" "jsonb") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."fit_check_upsert_draft"("p_draft_id" "uuid", "p_draft_session_token" "text", "p_locale" "text", "p_answers" "jsonb") TO "anon";
+GRANT ALL ON FUNCTION "public"."fit_check_upsert_draft"("p_draft_id" "uuid", "p_draft_session_token" "text", "p_locale" "text", "p_answers" "jsonb") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."fit_check_upsert_draft"("p_draft_id" "uuid", "p_draft_session_token" "text", "p_locale" "text", "p_answers" "jsonb") TO "service_role";
 
 
 
@@ -28163,6 +30540,12 @@ GRANT ALL ON FUNCTION "public"."update_member_directory_note"("p_note_id" "uuid"
 
 
 
+REVOKE ALL ON FUNCTION "public"."update_member_directory_note_v2"("p_note_id" "uuid", "p_label" "text", "p_custom_title" "text", "p_contact_name" "text", "p_phone_number" "text", "p_details" "text", "p_reference_url" "text", "p_photo_path" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."update_member_directory_note_v2"("p_note_id" "uuid", "p_label" "text", "p_custom_title" "text", "p_contact_name" "text", "p_phone_number" "text", "p_details" "text", "p_reference_url" "text", "p_photo_path" "text") TO "service_role";
+GRANT ALL ON FUNCTION "public"."update_member_directory_note_v2"("p_note_id" "uuid", "p_label" "text", "p_custom_title" "text", "p_contact_name" "text", "p_phone_number" "text", "p_details" "text", "p_reference_url" "text", "p_photo_path" "text") TO "authenticated";
+
+
+
 REVOKE ALL ON FUNCTION "public"."upsert_home_directory_note"("p_home_id" "uuid", "p_note_id" "uuid", "p_title" "text", "p_details" "text", "p_note_type" "text", "p_reference_url" "text", "p_photo_path" "text") FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."upsert_home_directory_note"("p_home_id" "uuid", "p_note_id" "uuid", "p_title" "text", "p_details" "text", "p_note_type" "text", "p_reference_url" "text", "p_photo_path" "text") TO "service_role";
 GRANT ALL ON FUNCTION "public"."upsert_home_directory_note"("p_home_id" "uuid", "p_note_id" "uuid", "p_title" "text", "p_details" "text", "p_note_type" "text", "p_reference_url" "text", "p_photo_path" "text") TO "authenticated";
@@ -28247,6 +30630,14 @@ GRANT ALL ON TABLE "public"."avatars" TO "service_role";
 
 
 
+GRANT ALL ON TABLE "public"."candidate_fit_briefings" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."candidate_fit_submissions" TO "service_role";
+
+
+
 GRANT ALL ON TABLE "public"."chore_events" TO "service_role";
 
 
@@ -28274,6 +30665,14 @@ GRANT ALL ON TABLE "public"."expense_plan_debtors" TO "service_role";
 
 
 GRANT ALL ON TABLE "public"."expense_splits" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."fit_check_rate_limits" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."fit_check_templates" TO "service_role";
 
 
 

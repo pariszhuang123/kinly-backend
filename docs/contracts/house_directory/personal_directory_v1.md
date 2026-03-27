@@ -157,6 +157,7 @@ Other fields:
 - `details` optional
 
 Common fields:
+- `reference_url` optional
 - `photo_path` optional
 - `archived_at` supports soft delete
 
@@ -179,6 +180,8 @@ Validation rules:
 - non-other notes MUST NOT contain `custom_title`
 - phone numbers allow digits, spaces, `+`, parentheses, and hyphen, and
   must contain at least one digit
+- `reference_url`, when present, must be an `http` or `https` URL with
+  max length `2048`
 
 ## 4. Navigation and entry point
 

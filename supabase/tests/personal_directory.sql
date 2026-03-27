@@ -222,20 +222,21 @@ SELECT pg_temp.expect_api_error(
 );
 
 SELECT pg_temp.expect_api_error(
-  $$ SELECT public.create_member_directory_note('other', NULL, 'Parking', NULL, NULL, 'Bay 14', 'households/not-allowed.jpg'); $$,
+  $$ SELECT public.create_member_directory_note_v2('other', NULL, 'Parking', NULL, NULL, 'Bay 14', NULL, 'households/not-allowed.jpg'); $$,
   'MEMBER_DIRECTORY_NOTE_INVALID_PHOTO_PATH',
   'invalid member note photo path rejected'
 );
 
 SELECT ok(
   (
-    public.create_member_directory_note(
+    public.create_member_directory_note_v2(
       'other',
       NULL,
       'Parking spot',
       NULL,
       NULL,
       'Bay 14, level B2',
+      'https://example.com/parking-guide',
       'house_directory/'
       || (SELECT home_id::text FROM tmp_homes WHERE label = 'primary')
       || '/member_directory/'
@@ -243,7 +244,13 @@ SELECT ok(
       || '/parking.jpg'
     )->>'ok'
   )::boolean,
-  'owner can create other note with valid photo path'
+  'owner can create other note with reference_url and valid photo path'
+);
+
+SELECT pg_temp.expect_api_error(
+  $$ SELECT public.create_member_directory_note_v2('other', NULL, 'Parking', NULL, NULL, 'Bay 14', 'ftp://example.com/nope', NULL); $$,
+  'MEMBER_DIRECTORY_INVALID_REFERENCE_URL',
+  'invalid reference_url is rejected on create v2'
 );
 
 INSERT INTO tmp_notes (label, note_id)
@@ -268,13 +275,14 @@ SELECT
 
 SELECT ok(
   (
-    public.update_member_directory_note(
+    public.update_member_directory_note_v2(
       (SELECT note_id FROM tmp_notes WHERE label = 'owner_other'),
       NULL,
       'Parking spot updated',
       NULL,
       NULL,
       'Bay 27, level B1',
+      'https://example.com/parking-guide-v2',
       'house_directory/'
       || (SELECT home_id::text FROM tmp_homes WHERE label = 'primary')
       || '/member_directory/'
@@ -286,13 +294,14 @@ SELECT ok(
 );
 
 SELECT is(
-  public.update_member_directory_note(
+  public.update_member_directory_note_v2(
     (SELECT note_id FROM tmp_notes WHERE label = 'owner_other'),
     NULL,
     'Parking title final',
     NULL,
     NULL,
     'Bay 28, level B1',
+    'https://example.com/parking-guide-final',
     NULL
   )->'note'->>'custom_title',
   'Parking title final',
@@ -300,17 +309,33 @@ SELECT is(
 );
 
 SELECT pg_temp.expect_api_error(
-  $$ SELECT public.update_member_directory_note(
+  $$ SELECT public.update_member_directory_note_v2(
        (SELECT note_id FROM tmp_notes WHERE label = 'owner_allergy'),
        NULL,
        NULL,
        NULL,
        NULL,
        'Updated details',
+       NULL,
        NULL
      ); $$,
   'MEMBER_DIRECTORY_DETAILS_FORBIDDEN',
   'allergy note update rejects details'
+);
+
+SELECT pg_temp.expect_api_error(
+  $$ SELECT public.update_member_directory_note_v2(
+       (SELECT note_id FROM tmp_notes WHERE label = 'owner_other'),
+       NULL,
+       'Parking title final',
+       NULL,
+       NULL,
+       'Bay 28, level B1',
+       'notaurl',
+       NULL
+     ); $$,
+  'MEMBER_DIRECTORY_INVALID_REFERENCE_URL',
+  'invalid reference_url is rejected on update v2'
 );
 
 SELECT is(
@@ -335,6 +360,12 @@ SELECT is(
   public.get_member_directory_notes()->'notes'->2->>'custom_title',
   'Parking title final',
   'other note read returns custom title'
+);
+
+SELECT is(
+  public.get_member_directory_notes()->'notes'->2->>'reference_url',
+  'https://example.com/parking-guide-final',
+  'other note read returns reference_url'
 );
 
 SELECT is(

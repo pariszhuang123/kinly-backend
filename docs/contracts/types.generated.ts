@@ -127,6 +127,93 @@ export type Database = {
         }
         Relationships: []
       }
+      candidate_fit_briefings: {
+        Row: {
+          briefing_payload: Json
+          draft_id: string
+          generated_at: string
+          id: string
+          owner_answers_snapshot: Json
+          submission_id: string
+        }
+        Insert: {
+          briefing_payload: Json
+          draft_id: string
+          generated_at?: string
+          id?: string
+          owner_answers_snapshot: Json
+          submission_id: string
+        }
+        Update: {
+          briefing_payload?: Json
+          draft_id?: string
+          generated_at?: string
+          id?: string
+          owner_answers_snapshot?: Json
+          submission_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "candidate_fit_briefings_draft_id_fkey"
+            columns: ["draft_id"]
+            isOneToOne: false
+            referencedRelation: "fit_check_drafts"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "candidate_fit_briefings_submission_id_fkey"
+            columns: ["submission_id"]
+            isOneToOne: true
+            referencedRelation: "candidate_fit_submissions"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      candidate_fit_submissions: {
+        Row: {
+          anonymous_session_hash: string
+          answers: Json
+          display_name: string
+          draft_id: string
+          id: string
+          share_token_id: string
+          submitted_at: string
+        }
+        Insert: {
+          anonymous_session_hash: string
+          answers: Json
+          display_name: string
+          draft_id: string
+          id?: string
+          share_token_id: string
+          submitted_at?: string
+        }
+        Update: {
+          anonymous_session_hash?: string
+          answers?: Json
+          display_name?: string
+          draft_id?: string
+          id?: string
+          share_token_id?: string
+          submitted_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "candidate_fit_submissions_draft_id_fkey"
+            columns: ["draft_id"]
+            isOneToOne: false
+            referencedRelation: "fit_check_drafts"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "candidate_fit_submissions_share_token_id_fkey"
+            columns: ["share_token_id"]
+            isOneToOne: false
+            referencedRelation: "fit_check_share_tokens"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       chore_events: {
         Row: {
           actor_user_id: string
@@ -721,6 +808,142 @@ export type Database = {
             referencedColumns: ["id"]
           },
         ]
+      }
+      fit_check_drafts: {
+        Row: {
+          claim_token_hash: string
+          claim_token_used_at: string | null
+          claimed_at: string | null
+          created_at: string
+          draft_session_token_hash: string | null
+          home_attached_at: string | null
+          home_id: string | null
+          id: string
+          owner_answers: Json
+          owner_user_id: string | null
+          requested_locale_base: string
+          updated_at: string
+        }
+        Insert: {
+          claim_token_hash: string
+          claim_token_used_at?: string | null
+          claimed_at?: string | null
+          created_at?: string
+          draft_session_token_hash?: string | null
+          home_attached_at?: string | null
+          home_id?: string | null
+          id?: string
+          owner_answers: Json
+          owner_user_id?: string | null
+          requested_locale_base?: string
+          updated_at?: string
+        }
+        Update: {
+          claim_token_hash?: string
+          claim_token_used_at?: string | null
+          claimed_at?: string | null
+          created_at?: string
+          draft_session_token_hash?: string | null
+          home_attached_at?: string | null
+          home_id?: string | null
+          id?: string
+          owner_answers?: Json
+          owner_user_id?: string | null
+          requested_locale_base?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "fit_check_drafts_home_id_fkey"
+            columns: ["home_id"]
+            isOneToOne: false
+            referencedRelation: "homes"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      fit_check_rate_limits: {
+        Row: {
+          bucket_at: string
+          k: string
+          n: number
+          updated_at: string
+        }
+        Insert: {
+          bucket_at: string
+          k: string
+          n?: number
+          updated_at?: string
+        }
+        Update: {
+          bucket_at?: string
+          k?: string
+          n?: number
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      fit_check_share_tokens: {
+        Row: {
+          created_at: string
+          draft_id: string
+          expires_at: string
+          id: string
+          revoked_at: string | null
+          status: string
+          token_hash: string
+        }
+        Insert: {
+          created_at?: string
+          draft_id: string
+          expires_at: string
+          id?: string
+          revoked_at?: string | null
+          status?: string
+          token_hash: string
+        }
+        Update: {
+          created_at?: string
+          draft_id?: string
+          expires_at?: string
+          id?: string
+          revoked_at?: string | null
+          status?: string
+          token_hash?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "fit_check_share_tokens_draft_id_fkey"
+            columns: ["draft_id"]
+            isOneToOne: false
+            referencedRelation: "fit_check_drafts"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      fit_check_templates: {
+        Row: {
+          created_at: string
+          locale_base: string
+          template_key: string
+          template_value: string
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          locale_base: string
+          template_key: string
+          template_value: string
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          locale_base?: string
+          template_key?: string
+          template_value?: string
+          updated_at?: string
+        }
+        Relationships: []
       }
       gratitude_wall_mentions: {
         Row: {
@@ -2268,6 +2491,7 @@ export type Database = {
           note_type: string
           phone_number: string | null
           photo_path: string | null
+          reference_url: string | null
           updated_at: string
           user_id: string
         }
@@ -2282,6 +2506,7 @@ export type Database = {
           note_type: string
           phone_number?: string | null
           photo_path?: string | null
+          reference_url?: string | null
           updated_at?: string
           user_id: string
         }
@@ -2296,6 +2521,7 @@ export type Database = {
           note_type?: string
           phone_number?: string | null
           photo_path?: string | null
+          reference_url?: string | null
           updated_at?: string
           user_id?: string
         }
@@ -4289,6 +4515,115 @@ export type Database = {
         }
         Returns: undefined
       }
+      _fit_check_anonymous_session_hash: { Args: never; Returns: string }
+      _fit_check_anonymous_session_id: { Args: never; Returns: string }
+      _fit_check_assert_owner: {
+        Args: { p_draft_id: string }
+        Returns: {
+          claim_token_hash: string
+          claim_token_used_at: string | null
+          claimed_at: string | null
+          created_at: string
+          draft_session_token_hash: string | null
+          home_attached_at: string | null
+          home_id: string | null
+          id: string
+          owner_answers: Json
+          owner_user_id: string | null
+          requested_locale_base: string
+          updated_at: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "fit_check_drafts"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
+      _fit_check_build_continue_in_app_url: {
+        Args: { p_claim_token: string }
+        Returns: string
+      }
+      _fit_check_build_share_url: {
+        Args: { p_share_token: string }
+        Returns: string
+      }
+      _fit_check_candidate_cta_url: { Args: never; Returns: string }
+      _fit_check_claim_token_ttl: { Args: never; Returns: string }
+      _fit_check_generate_briefing_payload: {
+        Args: { p_candidate_answers: Json; p_owner_answers: Json }
+        Returns: Json
+      }
+      _fit_check_generate_token: { Args: { p_prefix: string }; Returns: string }
+      _fit_check_get_active_share_token_for_draft: {
+        Args: { p_draft_id: string }
+        Returns: {
+          created_at: string
+          draft_id: string
+          expires_at: string
+          id: string
+          revoked_at: string | null
+          status: string
+          token_hash: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "fit_check_share_tokens"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
+      _fit_check_get_effective_share_token_by_hash: {
+        Args: { p_token_hash: string }
+        Returns: {
+          created_at: string
+          draft_id: string
+          expires_at: string
+          id: string
+          revoked_at: string | null
+          status: string
+          token_hash: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "fit_check_share_tokens"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
+      _fit_check_onboarding_seed: { Args: { p_answers: Json }; Returns: Json }
+      _fit_check_prefill_payload: { Args: { p_answers: Json }; Returns: Json }
+      _fit_check_purge_unclaimed_drafts: { Args: never; Returns: number }
+      _fit_check_rate_limit_bucketed: {
+        Args: { p_bucket: string; p_key: string; p_limit: number }
+        Returns: boolean
+      }
+      _fit_check_reflection_key: { Args: { p_answers: Json }; Returns: string }
+      _fit_check_request_headers: { Args: never; Returns: Json }
+      _fit_check_requested_locale_base: {
+        Args: { p_locale: string }
+        Returns: string
+      }
+      _fit_check_resolved_locale_base: {
+        Args: { p_requested_locale_base: string }
+        Returns: string
+      }
+      _fit_check_review_summary_label: {
+        Args: { p_briefing_payload: Json; p_requested_locale_base: string }
+        Returns: string
+      }
+      _fit_check_share_token_ttl: { Args: never; Returns: string }
+      _fit_check_submission_cap: { Args: never; Returns: number }
+      _fit_check_summary_labels: {
+        Args: { p_answers: Json; p_requested_locale_base: string }
+        Returns: Json
+      }
+      _fit_check_template_value: {
+        Args: { p_requested_locale_base: string; p_template_key: string }
+        Returns: string
+      }
+      _fit_check_unclaimed_purge_ttl: { Args: never; Returns: string }
+      _fit_check_validate_answers: { Args: { p_answers: Json }; Returns: Json }
       _gen_invite_code: { Args: never; Returns: string }
       _gen_unique_username: {
         Args: { p_email: string; p_id: string }
@@ -4949,6 +5284,19 @@ export type Database = {
         }
         Returns: Json
       }
+      create_member_directory_note_v2: {
+        Args: {
+          p_contact_name?: string
+          p_custom_title?: string
+          p_details?: string
+          p_label?: string
+          p_note_type: string
+          p_phone_number?: string
+          p_photo_path?: string
+          p_reference_url?: string
+        }
+        Returns: Json
+      }
       dismiss_home_directory_reminder: {
         Args: { p_home_id: string; p_reminder_id: string }
         Returns: Json
@@ -5369,6 +5717,57 @@ export type Database = {
       fail_complaint_rewrite_job: {
         Args: { p_error: string; p_job_id: string }
         Returns: undefined
+      }
+      fit_check_attach_draft_to_home: {
+        Args: { p_draft_id: string; p_home_id: string }
+        Returns: Json
+      }
+      fit_check_claim_draft: { Args: { p_claim_token: string }; Returns: Json }
+      fit_check_cleanup_rate_limits: {
+        Args: { p_older_than?: string }
+        Returns: number
+      }
+      fit_check_get_owner_briefing: {
+        Args: { p_locale?: string; p_submission_id: string }
+        Returns: Json
+      }
+      fit_check_get_owner_review: {
+        Args: { p_draft_id: string; p_locale?: string }
+        Returns: Json
+      }
+      fit_check_get_prefill_payload: {
+        Args: { p_draft_id: string }
+        Returns: Json
+      }
+      fit_check_get_public_by_token: {
+        Args: { p_locale?: string; p_share_token: string }
+        Returns: Json
+      }
+      fit_check_revoke_share_token: {
+        Args: { p_draft_id: string }
+        Returns: Json
+      }
+      fit_check_rotate_share_token: {
+        Args: { p_draft_id: string }
+        Returns: Json
+      }
+      fit_check_submit_candidate_by_token: {
+        Args: {
+          p_answers?: Json
+          p_display_name?: string
+          p_locale?: string
+          p_share_token: string
+        }
+        Returns: Json
+      }
+      fit_check_upsert_draft: {
+        Args: {
+          p_answers?: Json
+          p_draft_id?: string
+          p_draft_session_token?: string
+          p_locale?: string
+        }
+        Returns: Json
       }
       get_home_directory_content: { Args: { p_home_id: string }; Returns: Json }
       get_home_directory_member_cards: { Args: never; Returns: Json }
@@ -6186,6 +6585,19 @@ export type Database = {
           p_note_id: string
           p_phone_number?: string
           p_photo_path?: string
+        }
+        Returns: Json
+      }
+      update_member_directory_note_v2: {
+        Args: {
+          p_contact_name?: string
+          p_custom_title?: string
+          p_details?: string
+          p_label?: string
+          p_note_id: string
+          p_phone_number?: string
+          p_photo_path?: string
+          p_reference_url?: string
         }
         Returns: Json
       }
