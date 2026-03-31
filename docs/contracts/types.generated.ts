@@ -598,8 +598,59 @@ export type Database = {
           },
         ]
       }
+      expense_plan_units: {
+        Row: {
+          home_id: string
+          plan_id: string
+          share_amount_cents: number
+          unit_id: string
+        }
+        Insert: {
+          home_id: string
+          plan_id: string
+          share_amount_cents: number
+          unit_id: string
+        }
+        Update: {
+          home_id?: string
+          plan_id?: string
+          share_amount_cents?: number
+          unit_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "expense_plan_units_plan_id_fkey"
+            columns: ["plan_id"]
+            isOneToOne: false
+            referencedRelation: "expense_plans"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "expense_plan_units_unit_id_fkey"
+            columns: ["unit_id"]
+            isOneToOne: false
+            referencedRelation: "home_units"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "fk_expense_plan_units_plan_home"
+            columns: ["plan_id", "home_id"]
+            isOneToOne: false
+            referencedRelation: "expense_plans"
+            referencedColumns: ["id", "home_id"]
+          },
+          {
+            foreignKeyName: "fk_expense_plan_units_unit_home"
+            columns: ["unit_id", "home_id"]
+            isOneToOne: false
+            referencedRelation: "home_units"
+            referencedColumns: ["id", "home_id"]
+          },
+        ]
+      }
       expense_plans: {
         Row: {
+          allocation_target_type: string | null
           amount_cents: number
           created_at: string
           created_by_user_id: string
@@ -618,9 +669,11 @@ export type Database = {
           start_date: string
           status: Database["public"]["Enums"]["expense_plan_status"]
           terminated_at: string | null
+          termination_reason: string | null
           updated_at: string
         }
         Insert: {
+          allocation_target_type?: string | null
           amount_cents: number
           created_at?: string
           created_by_user_id: string
@@ -639,9 +692,11 @@ export type Database = {
           start_date: string
           status?: Database["public"]["Enums"]["expense_plan_status"]
           terminated_at?: string | null
+          termination_reason?: string | null
           updated_at?: string
         }
         Update: {
+          allocation_target_type?: string | null
           amount_cents?: number
           created_at?: string
           created_by_user_id?: string
@@ -660,6 +715,7 @@ export type Database = {
           start_date?: string
           status?: Database["public"]["Enums"]["expense_plan_status"]
           terminated_at?: string | null
+          termination_reason?: string | null
           updated_at?: string
         }
         Relationships: [
@@ -721,8 +777,114 @@ export type Database = {
           },
         ]
       }
+      expense_unit_payment_events: {
+        Row: {
+          amount_cents: number
+          created_at: string
+          expense_id: string
+          id: string
+          payer_user_id: string
+          unit_id: string
+        }
+        Insert: {
+          amount_cents: number
+          created_at?: string
+          expense_id: string
+          id?: string
+          payer_user_id: string
+          unit_id: string
+        }
+        Update: {
+          amount_cents?: number
+          created_at?: string
+          expense_id?: string
+          id?: string
+          payer_user_id?: string
+          unit_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "expense_unit_payment_events_expense_id_fkey"
+            columns: ["expense_id"]
+            isOneToOne: false
+            referencedRelation: "expenses"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "expense_unit_payment_events_payer_user_id_fkey"
+            columns: ["payer_user_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "expense_unit_payment_events_unit_id_fkey"
+            columns: ["unit_id"]
+            isOneToOne: false
+            referencedRelation: "home_units"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      expense_unit_splits: {
+        Row: {
+          amount_cents: number
+          expense_id: string
+          fully_paid_at: string | null
+          home_id: string
+          paid_cents: number
+          unit_id: string
+        }
+        Insert: {
+          amount_cents: number
+          expense_id: string
+          fully_paid_at?: string | null
+          home_id: string
+          paid_cents?: number
+          unit_id: string
+        }
+        Update: {
+          amount_cents?: number
+          expense_id?: string
+          fully_paid_at?: string | null
+          home_id?: string
+          paid_cents?: number
+          unit_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "expense_unit_splits_expense_id_fkey"
+            columns: ["expense_id"]
+            isOneToOne: false
+            referencedRelation: "expenses"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "expense_unit_splits_unit_id_fkey"
+            columns: ["unit_id"]
+            isOneToOne: false
+            referencedRelation: "home_units"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "fk_expense_unit_splits_expense_home"
+            columns: ["expense_id", "home_id"]
+            isOneToOne: false
+            referencedRelation: "expenses"
+            referencedColumns: ["id", "home_id"]
+          },
+          {
+            foreignKeyName: "fk_expense_unit_splits_unit_home"
+            columns: ["unit_id", "home_id"]
+            isOneToOne: false
+            referencedRelation: "home_units"
+            referencedColumns: ["id", "home_id"]
+          },
+        ]
+      }
       expenses: {
         Row: {
+          allocation_target_type: string | null
           amount_cents: number | null
           created_at: string
           created_by_user_id: string
@@ -744,6 +906,7 @@ export type Database = {
           updated_at: string
         }
         Insert: {
+          allocation_target_type?: string | null
           amount_cents?: number | null
           created_at?: string
           created_by_user_id: string
@@ -765,6 +928,7 @@ export type Database = {
           updated_at?: string
         }
         Update: {
+          allocation_target_type?: string | null
           amount_cents?: number | null
           created_at?: string
           created_by_user_id?: string
@@ -1665,6 +1829,103 @@ export type Database = {
           plan?: string
         }
         Relationships: []
+      }
+      home_unit_members: {
+        Row: {
+          created_at: string
+          home_id: string
+          is_active_shared: boolean
+          membership_id: string
+          unit_id: string
+        }
+        Insert: {
+          created_at?: string
+          home_id: string
+          is_active_shared?: boolean
+          membership_id: string
+          unit_id: string
+        }
+        Update: {
+          created_at?: string
+          home_id?: string
+          is_active_shared?: boolean
+          membership_id?: string
+          unit_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "fk_home_unit_members_membership"
+            columns: ["membership_id", "home_id"]
+            isOneToOne: false
+            referencedRelation: "memberships"
+            referencedColumns: ["id", "home_id"]
+          },
+          {
+            foreignKeyName: "fk_home_unit_members_unit"
+            columns: ["unit_id", "home_id"]
+            isOneToOne: false
+            referencedRelation: "home_units"
+            referencedColumns: ["id", "home_id"]
+          },
+        ]
+      }
+      home_units: {
+        Row: {
+          archived_at: string | null
+          created_at: string
+          created_by_user_id: string | null
+          home_id: string
+          id: string
+          name: string
+          personal_membership_id: string | null
+          unit_type: string
+          updated_at: string
+        }
+        Insert: {
+          archived_at?: string | null
+          created_at?: string
+          created_by_user_id?: string | null
+          home_id: string
+          id?: string
+          name: string
+          personal_membership_id?: string | null
+          unit_type: string
+          updated_at?: string
+        }
+        Update: {
+          archived_at?: string | null
+          created_at?: string
+          created_by_user_id?: string | null
+          home_id?: string
+          id?: string
+          name?: string
+          personal_membership_id?: string | null
+          unit_type?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "home_units_created_by_user_id_fkey"
+            columns: ["created_by_user_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "home_units_home_id_fkey"
+            columns: ["home_id"]
+            isOneToOne: false
+            referencedRelation: "homes"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "home_units_personal_membership_id_fkey"
+            columns: ["personal_membership_id"]
+            isOneToOne: false
+            referencedRelation: "memberships"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       home_usage_counters: {
         Row: {
@@ -4104,7 +4365,9 @@ export type Database = {
           quantity: string | null
           reference_added_by_user_id: string | null
           reference_photo_path: string | null
+          scope_type: string
           shopping_list_id: string
+          unit_id: string | null
           updated_at: string
         }
         Insert: {
@@ -4123,7 +4386,9 @@ export type Database = {
           quantity?: string | null
           reference_added_by_user_id?: string | null
           reference_photo_path?: string | null
+          scope_type?: string
           shopping_list_id: string
+          unit_id?: string | null
           updated_at?: string
         }
         Update: {
@@ -4142,7 +4407,9 @@ export type Database = {
           quantity?: string | null
           reference_added_by_user_id?: string | null
           reference_photo_path?: string | null
+          scope_type?: string
           shopping_list_id?: string
+          unit_id?: string | null
           updated_at?: string
         }
         Relationships: [
@@ -4151,6 +4418,13 @@ export type Database = {
             columns: ["shopping_list_id", "home_id"]
             isOneToOne: false
             referencedRelation: "shopping_lists"
+            referencedColumns: ["id", "home_id"]
+          },
+          {
+            foreignKeyName: "fk_shopping_list_items_unit_home"
+            columns: ["unit_id", "home_id"]
+            isOneToOne: false
+            referencedRelation: "home_units"
             referencedColumns: ["id", "home_id"]
           },
           {
@@ -4193,6 +4467,63 @@ export type Database = {
             columns: ["reference_added_by_user_id"]
             isOneToOne: false
             referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      shopping_list_purchase_memory: {
+        Row: {
+          canonical_name: string
+          created_at: string
+          display_name: string
+          home_id: string
+          id: string
+          last_purchased_at: string
+          last_purchased_by_user_id: string
+          scope_type: string
+          unit_id: string | null
+          updated_at: string
+          warning_window_days: number
+        }
+        Insert: {
+          canonical_name: string
+          created_at?: string
+          display_name: string
+          home_id: string
+          id?: string
+          last_purchased_at: string
+          last_purchased_by_user_id: string
+          scope_type: string
+          unit_id?: string | null
+          updated_at?: string
+          warning_window_days: number
+        }
+        Update: {
+          canonical_name?: string
+          created_at?: string
+          display_name?: string
+          home_id?: string
+          id?: string
+          last_purchased_at?: string
+          last_purchased_by_user_id?: string
+          scope_type?: string
+          unit_id?: string | null
+          updated_at?: string
+          warning_window_days?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "fk_shopping_list_purchase_memory_unit_home"
+            columns: ["unit_id", "home_id"]
+            isOneToOne: false
+            referencedRelation: "home_units"
+            referencedColumns: ["id", "home_id"]
+          },
+          {
+            foreignKeyName: "shopping_list_purchase_memory_home_id_fkey"
+            columns: ["home_id"]
+            isOneToOne: false
+            referencedRelation: "homes"
             referencedColumns: ["id"]
           },
         ]
@@ -4459,9 +4790,296 @@ export type Database = {
         Args: { p_home_id: string; p_user_id: string }
         Returns: string
       }
+      _expense_build_debtor_splits: {
+        Args: {
+          p_amount_cents: number
+          p_creator_user_id: string
+          p_home_id: string
+          p_member_ids?: string[]
+          p_split_mode: Database["public"]["Enums"]["expense_split_type"]
+          p_splits?: Json
+        }
+        Returns: {
+          amount_cents: number
+          debtor_user_id: string
+        }[]
+      }
+      _expense_build_unit_splits: {
+        Args: {
+          p_amount_cents: number
+          p_creator_user_id: string
+          p_home_id: string
+          p_split_mode: Database["public"]["Enums"]["expense_split_type"]
+          p_unit_ids?: string[]
+          p_unit_splits?: Json
+        }
+        Returns: {
+          amount_cents: number
+          unit_id: string
+        }[]
+      }
+      _expense_finalize_if_fully_paid_v2: {
+        Args: { p_expense_id: string }
+        Returns: boolean
+      }
+      _expense_get_editability: {
+        Args: { p_expense_id: string; p_user_id: string }
+        Returns: Json
+      }
+      _expense_get_validated_debtor_splits: {
+        Args: {
+          p_amount_cents: number
+          p_creator_user_id: string
+          p_home_id: string
+          p_member_ids?: string[]
+          p_split_mode: Database["public"]["Enums"]["expense_split_type"]
+          p_splits?: Json
+        }
+        Returns: {
+          amount_cents: number
+          debtor_user_id: string
+        }[]
+      }
+      _expense_get_validated_unit_splits: {
+        Args: {
+          p_amount_cents: number
+          p_creator_user_id: string
+          p_home_id: string
+          p_split_mode: Database["public"]["Enums"]["expense_split_type"]
+          p_unit_ids?: string[]
+          p_unit_splits?: Json
+        }
+        Returns: {
+          amount_cents: number
+          unit_id: string
+        }[]
+      }
+      _expense_lock_expense_for_update: {
+        Args: { p_expense_id: string }
+        Returns: {
+          allocation_target_type: string | null
+          amount_cents: number | null
+          created_at: string
+          created_by_user_id: string
+          description: string
+          evidence_photo_path: string | null
+          fully_paid_at: string | null
+          home_id: string
+          id: string
+          notes: string | null
+          plan_id: string | null
+          recurrence_every: number | null
+          recurrence_interval:
+            | Database["public"]["Enums"]["recurrence_interval"]
+            | null
+          recurrence_unit: string | null
+          split_type: Database["public"]["Enums"]["expense_split_type"] | null
+          start_date: string
+          status: Database["public"]["Enums"]["expense_status"]
+          updated_at: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "expenses"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
+      _expense_lock_expense_with_home_active: {
+        Args: { p_expense_id: string }
+        Returns: {
+          allocation_target_type: string | null
+          amount_cents: number | null
+          created_at: string
+          created_by_user_id: string
+          description: string
+          evidence_photo_path: string | null
+          fully_paid_at: string | null
+          home_id: string
+          id: string
+          notes: string | null
+          plan_id: string | null
+          recurrence_every: number | null
+          recurrence_interval:
+            | Database["public"]["Enums"]["recurrence_interval"]
+            | null
+          recurrence_unit: string | null
+          split_type: Database["public"]["Enums"]["expense_split_type"] | null
+          start_date: string
+          status: Database["public"]["Enums"]["expense_status"]
+          updated_at: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "expenses"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
+      _expense_lock_home_active: {
+        Args: { p_home_id: string }
+        Returns: {
+          created_at: string
+          deactivated_at: string | null
+          id: string
+          is_active: boolean
+          owner_user_id: string
+          updated_at: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "homes"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
+      _expense_lock_plan_for_update: {
+        Args: { p_plan_id: string }
+        Returns: {
+          allocation_target_type: string | null
+          amount_cents: number
+          created_at: string
+          created_by_user_id: string
+          description: string
+          evidence_photo_path: string | null
+          home_id: string
+          id: string
+          next_cycle_date: string
+          notes: string | null
+          recurrence_every: number
+          recurrence_interval:
+            | Database["public"]["Enums"]["recurrence_interval"]
+            | null
+          recurrence_unit: string
+          split_type: Database["public"]["Enums"]["expense_split_type"]
+          start_date: string
+          status: Database["public"]["Enums"]["expense_plan_status"]
+          terminated_at: string | null
+          termination_reason: string | null
+          updated_at: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "expense_plans"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
+      _expense_lock_plan_with_home_active: {
+        Args: { p_plan_id: string }
+        Returns: {
+          allocation_target_type: string | null
+          amount_cents: number
+          created_at: string
+          created_by_user_id: string
+          description: string
+          evidence_photo_path: string | null
+          home_id: string
+          id: string
+          next_cycle_date: string
+          notes: string | null
+          recurrence_every: number
+          recurrence_interval:
+            | Database["public"]["Enums"]["recurrence_interval"]
+            | null
+          recurrence_unit: string
+          split_type: Database["public"]["Enums"]["expense_split_type"]
+          start_date: string
+          status: Database["public"]["Enums"]["expense_plan_status"]
+          terminated_at: string | null
+          termination_reason: string | null
+          updated_at: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "expense_plans"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
+      _expense_persist_debtor_splits: {
+        Args: {
+          p_amount_cents: number
+          p_creator_user_id: string
+          p_expense_id: string
+          p_member_ids?: string[]
+          p_split_mode: Database["public"]["Enums"]["expense_split_type"]
+          p_splits?: Json
+        }
+        Returns: undefined
+      }
+      _expense_persist_plan_debtor_targets: {
+        Args: {
+          p_amount_cents: number
+          p_creator_user_id: string
+          p_member_ids?: string[]
+          p_plan_id: string
+          p_split_mode: Database["public"]["Enums"]["expense_split_type"]
+          p_splits?: Json
+        }
+        Returns: undefined
+      }
+      _expense_persist_plan_unit_targets: {
+        Args: {
+          p_amount_cents: number
+          p_creator_user_id: string
+          p_plan_id: string
+          p_split_mode: Database["public"]["Enums"]["expense_split_type"]
+          p_unit_ids?: string[]
+          p_unit_splits?: Json
+        }
+        Returns: undefined
+      }
+      _expense_persist_unit_splits: {
+        Args: {
+          p_amount_cents: number
+          p_creator_user_id: string
+          p_expense_id: string
+          p_split_mode: Database["public"]["Enums"]["expense_split_type"]
+          p_unit_ids?: string[]
+          p_unit_splits?: Json
+        }
+        Returns: undefined
+      }
       _expense_plan_generate_cycle: {
         Args: { p_cycle_date: string; p_plan_id: string }
         Returns: {
+          allocation_target_type: string | null
+          amount_cents: number | null
+          created_at: string
+          created_by_user_id: string
+          description: string
+          evidence_photo_path: string | null
+          fully_paid_at: string | null
+          home_id: string
+          id: string
+          notes: string | null
+          plan_id: string | null
+          recurrence_every: number | null
+          recurrence_interval:
+            | Database["public"]["Enums"]["recurrence_interval"]
+            | null
+          recurrence_unit: string | null
+          split_type: Database["public"]["Enums"]["expense_split_type"] | null
+          start_date: string
+          status: Database["public"]["Enums"]["expense_status"]
+          updated_at: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "expenses"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
+      _expense_plan_generate_cycle_v3: {
+        Args: {
+          p_apply_quota?: boolean
+          p_cycle_date: string
+          p_plan_id: string
+        }
+        Returns: {
+          allocation_target_type: string | null
           amount_cents: number | null
           created_at: string
           created_by_user_id: string
@@ -4502,6 +5120,80 @@ export type Database = {
       }
       _expense_plans_terminate_for_member_change: {
         Args: { p_affected_user_id: string; p_home_id: string }
+        Returns: undefined
+      }
+      _expense_quota_apply_activate_one_off: {
+        Args: { p_home_id: string; p_photo_delta?: number }
+        Returns: undefined
+      }
+      _expense_quota_apply_activate_plan_with_first_cycle: {
+        Args: { p_home_id: string; p_photo_delta?: number }
+        Returns: undefined
+      }
+      _expense_quota_apply_finalize_expense: {
+        Args: { p_home_id: string }
+        Returns: undefined
+      }
+      _expense_quota_apply_generate_cycle: {
+        Args: { p_home_id: string }
+        Returns: undefined
+      }
+      _expense_quota_assert_activate_one_off: {
+        Args: { p_home_id: string; p_photo_delta?: number }
+        Returns: undefined
+      }
+      _expense_quota_assert_activate_plan_with_first_cycle: {
+        Args: { p_home_id: string; p_photo_delta?: number }
+        Returns: undefined
+      }
+      _expense_quota_assert_generate_cycle: {
+        Args: { p_home_id: string }
+        Returns: undefined
+      }
+      _expense_require_current_membership: {
+        Args: { p_home_id: string; p_user_id: string }
+        Returns: {
+          created_at: string
+          home_id: string
+          id: string
+          is_current: boolean | null
+          role: string
+          updated_at: string
+          user_id: string
+          valid_from: string
+          valid_to: string | null
+          validity: unknown
+        }
+        SetofOptions: {
+          from: "*"
+          to: "memberships"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
+      _expense_validate_common_fields: {
+        Args: {
+          p_allow_null_amount: boolean
+          p_amount_cents: number
+          p_description: string
+          p_notes: string
+        }
+        Returns: undefined
+      }
+      _expense_validate_evidence_photo_path: {
+        Args: { p_evidence_photo_path: string }
+        Returns: string
+      }
+      _expense_validate_photo_transition: {
+        Args: { p_new_path: string; p_old_path: string }
+        Returns: number
+      }
+      _expense_validate_recurrence_fields: {
+        Args: { p_recurrence_every: number; p_recurrence_unit: string }
+        Returns: undefined
+      }
+      _expense_validate_start_date_range: {
+        Args: { p_home_id: string; p_start_date: string; p_user_id: string }
         Returns: undefined
       }
       _expenses_prepare_split_buffer: {
@@ -4643,6 +5335,19 @@ export type Database = {
       }
       _home_effective_plan: { Args: { p_home_id: string }; Returns: string }
       _home_is_premium: { Args: { p_home_id: string }; Returns: boolean }
+      _home_units__ensure_personal: {
+        Args: { p_home_id: string; p_membership_id: string; p_user_id: string }
+        Returns: string
+      }
+      _home_units__member_user_ids: {
+        Args: { p_unit_id: string }
+        Returns: string[]
+      }
+      _home_units__reconcile_member_projection: {
+        Args: { p_home_id?: string }
+        Returns: number
+      }
+      _home_units__unit_json: { Args: { p_unit_id: string }; Returns: Json }
       _home_usage_apply_delta: {
         Args: { p_deltas: Json; p_home_id: string }
         Returns: {
@@ -4837,6 +5542,126 @@ export type Database = {
           p_home_id: string
           p_user_id: string
         }
+        Returns: undefined
+      }
+      _shopping_list__add_item_core: {
+        Args: {
+          p_details: string
+          p_home_id: string
+          p_name: string
+          p_quantity: string
+          p_reference_photo_path: string
+          p_scope_type: string
+          p_unit_id: string
+        }
+        Returns: {
+          archived_at: string | null
+          archived_by_user_id: string | null
+          completed_at: string | null
+          completed_by_user_id: string | null
+          created_at: string
+          created_by_user_id: string
+          details: string | null
+          home_id: string
+          id: string
+          is_completed: boolean
+          linked_expense_id: string | null
+          name: string
+          quantity: string | null
+          reference_added_by_user_id: string | null
+          reference_photo_path: string | null
+          scope_type: string
+          shopping_list_id: string
+          unit_id: string | null
+          updated_at: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "shopping_list_items"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
+      _shopping_list__assert_scope_target: {
+        Args: { p_home_id: string; p_scope_type: string; p_unit_id: string }
+        Returns: {
+          scope_type: string
+          unit_id: string
+        }[]
+      }
+      _shopping_list__build_add_item_payload: {
+        Args: {
+          p_item: Database["public"]["Tables"]["shopping_list_items"]["Row"]
+        }
+        Returns: Json
+      }
+      _shopping_list__canonicalize_name: {
+        Args: { p_name: string }
+        Returns: string
+      }
+      _shopping_list__canonicalize_token: {
+        Args: { p_token: string }
+        Returns: string
+      }
+      _shopping_list__get_for_home_core: {
+        Args: { p_home_id: string; p_scope_type: string; p_unit_id: string }
+        Returns: Json
+      }
+      _shopping_list__purchase_memory_payload: {
+        Args: {
+          p_home_id: string
+          p_name: string
+          p_scope_type: string
+          p_unit_id: string
+        }
+        Returns: Json
+      }
+      _shopping_list__update_item_core: {
+        Args: {
+          p_details: string
+          p_is_completed: boolean
+          p_item_id: string
+          p_name: string
+          p_quantity: string
+          p_reference_photo_path: string
+          p_replace_photo: boolean
+          p_scope_type: string
+          p_unit_id: string
+        }
+        Returns: {
+          archived_at: string | null
+          archived_by_user_id: string | null
+          completed_at: string | null
+          completed_by_user_id: string | null
+          created_at: string
+          created_by_user_id: string
+          details: string | null
+          home_id: string
+          id: string
+          is_completed: boolean
+          linked_expense_id: string | null
+          name: string
+          quantity: string | null
+          reference_added_by_user_id: string | null
+          reference_photo_path: string | null
+          scope_type: string
+          shopping_list_id: string
+          unit_id: string | null
+          updated_at: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "shopping_list_items"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
+      _shopping_list__warning_window_days: {
+        Args: { p_canonical_name: string }
+        Returns: number
+      }
+      _shopping_list__write_purchase_memory: {
+        Args: { p_item_ids: string[] }
         Returns: undefined
       }
       _shopping_list_get_or_create_active: {
@@ -5306,6 +6131,7 @@ export type Database = {
       expense_plans_terminate: {
         Args: { p_plan_id: string }
         Returns: {
+          allocation_target_type: string | null
           amount_cents: number
           created_at: string
           created_by_user_id: string
@@ -5324,6 +6150,7 @@ export type Database = {
           start_date: string
           status: Database["public"]["Enums"]["expense_plan_status"]
           terminated_at: string | null
+          termination_reason: string | null
           updated_at: string
         }
         SetofOptions: {
@@ -5336,6 +6163,7 @@ export type Database = {
       expenses_cancel: {
         Args: { p_expense_id: string }
         Returns: {
+          allocation_target_type: string | null
           amount_cents: number | null
           created_at: string
           created_by_user_id: string
@@ -5375,6 +6203,7 @@ export type Database = {
               p_splits?: Json
             }
             Returns: {
+              allocation_target_type: string | null
               amount_cents: number | null
               created_at: string
               created_by_user_id: string
@@ -5417,6 +6246,7 @@ export type Database = {
               p_start_date?: string
             }
             Returns: {
+              allocation_target_type: string | null
               amount_cents: number | null
               created_at: string
               created_by_user_id: string
@@ -5460,6 +6290,7 @@ export type Database = {
           p_start_date?: string
         }
         Returns: {
+          allocation_target_type: string | null
           amount_cents: number | null
           created_at: string
           created_by_user_id: string
@@ -5502,6 +6333,53 @@ export type Database = {
           p_start_date?: string
         }
         Returns: {
+          allocation_target_type: string | null
+          amount_cents: number | null
+          created_at: string
+          created_by_user_id: string
+          description: string
+          evidence_photo_path: string | null
+          fully_paid_at: string | null
+          home_id: string
+          id: string
+          notes: string | null
+          plan_id: string | null
+          recurrence_every: number | null
+          recurrence_interval:
+            | Database["public"]["Enums"]["recurrence_interval"]
+            | null
+          recurrence_unit: string | null
+          split_type: Database["public"]["Enums"]["expense_split_type"] | null
+          start_date: string
+          status: Database["public"]["Enums"]["expense_status"]
+          updated_at: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "expenses"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
+      expenses_create_v5: {
+        Args: {
+          p_allocation_target_type?: string
+          p_amount_cents?: number
+          p_description: string
+          p_evidence_photo_path?: string
+          p_home_id: string
+          p_member_ids?: string[]
+          p_notes?: string
+          p_recurrence_every?: number
+          p_recurrence_unit?: string
+          p_split_mode?: Database["public"]["Enums"]["expense_split_type"]
+          p_splits?: Json
+          p_start_date?: string
+          p_unit_ids?: string[]
+          p_unit_splits?: Json
+        }
+        Returns: {
+          allocation_target_type: string | null
           amount_cents: number | null
           created_at: string
           created_by_user_id: string
@@ -5541,6 +6419,7 @@ export type Database = {
               p_splits?: Json
             }
             Returns: {
+              allocation_target_type: string | null
               amount_cents: number | null
               created_at: string
               created_by_user_id: string
@@ -5583,6 +6462,7 @@ export type Database = {
               p_start_date?: string
             }
             Returns: {
+              allocation_target_type: string | null
               amount_cents: number | null
               created_at: string
               created_by_user_id: string
@@ -5626,6 +6506,7 @@ export type Database = {
           p_start_date?: string
         }
         Returns: {
+          allocation_target_type: string | null
           amount_cents: number | null
           created_at: string
           created_by_user_id: string
@@ -5668,6 +6549,53 @@ export type Database = {
           p_start_date?: string
         }
         Returns: {
+          allocation_target_type: string | null
+          amount_cents: number | null
+          created_at: string
+          created_by_user_id: string
+          description: string
+          evidence_photo_path: string | null
+          fully_paid_at: string | null
+          home_id: string
+          id: string
+          notes: string | null
+          plan_id: string | null
+          recurrence_every: number | null
+          recurrence_interval:
+            | Database["public"]["Enums"]["recurrence_interval"]
+            | null
+          recurrence_unit: string | null
+          split_type: Database["public"]["Enums"]["expense_split_type"] | null
+          start_date: string
+          status: Database["public"]["Enums"]["expense_status"]
+          updated_at: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "expenses"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
+      expenses_edit_v5: {
+        Args: {
+          p_allocation_target_type?: string
+          p_amount_cents: number
+          p_description: string
+          p_evidence_photo_path?: string
+          p_expense_id: string
+          p_member_ids?: string[]
+          p_notes?: string
+          p_recurrence_every?: number
+          p_recurrence_unit?: string
+          p_split_mode?: Database["public"]["Enums"]["expense_split_type"]
+          p_splits?: Json
+          p_start_date?: string
+          p_unit_ids?: string[]
+          p_unit_splits?: Json
+        }
+        Returns: {
+          allocation_target_type: string | null
           amount_cents: number | null
           created_at: string
           created_by_user_id: string
@@ -5697,6 +6625,10 @@ export type Database = {
       }
       expenses_get_created_by_me: { Args: { p_home_id: string }; Returns: Json }
       expenses_get_current_owed: { Args: { p_home_id: string }; Returns: Json }
+      expenses_get_current_owed_v3: {
+        Args: { p_home_id: string }
+        Returns: Json
+      }
       expenses_get_current_paid_to_me_by_debtor_details: {
         Args: { p_debtor_user_id: string; p_home_id: string }
         Returns: Json
@@ -5706,12 +6638,24 @@ export type Database = {
         Returns: Json
       }
       expenses_get_for_edit: { Args: { p_expense_id: string }; Returns: Json }
+      expenses_get_for_edit_v3: {
+        Args: { p_expense_id: string }
+        Returns: Json
+      }
       expenses_mark_paid_received_viewed_for_debtor: {
         Args: { p_debtor_user_id: string; p_home_id: string }
         Returns: Json
       }
       expenses_pay_my_due: {
         Args: { p_recipient_user_id: string }
+        Returns: Json
+      }
+      expenses_pay_unit_due_v2: {
+        Args: {
+          p_amount_cents: number
+          p_expense_id: string
+          p_unit_id: string
+        }
         Returns: Json
       }
       fail_complaint_rewrite_job: {
@@ -5859,6 +6803,47 @@ export type Database = {
           isOneToOne: true
           isSetofReturn: false
         }
+      }
+      home_units_create_shared: {
+        Args: { p_home_id: string; p_membership_ids: string[]; p_name: string }
+        Returns: string
+      }
+      home_units_get_my_context: { Args: { p_home_id: string }; Returns: Json }
+      home_units_join_shared: { Args: { p_unit_id: string }; Returns: string }
+      home_units_leave_shared: { Args: { p_unit_id: string }; Returns: string }
+      home_units_list_create_shared_candidates: {
+        Args: { p_home_id: string }
+        Returns: {
+          avatar_url: string
+          display_name: string
+          is_owner: boolean
+          membership_id: string
+          user_id: string
+        }[]
+      }
+      home_units_list_joinable_shared_units: {
+        Args: { p_home_id: string }
+        Returns: {
+          home_id: string
+          member_user_ids: string[]
+          name: string
+          unit_id: string
+          unit_type: string
+        }[]
+      }
+      home_units_list_selectable_expense_units: {
+        Args: { p_home_id: string }
+        Returns: {
+          home_id: string
+          member_user_ids: string[]
+          name: string
+          unit_id: string
+          unit_type: string
+        }[]
+      }
+      home_units_update_shared: {
+        Args: { p_name: string; p_unit_id: string }
+        Returns: string
       }
       homes_create_with_invite: { Args: never; Returns: Json }
       homes_join: { Args: { p_code: string }; Returns: Json }
@@ -6465,7 +7450,9 @@ export type Database = {
           quantity: string | null
           reference_added_by_user_id: string | null
           reference_photo_path: string | null
+          scope_type: string
           shopping_list_id: string
+          unit_id: string | null
           updated_at: string
         }
         SetofOptions: {
@@ -6474,6 +7461,18 @@ export type Database = {
           isOneToOne: true
           isSetofReturn: false
         }
+      }
+      shopping_list_add_item_v2: {
+        Args: {
+          p_details?: string
+          p_home_id: string
+          p_name: string
+          p_quantity?: string
+          p_reference_photo_path?: string
+          p_scope_type?: string
+          p_unit_id?: string
+        }
+        Returns: Json
       }
       shopping_list_archive_item: {
         Args: { p_item_id: string }
@@ -6493,7 +7492,9 @@ export type Database = {
           quantity: string | null
           reference_added_by_user_id: string | null
           reference_photo_path: string | null
+          scope_type: string
           shopping_list_id: string
+          unit_id: string | null
           updated_at: string
         }
         SetofOptions: {
@@ -6508,6 +7509,10 @@ export type Database = {
         Returns: number
       }
       shopping_list_get_for_home: { Args: { p_home_id: string }; Returns: Json }
+      shopping_list_get_for_home_v2: {
+        Args: { p_home_id: string; p_scope_type?: string; p_unit_id?: string }
+        Returns: Json
+      }
       shopping_list_link_items_to_expense_for_user: {
         Args: { p_expense_id: string; p_home_id: string; p_item_ids: string[] }
         Returns: number
@@ -6547,7 +7552,49 @@ export type Database = {
           quantity: string | null
           reference_added_by_user_id: string | null
           reference_photo_path: string | null
+          scope_type: string
           shopping_list_id: string
+          unit_id: string | null
+          updated_at: string
+        }
+        SetofOptions: {
+          from: "*"
+          to: "shopping_list_items"
+          isOneToOne: true
+          isSetofReturn: false
+        }
+      }
+      shopping_list_update_item_v2: {
+        Args: {
+          p_details: string
+          p_is_completed: boolean
+          p_item_id: string
+          p_name: string
+          p_quantity: string
+          p_reference_photo_path: string
+          p_replace_photo: boolean
+          p_scope_type: string
+          p_unit_id: string
+        }
+        Returns: {
+          archived_at: string | null
+          archived_by_user_id: string | null
+          completed_at: string | null
+          completed_by_user_id: string | null
+          created_at: string
+          created_by_user_id: string
+          details: string | null
+          home_id: string
+          id: string
+          is_completed: boolean
+          linked_expense_id: string | null
+          name: string
+          quantity: string | null
+          reference_added_by_user_id: string | null
+          reference_photo_path: string | null
+          scope_type: string
+          shopping_list_id: string
+          unit_id: string | null
           updated_at: string
         }
         SetofOptions: {

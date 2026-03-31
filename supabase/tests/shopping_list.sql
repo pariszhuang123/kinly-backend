@@ -109,22 +109,22 @@ SELECT set_config(
 SELECT set_config('request.jwt.claim.role', 'authenticated', true);
 SELECT public.homes_join((SELECT code FROM tmp_invites WHERE label = 'primary'));
 
--- Internal helpers are not callable by authenticated clients.
-SELECT throws_like(
-  $$ SELECT public._home_assert_quota(
-       (SELECT home_id FROM tmp_homes WHERE label = 'primary'),
-       '{}'::jsonb
-     ); $$,
-  '%permission denied%',
+-- Internal helpers are not executable by the authenticated role.
+SELECT ok(
+  NOT has_function_privilege(
+    'authenticated',
+    'public._home_assert_quota(uuid, jsonb)',
+    'EXECUTE'
+  ),
   '_home_assert_quota is internal-only'
 );
 
-SELECT throws_like(
-  $$ SELECT public._home_usage_apply_delta(
-       (SELECT home_id FROM tmp_homes WHERE label = 'primary'),
-       '{"shopping_item_photos":1}'::jsonb
-     ); $$,
-  '%permission denied%',
+SELECT ok(
+  NOT has_function_privilege(
+    'authenticated',
+    'public._home_usage_apply_delta(uuid, jsonb)',
+    'EXECUTE'
+  ),
   '_home_usage_apply_delta is internal-only'
 );
 

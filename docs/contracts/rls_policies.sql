@@ -32,6 +32,8 @@ ALTER TABLE "public"."home_mood_entries" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "public"."home_mood_feedback_counters" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "public"."home_nps" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "public"."home_plan_limits" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "public"."home_unit_members" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "public"."home_units" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "public"."home_usage_counters" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "public"."homes" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "public"."house_norm_templates" ENABLE ROW LEVEL SECURITY;
@@ -95,5 +97,6 @@ CREATE POLICY "service_role_all_outreach_sources" ON "public"."outreach_sources"
 CREATE POLICY "service_role_read_outreach_event_logs" ON "public"."outreach_event_logs" FOR SELECT TO "service_role" USING (true);
 ALTER TABLE "public"."share_events" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "public"."shopping_list_items" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "public"."shopping_list_purchase_memory" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "public"."shopping_lists" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "public"."user_subscriptions" ENABLE ROW LEVEL SECURITY;

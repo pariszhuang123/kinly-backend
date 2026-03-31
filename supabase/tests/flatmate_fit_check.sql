@@ -189,6 +189,12 @@ SELECT ok(
   'draft creation marks share token as reveal-once'
 );
 
+SELECT is(
+  (SELECT payload->'share'->>'share_url' FROM tmp_fit_drafts WHERE label = 'primary'),
+  'https://go.makinglifeeasie.com/kinly/fit-check/join/' || (SELECT share_token FROM tmp_fit_drafts WHERE label = 'primary'),
+  'draft creation returns the canonical applicant join URL'
+);
+
 SELECT ok(
   length((SELECT draft_session_token FROM tmp_fit_drafts WHERE label = 'primary')) > 10,
   'draft creation returns a draft session token'
@@ -976,6 +982,12 @@ RESET ROLE;
 SELECT ok(
   length((SELECT share_token FROM tmp_fit_drafts WHERE label = 'primary')) > 10,
   'share token rotation returns a new raw token'
+);
+
+SELECT is(
+  (SELECT payload->>'share_url' FROM tmp_fit_drafts WHERE label = 'primary'),
+  'https://go.makinglifeeasie.com/kinly/fit-check/join/' || (SELECT share_token FROM tmp_fit_drafts WHERE label = 'primary'),
+  'share token rotation returns the canonical applicant join URL'
 );
 
 SET LOCAL ROLE service_role;
