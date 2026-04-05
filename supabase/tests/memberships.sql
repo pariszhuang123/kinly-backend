@@ -161,6 +161,21 @@ SELECT is(
   'membership_me_current returns active home for member'
 );
 
+WITH payload AS (
+  SELECT public.membership_me_current() AS body
+)
+SELECT is(
+  (SELECT body->'current'->>'membership_id' FROM payload),
+  (
+    SELECT id::text
+    FROM public.memberships
+    WHERE user_id = (SELECT user_id FROM tmp_users WHERE label = 'member')
+      AND home_id = (SELECT home_id FROM tmp_homes WHERE label = 'primary')
+      AND is_current = TRUE
+  ),
+  'membership_me_current returns the current membership id for member'
+);
+
 -- With limit tightened, inviting another member should be blocked by the paywall.
 SELECT set_config(
   'request.jwt.claim.sub',

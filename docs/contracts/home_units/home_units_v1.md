@@ -63,6 +63,15 @@ The member profile/settings surface MAY include:
 This surface edits home-unit participation. It does not mutate global profile
 identity except for normal profile fields such as username or avatar.
 
+Context resolution:
+- profile/settings entry points MUST resolve active home context from the
+  caller's current membership
+- the preferred source of truth is `membership.meCurrent`
+- clients MUST NOT assume profile/edit routes always carry fresh membership
+  context from a previous screen
+- if `membership.meCurrent.current == null`, the app MUST block shared-unit
+  actions and explain that the member must join or create a home first
+
 ### 3.2 Expense flows
 
 Expense create/edit flows MUST allow liability target selection:

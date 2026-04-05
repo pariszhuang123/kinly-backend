@@ -293,6 +293,21 @@ SELECT is(
   'membership_me_current reports the joined home'
 );
 
+WITH payload AS (
+  SELECT public.membership_me_current() AS body
+)
+SELECT is(
+  (SELECT body->'current'->>'membership_id' FROM payload),
+  (
+    SELECT id::text
+    FROM public.memberships
+    WHERE user_id = (SELECT user_id FROM tmp_users WHERE label = 'member_one')
+      AND home_id = (SELECT home_id FROM tmp_homes WHERE label = 'primary')
+      AND is_current = TRUE
+  ),
+  'membership_me_current reports the joined membership id'
+);
+
 -- Transfer ownership from original owner to member_one
 SELECT set_config(
   'request.jwt.claim.sub',

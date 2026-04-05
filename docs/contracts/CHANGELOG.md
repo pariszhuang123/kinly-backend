@@ -2,6 +2,13 @@
 
 Tracks versioned contract changes and related ADRs.
 
+## v2.1 - Homes Current Membership Identity
+- Date: 2026-04-05
+- Scope: `docs/contracts/homes_v2.md`
+- Changes:
+  - Clarify that `membership.meCurrent()` returns `membership_id` alongside `user_id`, `home_id`, `role`, and `valid_from`.
+  - Align contract metadata and registry notes with the live RPC response shape.
+
 ## v1.1 - Interest Capture Source-Scoped Deduping
 - Date: 2026-04-05
 - Scope: `docs/contracts/interest_capture_v1.md`, `docs/contracts/withYou/withyou_backend_handoff_checklist_v1.md`

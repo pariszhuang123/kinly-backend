@@ -302,7 +302,7 @@
           "errors": [
             "UNAUTHORIZED"
           ],
-          "notes": "Returns { ok: true, current: null | { user_id, home_id, role, valid_from } }"
+          "notes": "Returns { ok: true, current: null | { membership_id, user_id, home_id, role, valid_from } }"
         },
         "members.listActiveByHome": {
           "type": "rpc",

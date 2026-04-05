@@ -21273,6 +21273,7 @@ BEGIN
   RETURN jsonb_build_object(
     'ok', true,
     'current', jsonb_build_object(
+      'membership_id', v_row.id,
       'user_id', v_row.user_id,
       'home_id', v_row.home_id,
       'role',    v_row.role,
@@ -35752,7 +35753,6 @@ ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TAB
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TABLES TO "anon";
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TABLES TO "authenticated";
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TABLES TO "service_role";
-
 
 
 

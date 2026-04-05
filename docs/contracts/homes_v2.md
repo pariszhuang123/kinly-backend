@@ -1,16 +1,16 @@
 ---
-Domain: HOME
-Capability: Homes & Membership Stints
+Domain: Homes
+Capability: Homes
 Scope: backend
 Artifact-Type: contract
 Stability: evolving
-Status: Draft
+Status: active
 Version: v2.0
 ---
 
 # Kinly Contracts v2 — Home MVP (membership stints)
 
-Status: Draft for alignment with new SQL
+Status: Active
 
 Scope: Align contracts with the new homes/memberships/invites migration introducing append-only membership stints and invite code details.
 Related domain slices: household actions such as chores are documented in `docs/contracts/chores_v1.md`.
@@ -162,7 +162,7 @@ Invite
       "args": {},
       "returns": "jsonb",
       "errors": ["UNAUTHORIZED"],
-      "notes": "Returns { ok: true, current: null | { user_id, home_id, role, valid_from } }"
+      "notes": "Returns { ok: true, current: null | { membership_id, user_id, home_id, role, valid_from } }"
     },
     "members.listActiveByHome": {
       "type": "rpc",
@@ -346,7 +346,18 @@ members.listActiveByHome(homeId)
  - DB Impl: `public.members_list_active_by_home`
 
 membership.meCurrent()
-- Returns the caller's current membership details (homeId, role, validFrom) or null if not currently in a home.
+- Returns the caller's current active membership details or null if not currently in a home.
+- Required response shape:
+  - `{ ok: true, current: null | { membership_id, user_id, home_id, role, valid_from } }`
+- Contract requirements:
+  - if `current != null`, `membership_id` MUST be present
+  - if `current != null`, `home_id` MUST be present
+  - `membership_id` MUST identify the caller's active/current membership row
+  - `home_id` MUST belong to that same active/current membership row
+  - the RPC MUST NOT return a partial active membership payload
+- Client usage:
+  - profile/settings and shared-unit entry points MAY call this RPC on demand to resolve active home context
+  - if `current == null`, clients MUST block shared-unit actions and prompt the user to join or create a home first
  - DB Impl: `public.membership_me_current`
 
 profile.me()
