@@ -1,4 +1,4 @@
-# Contract — Country + Locale + Email Capture v1.0
+# Contract — Country + Locale + Email Capture v1.1
 
 ## Meta
 
@@ -7,7 +7,7 @@
 - **Surface**: Kinly Web (/get)
 - **Status**: Active
 - **Owners**: Web, DB
-- **Last updated**: 2026-03-22
+- **Last updated**: 2026-04-05
 
 ## Purpose
 
@@ -31,8 +31,8 @@ This is used for:
 2. **Client is not trusted** All values MUST be validated server-side (Edge +
    RPC).
 
-3. **Idempotent submission** Same email + country + locale should not create
-   duplicates.
+3. **Idempotent submission** Same email + source + country + locale should not
+   create duplicates.
 
 4. **Minimal sensitive retention** Store only what we need; no IP storage
    required for v1.
@@ -96,7 +96,8 @@ This is used for:
 - **Type**: text
 - **Rules**:
   - trim whitespace
-  - lowercase before storage
+  - preserve user-provided casing in storage; uniqueness remains
+    case-insensitive via `citext`
   - MUST pass server-side email validation
 
 ## System Detection Rules (Web)
@@ -148,7 +149,8 @@ Priority order:
   - `p_country_code` (text) — required
   - `p_ui_locale` (text) — required
   - `p_source` (text, default `kinly_web_get`) — optional override for other
-    campaigns: `kinly_dating_web_get`, `kinly_rent_web_get`
+    campaigns: `kinly_dating_web_get`, `kinly_rent_web_get`,
+    `withyou_web_get`
 
 ### Request example
 
@@ -200,10 +202,13 @@ Priority order:
 
 ### Deduping semantics
 
-- Key: `email` (case-insensitive via `citext`).
-- `deduped = true` when an existing row was updated; `false` when inserted.
-- `source`, `country_code`, and `ui_locale` are overwritten with the latest
-  provided values on conflict.
+- Key: `(email, source)` with case-insensitive `email` via `citext`.
+- `deduped = true` when an existing row for the same `(email, source)` pair was
+  updated; `false` when inserted.
+- `country_code` and `ui_locale` are overwritten with the latest provided
+  values on conflict.
+- The same email submitted under a different allowed `source` creates a
+  separate lead row.
 
 ## Security
 
@@ -217,13 +222,13 @@ Priority order:
 
 ## Idempotency rules (MUST)
 
-**Deduping key**: `email` (case-insensitive via `citext`)
+**Deduping key**: `(email, source)` with case-insensitive `email` via `citext`
 
 **Behavior**:
 
-- If email already exists: overwrite `country_code`, `ui_locale`, `source`; set
-  `deduped = true`.
-- If email does not exist: insert row; `deduped = false`.
+- If `(email, source)` already exists: overwrite `country_code` and
+  `ui_locale`; set `deduped = true`.
+- If `(email, source)` does not exist: insert row; `deduped = false`.
 
 ## Storage Contract
 
@@ -241,10 +246,10 @@ Priority order:
 
 **Constraints (MUST)**:
 
-- `unique (email)` via `citext`
+- `unique (email, source)` via `citext` email + text source
 - `check (country_code ~ '^[A-Z]{2}$')`
 - `check (position(' ' in ui_locale) = 0)`
-- `check (source in ('kinly_web_get', 'kinly_dating_web_get', 'kinly_rent_web_get'))`
+- `check (source in ('kinly_web_get', 'kinly_dating_web_get', 'kinly_rent_web_get', 'withyou_web_get'))`
 
 **Indexes (SHOULD)**:
 

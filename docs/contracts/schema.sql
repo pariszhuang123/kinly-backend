@@ -20706,7 +20706,6 @@ declare
   c_email_limit_per_day constant integer := 5;
   c_global_limit_per_minute constant integer := 300;
 begin
-  -- Normalize inputs
   p_email := trim(coalesce(p_email, ''));
   p_country_code := upper(trim(coalesce(p_country_code, '')));
   p_ui_locale := trim(coalesce(p_ui_locale, ''));
@@ -20718,13 +20717,14 @@ begin
     'email, country_code, and ui_locale are required.'
   );
 
-  -- Email (permissive) + max length
-  perform public.api_assert(length(p_email) <= 254,
+  perform public.api_assert(
+    length(p_email) <= 254,
     'LEADS_EMAIL_TOO_LONG',
     'Email must be 254 characters or fewer.'
   );
 
-  perform public.api_assert(length(p_email) >= 3,
+  perform public.api_assert(
+    length(p_email) >= 3,
     'LEADS_EMAIL_TOO_SHORT',
     'Email must be at least 3 characters.'
   );
@@ -20737,13 +20737,12 @@ begin
     'Email format is invalid.'
   );
 
-  -- country_code strict format only (ZZ allowed)
-  perform public.api_assert(p_country_code ~ '^[A-Z]{2}$',
+  perform public.api_assert(
+    p_country_code ~ '^[A-Z]{2}$',
     'LEADS_COUNTRY_CODE_INVALID',
     'country_code must be ISO alpha-2 (e.g., NZ).'
   );
 
-  -- ui_locale: light BCP-47-ish, no spaces
   perform public.api_assert(
     length(p_ui_locale) between 2 and 35
     and p_ui_locale !~ '\s'
@@ -20752,19 +20751,20 @@ begin
     'ui_locale must look like a locale tag (e.g., en-NZ).'
   );
 
-  -- source allowlist
   perform public.api_assert(
-    p_source in ('kinly_web_get', 'kinly_dating_web_get', 'kinly_rent_web_get'),
+    p_source in (
+      'kinly_web_get',
+      'kinly_dating_web_get',
+      'kinly_rent_web_get',
+      'withyou_web_get'
+    ),
     'LEADS_SOURCE_INVALID',
     'source is not allowed.'
   );
 
-  -- Abuse mitigation (NO IP)
   v_email_window := date_trunc('day', v_now);
   v_global_window := date_trunc('minute', v_now);
 
-  -- Hash keys (NO PII stored)
-  -- Canonicalize email with citext semantics: (p_email::public.citext)::text
   v_email_key := public._sha256_hex(
     'email:' || (p_email::public.citext)::text || ':' || v_email_window::text
   );
@@ -20773,11 +20773,9 @@ begin
     'global:' || v_global_window::text
   );
 
-  -- 64-bit advisory lock ids derived from sha256 hex keys (first 16 hex chars)
   v_email_lock_id := ('x' || substr(v_email_key, 1, 16))::bit(64)::bigint;
   v_global_lock_id := ('x' || substr(v_global_key, 1, 16))::bit(64)::bigint;
 
-  -- Global limiter
   perform pg_advisory_xact_lock(v_global_lock_id);
   insert into public.leads_rate_limits(k, n, updated_at)
   values (v_global_key, 1, v_now)
@@ -20786,12 +20784,12 @@ begin
          updated_at = v_now
   returning n into v_global_n;
 
-  perform public.api_assert(v_global_n <= c_global_limit_per_minute,
+  perform public.api_assert(
+    v_global_n <= c_global_limit_per_minute,
     'LEADS_RATE_LIMIT_GLOBAL',
     'Too many requests. Please try again later.'
   );
 
-  -- Email limiter
   perform pg_advisory_xact_lock(v_email_lock_id);
   insert into public.leads_rate_limits(k, n, updated_at)
   values (v_email_key, 1, v_now)
@@ -20800,18 +20798,18 @@ begin
          updated_at = v_now
   returning n into v_email_n;
 
-  perform public.api_assert(v_email_n <= c_email_limit_per_day,
+  perform public.api_assert(
+    v_email_n <= c_email_limit_per_day,
     'LEADS_RATE_LIMIT_EMAIL',
     'Too many requests for this email today.'
   );
 
-  -- UPSERT (deduped is precise via xmax)
   insert into public.leads (email, country_code, ui_locale, source)
   values (p_email::public.citext, p_country_code, p_ui_locale, p_source)
-  on conflict (email) do update
+  on conflict (email, source) do update
     set country_code = excluded.country_code,
-        ui_locale     = excluded.ui_locale,
-        source        = excluded.source
+        ui_locale = excluded.ui_locale,
+        source = excluded.source
   returning id, (xmax <> 0) as deduped
     into v_lead_id, v_deduped;
 
@@ -26555,6 +26553,93 @@ $$;
 ALTER FUNCTION "public"."user_subscriptions_home_entitlements_trigger"() OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."withyou_log_pack_download_v1"("p_language" "text", "p_pack_version" "text" DEFAULT NULL::"text", "p_platform" "text" DEFAULT NULL::"text", "p_app_version" "text" DEFAULT NULL::"text", "p_request_path" "text" DEFAULT NULL::"text", "p_user_agent" "text" DEFAULT NULL::"text", "p_country_code" "text" DEFAULT NULL::"text") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $_$
+declare
+  v_language text := lower(trim(coalesce(p_language, '')));
+  v_pack_version text := nullif(trim(coalesce(p_pack_version, '')), '');
+  v_platform text := nullif(lower(trim(coalesce(p_platform, ''))), '');
+  v_app_version text := nullif(trim(coalesce(p_app_version, '')), '');
+  v_request_path text := nullif(trim(coalesce(p_request_path, '')), '');
+  v_user_agent text := nullif(trim(coalesce(p_user_agent, '')), '');
+  v_country_code text := nullif(upper(trim(coalesce(p_country_code, ''))), '');
+begin
+  perform public.api_assert(
+    v_language <> '' and v_language ~ '^[a-z]{2,3}$',
+    'WITHYOU_LANGUAGE_INVALID',
+    'language must be a 2-3 letter ISO 639 code.'
+  );
+
+  perform public.api_assert(
+    v_platform is null or v_platform in ('ios', 'android'),
+    'WITHYOU_PLATFORM_INVALID',
+    'platform must be ios or android when provided.'
+  );
+
+  perform public.api_assert(
+    v_country_code is null or v_country_code ~ '^[A-Z]{2}$',
+    'WITHYOU_COUNTRY_CODE_INVALID',
+    'country_code must be a 2-letter ISO country code when provided.'
+  );
+
+  perform public.api_assert(
+    v_pack_version is null or char_length(v_pack_version) <= 50,
+    'WITHYOU_PACK_VERSION_TOO_LONG',
+    'pack_version must be 50 characters or fewer.'
+  );
+
+  perform public.api_assert(
+    v_app_version is null or char_length(v_app_version) <= 50,
+    'WITHYOU_APP_VERSION_TOO_LONG',
+    'app_version must be 50 characters or fewer.'
+  );
+
+  perform public.api_assert(
+    v_request_path is null or (
+      char_length(v_request_path) <= 500
+      and v_request_path like '/%'
+    ),
+    'WITHYOU_REQUEST_PATH_INVALID',
+    'request_path must start with / and be 500 characters or fewer.'
+  );
+
+  perform public.api_assert(
+    v_user_agent is null or char_length(v_user_agent) <= 1000,
+    'WITHYOU_USER_AGENT_TOO_LONG',
+    'user_agent must be 1000 characters or fewer.'
+  );
+
+  insert into public.withyou_pack_downloads (
+    language,
+    pack_version,
+    platform,
+    app_version,
+    request_path,
+    user_agent,
+    country_code
+  )
+  values (
+    v_language,
+    v_pack_version,
+    v_platform,
+    v_app_version,
+    v_request_path,
+    v_user_agent,
+    v_country_code
+  );
+
+  return jsonb_build_object(
+    'ok', true
+  );
+end;
+$_$;
+
+
+ALTER FUNCTION "public"."withyou_log_pack_download_v1"("p_language" "text", "p_pack_version" "text", "p_platform" "text", "p_app_version" "text", "p_request_path" "text", "p_user_agent" "text", "p_country_code" "text") OWNER TO "postgres";
+
+
 CREATE TABLE IF NOT EXISTS "public"."analytics_events" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "user_id" "uuid" NOT NULL,
@@ -27604,7 +27689,7 @@ CREATE TABLE IF NOT EXISTS "public"."leads" (
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     CONSTRAINT "leads_country_code_check" CHECK (("country_code" ~ '^[A-Z]{2}$'::"text")),
-    CONSTRAINT "leads_source_check" CHECK (("source" = ANY (ARRAY['kinly_web_get'::"text", 'kinly_dating_web_get'::"text", 'kinly_rent_web_get'::"text"]))),
+    CONSTRAINT "leads_source_check" CHECK (("source" = ANY (ARRAY['kinly_web_get'::"text", 'kinly_dating_web_get'::"text", 'kinly_rent_web_get'::"text", 'withyou_web_get'::"text"]))),
     CONSTRAINT "leads_ui_locale_check" CHECK ((POSITION((' '::"text") IN ("ui_locale")) = 0))
 );
 
@@ -28677,6 +28762,33 @@ COMMENT ON COLUMN "public"."user_subscriptions"."last_synced_at" IS 'Timestamp w
 
 
 
+CREATE TABLE IF NOT EXISTS "public"."withyou_pack_downloads" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "language" "text" NOT NULL,
+    "pack_version" "text",
+    "platform" "text",
+    "app_version" "text",
+    "requested_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "request_path" "text",
+    "user_agent" "text",
+    "country_code" "text",
+    CONSTRAINT "withyou_pack_downloads_app_version_len_check" CHECK ((("app_version" IS NULL) OR ("char_length"("app_version") <= 50))),
+    CONSTRAINT "withyou_pack_downloads_country_code_check" CHECK ((("country_code" IS NULL) OR ("country_code" ~ '^[A-Z]{2}$'::"text"))),
+    CONSTRAINT "withyou_pack_downloads_language_check" CHECK (("language" ~ '^[a-z]{2,3}$'::"text")),
+    CONSTRAINT "withyou_pack_downloads_pack_version_len_check" CHECK ((("pack_version" IS NULL) OR ("char_length"("pack_version") <= 50))),
+    CONSTRAINT "withyou_pack_downloads_platform_check" CHECK ((("platform" IS NULL) OR ("platform" = ANY (ARRAY['ios'::"text", 'android'::"text"])))),
+    CONSTRAINT "withyou_pack_downloads_request_path_check" CHECK ((("request_path" IS NULL) OR (("char_length"("request_path") <= 500) AND ("request_path" ~~ '/%'::"text")))),
+    CONSTRAINT "withyou_pack_downloads_user_agent_len_check" CHECK ((("user_agent" IS NULL) OR ("char_length"("user_agent") <= 1000)))
+);
+
+
+ALTER TABLE "public"."withyou_pack_downloads" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."withyou_pack_downloads" IS 'Append-only telemetry for withYou app pack download requests. Writes must go through public.withyou_log_pack_download_v1.';
+
+
+
 ALTER TABLE ONLY "public"."analytics_events"
     ADD CONSTRAINT "analytics_events_pkey" PRIMARY KEY ("id");
 
@@ -28918,7 +29030,7 @@ ALTER TABLE ONLY "public"."invites"
 
 
 ALTER TABLE ONLY "public"."leads"
-    ADD CONSTRAINT "leads_email_key" UNIQUE ("email");
+    ADD CONSTRAINT "leads_email_source_key" UNIQUE ("email", "source");
 
 
 
@@ -29263,6 +29375,11 @@ ALTER TABLE ONLY "public"."preference_reports"
 
 ALTER TABLE ONLY "public"."user_subscriptions"
     ADD CONSTRAINT "user_subscriptions_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."withyou_pack_downloads"
+    ADD CONSTRAINT "withyou_pack_downloads_pkey" PRIMARY KEY ("id");
 
 
 
@@ -29863,6 +29980,22 @@ CREATE UNIQUE INDEX "ux_recipient_snapshots_req" ON "public"."recipient_snapshot
 
 
 CREATE UNIQUE INDEX "ux_rewrite_jobs_execution_unit" ON "public"."rewrite_jobs" USING "btree" ("rewrite_request_id", "recipient_user_id");
+
+
+
+CREATE INDEX "withyou_pack_downloads_app_version_requested_at_idx" ON "public"."withyou_pack_downloads" USING "btree" ("app_version", "requested_at" DESC);
+
+
+
+CREATE INDEX "withyou_pack_downloads_language_requested_at_idx" ON "public"."withyou_pack_downloads" USING "btree" ("language", "requested_at" DESC);
+
+
+
+CREATE INDEX "withyou_pack_downloads_platform_requested_at_idx" ON "public"."withyou_pack_downloads" USING "btree" ("platform", "requested_at" DESC);
+
+
+
+CREATE INDEX "withyou_pack_downloads_requested_at_idx" ON "public"."withyou_pack_downloads" USING "btree" ("requested_at" DESC);
 
 
 
@@ -31211,6 +31344,9 @@ ALTER TABLE "public"."shopping_lists" ENABLE ROW LEVEL SECURITY;
 
 
 ALTER TABLE "public"."user_subscriptions" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."withyou_pack_downloads" ENABLE ROW LEVEL SECURITY;
 
 
 
@@ -35181,6 +35317,13 @@ GRANT ALL ON FUNCTION "public"."user_subscriptions_home_entitlements_trigger"() 
 
 
 
+REVOKE ALL ON FUNCTION "public"."withyou_log_pack_download_v1"("p_language" "text", "p_pack_version" "text", "p_platform" "text", "p_app_version" "text", "p_request_path" "text", "p_user_agent" "text", "p_country_code" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."withyou_log_pack_download_v1"("p_language" "text", "p_pack_version" "text", "p_platform" "text", "p_app_version" "text", "p_request_path" "text", "p_user_agent" "text", "p_country_code" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."withyou_log_pack_download_v1"("p_language" "text", "p_pack_version" "text", "p_platform" "text", "p_app_version" "text", "p_request_path" "text", "p_user_agent" "text", "p_country_code" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."withyou_log_pack_download_v1"("p_language" "text", "p_pack_version" "text", "p_platform" "text", "p_app_version" "text", "p_request_path" "text", "p_user_agent" "text", "p_country_code" "text") TO "service_role";
+
+
+
 
 
 
@@ -35572,6 +35715,10 @@ GRANT ALL ON TABLE "public"."shopping_list_purchase_memory" TO "service_role";
 
 
 GRANT ALL ON TABLE "public"."user_subscriptions" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."withyou_pack_downloads" TO "service_role";
 
 
 

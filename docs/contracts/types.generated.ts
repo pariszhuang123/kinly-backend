@@ -4639,6 +4639,42 @@ export type Database = {
           },
         ]
       }
+      withyou_pack_downloads: {
+        Row: {
+          app_version: string | null
+          country_code: string | null
+          id: string
+          language: string
+          pack_version: string | null
+          platform: string | null
+          request_path: string | null
+          requested_at: string
+          user_agent: string | null
+        }
+        Insert: {
+          app_version?: string | null
+          country_code?: string | null
+          id?: string
+          language: string
+          pack_version?: string | null
+          platform?: string | null
+          request_path?: string | null
+          requested_at?: string
+          user_agent?: string | null
+        }
+        Update: {
+          app_version?: string | null
+          country_code?: string | null
+          id?: string
+          language?: string
+          pack_version?: string | null
+          platform?: string | null
+          request_path?: string | null
+          requested_at?: string
+          user_agent?: string | null
+        }
+        Relationships: []
+      }
     }
     Views: {
       outreach_poll_results_uc_v1: {
@@ -7686,6 +7722,18 @@ export type Database = {
         Returns: Json
       }
       user_context_v1: { Args: never; Returns: Json }
+      withyou_log_pack_download_v1: {
+        Args: {
+          p_app_version?: string
+          p_country_code?: string
+          p_language: string
+          p_pack_version?: string
+          p_platform?: string
+          p_request_path?: string
+          p_user_agent?: string
+        }
+        Returns: Json
+      }
     }
     Enums: {
       chore_event_type: "create" | "activate" | "update" | "complete" | "cancel"

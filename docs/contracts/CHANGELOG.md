@@ -2,6 +2,14 @@
 
 Tracks versioned contract changes and related ADRs.
 
+## v1.1 - Interest Capture Source-Scoped Deduping
+- Date: 2026-04-05
+- Scope: `docs/contracts/interest_capture_v1.md`, `docs/contracts/withYou/withyou_backend_handoff_checklist_v1.md`
+- Changes:
+  - Change lead deduping semantics from `email` to `(email, source)`.
+  - Add `withyou_web_get` to the allowed `source` values.
+  - Fix the withYou backend checklist to reference contracts that exist in this repo and clarify that the tracked Vercel route remains outside backend ownership.
+
 ## v1.0 - Outreach Event Logging
 - Date: 2026-01-29
 - Scope: `docs/contracts/outreach_event_log_v1.md`

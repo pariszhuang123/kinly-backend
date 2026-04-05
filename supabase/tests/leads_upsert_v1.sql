@@ -3,7 +3,7 @@ SET search_path = pgtap, public, auth, extensions;
 BEGIN;
 SET ROLE postgres;
 
-SELECT plan(13);
+SELECT plan(22);
 
 CREATE OR REPLACE FUNCTION pg_temp.expect_api_error(
   p_sql         text,
@@ -102,23 +102,43 @@ SELECT is(
 
 -- Dedupe + overwrite
 SELECT is(
-  (SELECT (pg_temp.call_leads_upsert_as_anon('user@example.com', 'au', 'en-AU', 'kinly_dating_web_get')->>'deduped')::boolean),
+  (SELECT (pg_temp.call_leads_upsert_as_anon('user@example.com', 'au', 'en-AU', 'kinly_web_get')->>'deduped')::boolean),
   true,
-  'deduped=true on conflict update'
+  'deduped=true on same-source conflict update'
 );
 
 SET ROLE postgres;
 
 SELECT is(
-  (SELECT source FROM public.leads WHERE email = 'User@Example.com'),
-  'kinly_dating_web_get',
-  'source updated on dedupe'
+  (SELECT country_code FROM public.leads WHERE email = 'User@Example.com' and source = 'kinly_web_get'),
+  'AU',
+  'country_code updated on same-source dedupe'
 );
 
 SELECT is(
   (SELECT ui_locale FROM public.leads WHERE email = 'User@Example.com'),
   'en-AU',
   'ui_locale updated on dedupe'
+);
+
+SELECT is(
+  (SELECT (pg_temp.call_leads_upsert_as_anon('user@example.com', 'sg', 'en-SG', 'withyou_web_get')->>'deduped')::boolean),
+  false,
+  'different allowed source creates a new lead row'
+);
+
+SET ROLE postgres;
+
+SELECT is(
+  (SELECT COUNT(*) FROM public.leads WHERE email = 'User@Example.com'),
+  2::bigint,
+  'same email may exist once per source'
+);
+
+SELECT is(
+  (SELECT country_code FROM public.leads WHERE email = 'User@Example.com' and source = 'withyou_web_get'),
+  'SG',
+  'withyou_web_get is accepted as an allowed source'
 );
 
 -- Validation errors

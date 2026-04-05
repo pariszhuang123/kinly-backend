@@ -100,3 +100,4 @@ ALTER TABLE "public"."shopping_list_items" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "public"."shopping_list_purchase_memory" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "public"."shopping_lists" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "public"."user_subscriptions" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "public"."withyou_pack_downloads" ENABLE ROW LEVEL SECURITY;
