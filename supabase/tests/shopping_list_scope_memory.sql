@@ -357,6 +357,71 @@ SELECT is(
   'unit filter returns only owner exact unit items'
 );
 
+SELECT public.shopping_list_update_item_v2(
+  p_item_id => (SELECT item_id FROM tmp_items WHERE label = 'couple_a_eggs'),
+  p_details => 'Keep chilled'
+);
+
+SELECT is(
+  (
+    SELECT details
+    FROM public.shopping_list_items
+    WHERE id = (SELECT item_id FROM tmp_items WHERE label = 'couple_a_eggs')
+  ),
+  'Keep chilled',
+  'shopping_list_update_item_v2 supports named arguments with omitted trailing params'
+);
+
+SELECT is(
+  (
+    SELECT scope_type
+    FROM public.shopping_list_items
+    WHERE id = (SELECT item_id FROM tmp_items WHERE label = 'couple_a_eggs')
+  ),
+  'unit',
+  'shopping_list_update_item_v2 keeps existing scope when p_scope_type is omitted'
+);
+
+SELECT is(
+  (
+    SELECT unit_id::text
+    FROM public.shopping_list_items
+    WHERE id = (SELECT item_id FROM tmp_items WHERE label = 'couple_a_eggs')
+  ),
+  (SELECT unit_id::text FROM tmp_units WHERE label = 'couple_a'),
+  'shopping_list_update_item_v2 keeps existing unit_id when unit scope params are omitted'
+);
+
+SELECT public.shopping_list_update_item_v2(
+  p_item_id => (SELECT item_id FROM tmp_items WHERE label = 'house_milk'),
+  p_reference_photo_path => 'households/test-home/items/house-milk-1.jpg'
+);
+
+SELECT is(
+  (
+    SELECT reference_photo_path
+    FROM public.shopping_list_items
+    WHERE id = (SELECT item_id FROM tmp_items WHERE label = 'house_milk')
+  ),
+  'households/test-home/items/house-milk-1.jpg',
+  'shopping_list_update_item_v2 adds a reference photo when none exists'
+);
+
+SELECT public.shopping_list_update_item_v2(
+  p_item_id => (SELECT item_id FROM tmp_items WHERE label = 'house_milk'),
+  p_reference_photo_path => 'households/test-home/items/house-milk-2.jpg'
+);
+
+SELECT is(
+  (
+    SELECT reference_photo_path
+    FROM public.shopping_list_items
+    WHERE id = (SELECT item_id FROM tmp_items WHERE label = 'house_milk')
+  ),
+  'households/test-home/items/house-milk-1.jpg',
+  'shopping_list_update_item_v2 does not replace an existing photo unless p_replace_photo=true'
+);
+
 SELECT public.shopping_list_update_item(
   (SELECT item_id FROM tmp_items WHERE label = 'couple_a_eggs'),
   NULL,

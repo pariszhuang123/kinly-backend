@@ -2,7 +2,7 @@ SET search_path = pgtap, public, auth, extensions;
 
 BEGIN;
 
-SELECT plan(13);
+SELECT plan(18);
 
 CREATE TEMP TABLE tmp_users (
   label   text PRIMARY KEY,
@@ -278,6 +278,92 @@ SELECT ok(
       AND can_transfer_to = FALSE
   ),
   'owner is not a transfer target'
+);
+
+-- -------------------------------------------------------------------
+-- members_list_active_by_home_v2 excludes caller by default
+-- -------------------------------------------------------------------
+WITH rows AS (
+  SELECT *
+  FROM public.members_list_active_by_home_v2(
+    (SELECT home_id FROM tmp_homes WHERE label = 'primary')
+  )
+)
+SELECT is(
+  (SELECT count(*)::integer FROM rows),
+  1::integer,
+  'members_list_active_by_home_v2 excludes caller when p_exclude_self=TRUE'
+);
+
+-- -------------------------------------------------------------------
+-- members_list_active_by_home_v2 includes caller and returns membership ids
+-- -------------------------------------------------------------------
+WITH rows AS (
+  SELECT *
+  FROM public.members_list_active_by_home_v2(
+    (SELECT home_id FROM tmp_homes WHERE label = 'primary'),
+    false
+  )
+)
+SELECT is(
+  (SELECT count(*)::integer FROM rows),
+  2::integer,
+  'members_list_active_by_home_v2 includes caller when p_exclude_self=false'
+);
+
+WITH rows AS (
+  SELECT *
+  FROM public.members_list_active_by_home_v2(
+    (SELECT home_id FROM tmp_homes WHERE label = 'primary'),
+    false
+  )
+)
+SELECT is(
+  (
+    SELECT membership_id::text
+    FROM rows
+    WHERE user_id = (SELECT user_id FROM tmp_users WHERE label = 'member')
+  ),
+  (
+    SELECT id::text
+    FROM public.memberships
+    WHERE user_id = (SELECT user_id FROM tmp_users WHERE label = 'member')
+      AND home_id = (SELECT home_id FROM tmp_homes WHERE label = 'primary')
+      AND is_current = TRUE
+  ),
+  'members_list_active_by_home_v2 returns the current membership id'
+);
+
+WITH rows AS (
+  SELECT *
+  FROM public.members_list_active_by_home_v2(
+    (SELECT home_id FROM tmp_homes WHERE label = 'primary'),
+    false
+  )
+)
+SELECT ok(
+  EXISTS (
+    SELECT 1 FROM rows
+    WHERE user_id = (SELECT user_id FROM tmp_users WHERE label = 'member')
+      AND can_transfer_to = TRUE
+  ),
+  'members_list_active_by_home_v2 keeps non-owner transfer eligibility'
+);
+
+WITH rows AS (
+  SELECT *
+  FROM public.members_list_active_by_home_v2(
+    (SELECT home_id FROM tmp_homes WHERE label = 'primary'),
+    false
+  )
+)
+SELECT ok(
+  EXISTS (
+    SELECT 1 FROM rows
+    WHERE user_id = (SELECT user_id FROM tmp_users WHERE label = 'owner')
+      AND can_transfer_to = FALSE
+  ),
+  'members_list_active_by_home_v2 keeps owner transfer ineligibility'
 );
 
 -- -------------------------------------------------------------------
