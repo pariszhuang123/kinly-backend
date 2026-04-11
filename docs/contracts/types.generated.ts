@@ -7108,6 +7108,18 @@ export type Database = {
           valid_from: string
         }[]
       }
+      members_list_active_by_home_v2: {
+        Args: { p_exclude_self?: boolean; p_home_id: string }
+        Returns: {
+          avatar_url: string
+          can_transfer_to: boolean
+          membership_id: string
+          role: string
+          user_id: string
+          username: string
+          valid_from: string
+        }[]
+      }
       membership_me_current: { Args: never; Returns: Json }
       mood_get_current_weekly: { Args: { p_home_id: string }; Returns: boolean }
       mood_submit: {
@@ -7602,15 +7614,15 @@ export type Database = {
       }
       shopping_list_update_item_v2: {
         Args: {
-          p_details: string
-          p_is_completed: boolean
+          p_details?: string
+          p_is_completed?: boolean
           p_item_id: string
-          p_name: string
-          p_quantity: string
-          p_reference_photo_path: string
-          p_replace_photo: boolean
-          p_scope_type: string
-          p_unit_id: string
+          p_name?: string
+          p_quantity?: string
+          p_reference_photo_path?: string
+          p_replace_photo?: boolean
+          p_scope_type?: string
+          p_unit_id?: string
         }
         Returns: {
           archived_at: string | null

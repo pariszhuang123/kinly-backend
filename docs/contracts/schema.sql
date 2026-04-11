@@ -21250,6 +21250,35 @@ $$;
 ALTER FUNCTION "public"."members_list_active_by_home"("p_home_id" "uuid", "p_exclude_self" boolean) OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."members_list_active_by_home_v2"("p_home_id" "uuid", "p_exclude_self" boolean DEFAULT true) RETURNS TABLE("membership_id" "uuid", "user_id" "uuid", "username" "public"."citext", "role" "text", "valid_from" timestamp with time zone, "avatar_url" "text", "can_transfer_to" boolean)
+    LANGUAGE "sql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+  SELECT
+    m.id AS membership_id,
+    m.user_id,
+    p.username,
+    m.role,
+    m.valid_from,
+    a.storage_path AS avatar_url,
+    (m.role <> 'owner') AS can_transfer_to
+  FROM public.memberships m
+  JOIN public.profiles p
+    ON p.id = m.user_id
+  LEFT JOIN public.avatars a
+    ON a.id = p.avatar_id
+  WHERE m.home_id = p_home_id
+    AND m.is_current = TRUE
+    AND (p_exclude_self IS FALSE OR m.user_id <> auth.uid())
+  ORDER BY
+    CASE WHEN m.role = 'owner' THEN 0 ELSE 1 END,
+    p.username;
+$$;
+
+
+ALTER FUNCTION "public"."members_list_active_by_home_v2"("p_home_id" "uuid", "p_exclude_self" boolean) OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."membership_me_current"() RETURNS "jsonb"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO ''
@@ -21276,7 +21305,7 @@ BEGIN
       'membership_id', v_row.id,
       'user_id', v_row.user_id,
       'home_id', v_row.home_id,
-      'role',    v_row.role,
+      'role', v_row.role,
       'valid_from', v_row.valid_from
     )
   );
@@ -25191,7 +25220,7 @@ $$;
 ALTER FUNCTION "public"."shopping_list_update_item"("p_item_id" "uuid", "p_name" "text", "p_quantity" "text", "p_details" "text", "p_is_completed" boolean, "p_reference_photo_path" "text", "p_replace_photo" boolean) OWNER TO "postgres";
 
 
-CREATE OR REPLACE FUNCTION "public"."shopping_list_update_item_v2"("p_item_id" "uuid", "p_name" "text", "p_quantity" "text", "p_details" "text", "p_is_completed" boolean, "p_reference_photo_path" "text", "p_replace_photo" boolean, "p_scope_type" "text", "p_unit_id" "uuid") RETURNS "public"."shopping_list_items"
+CREATE OR REPLACE FUNCTION "public"."shopping_list_update_item_v2"("p_item_id" "uuid", "p_name" "text" DEFAULT NULL::"text", "p_quantity" "text" DEFAULT NULL::"text", "p_details" "text" DEFAULT NULL::"text", "p_is_completed" boolean DEFAULT NULL::boolean, "p_reference_photo_path" "text" DEFAULT NULL::"text", "p_replace_photo" boolean DEFAULT false, "p_scope_type" "text" DEFAULT NULL::"text", "p_unit_id" "uuid" DEFAULT NULL::"uuid") RETURNS "public"."shopping_list_items"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO ''
     AS $$
@@ -34707,6 +34736,12 @@ GRANT ALL ON FUNCTION "public"."members_list_active_by_home"("p_home_id" "uuid",
 
 
 
+GRANT ALL ON FUNCTION "public"."members_list_active_by_home_v2"("p_home_id" "uuid", "p_exclude_self" boolean) TO "anon";
+GRANT ALL ON FUNCTION "public"."members_list_active_by_home_v2"("p_home_id" "uuid", "p_exclude_self" boolean) TO "authenticated";
+GRANT ALL ON FUNCTION "public"."members_list_active_by_home_v2"("p_home_id" "uuid", "p_exclude_self" boolean) TO "service_role";
+
+
+
 GRANT ALL ON FUNCTION "public"."membership_me_current"() TO "anon";
 GRANT ALL ON FUNCTION "public"."membership_me_current"() TO "authenticated";
 GRANT ALL ON FUNCTION "public"."membership_me_current"() TO "service_role";
@@ -35753,6 +35788,7 @@ ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TAB
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TABLES TO "anon";
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TABLES TO "authenticated";
 ALTER DEFAULT PRIVILEGES FOR ROLE "postgres" IN SCHEMA "public" GRANT ALL ON TABLES TO "service_role";
+
 
 
 
