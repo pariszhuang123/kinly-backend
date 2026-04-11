@@ -6762,7 +6762,7 @@ $$;
 ALTER FUNCTION "public"."_shopping_list__assert_scope_target"("p_home_id" "uuid", "p_scope_type" "text", "p_unit_id" "uuid") OWNER TO "postgres";
 
 
-CREATE OR REPLACE FUNCTION "public"."_shopping_list__build_add_item_payload"("p_item" "public"."shopping_list_items") RETURNS "jsonb"
+CREATE OR REPLACE FUNCTION "public"."_shopping_list__build_add_item_payload_v2"("p_item" "public"."shopping_list_items") RETURNS "jsonb"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO ''
     AS $$
@@ -6786,7 +6786,30 @@ END;
 $$;
 
 
-ALTER FUNCTION "public"."_shopping_list__build_add_item_payload"("p_item" "public"."shopping_list_items") OWNER TO "postgres";
+ALTER FUNCTION "public"."_shopping_list__build_add_item_payload_v2"("p_item" "public"."shopping_list_items") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_shopping_list__build_add_item_payload_v3"("p_item" "public"."shopping_list_items", "p_purchase_memory" "jsonb", "p_needs_confirmation" boolean) RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+BEGIN
+  RETURN jsonb_build_object(
+    'item',
+    CASE
+      WHEN p_item IS NULL THEN NULL
+      ELSE to_jsonb(p_item) || jsonb_build_object('completed_by_avatar_id', NULL)
+    END,
+    'needs_confirmation',
+    COALESCE(p_needs_confirmation, FALSE),
+    'purchase_memory',
+    p_purchase_memory
+  );
+END;
+$$;
+
+
+ALTER FUNCTION "public"."_shopping_list__build_add_item_payload_v3"("p_item" "public"."shopping_list_items", "p_purchase_memory" "jsonb", "p_needs_confirmation" boolean) OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."_shopping_list__canonicalize_name"("p_name" "text") RETURNS "text"
@@ -24946,12 +24969,75 @@ BEGIN
     p_unit_id
   );
 
-  RETURN public._shopping_list__build_add_item_payload(v_item);
+  RETURN public._shopping_list__build_add_item_payload_v2(v_item);
 END;
 $$;
 
 
 ALTER FUNCTION "public"."shopping_list_add_item_v2"("p_home_id" "uuid", "p_name" "text", "p_quantity" "text", "p_details" "text", "p_reference_photo_path" "text", "p_scope_type" "text", "p_unit_id" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."shopping_list_add_item_v3"("p_home_id" "uuid", "p_name" "text", "p_quantity" "text" DEFAULT NULL::"text", "p_details" "text" DEFAULT NULL::"text", "p_reference_photo_path" "text" DEFAULT NULL::"text", "p_scope_type" "text" DEFAULT 'house'::"text", "p_unit_id" "uuid" DEFAULT NULL::"uuid", "p_confirm_recent_purchase" boolean DEFAULT false) RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+DECLARE
+  v_resolved_scope record;
+  v_purchase_memory jsonb := NULL;
+  v_item public.shopping_list_items;
+BEGIN
+  PERFORM public._assert_authenticated();
+  PERFORM public._assert_home_member(p_home_id);
+
+  SELECT *
+  INTO v_resolved_scope
+  FROM public._shopping_list__assert_scope_target(
+    p_home_id,
+    p_scope_type,
+    p_unit_id
+  );
+
+  BEGIN
+    v_purchase_memory := public._shopping_list__purchase_memory_payload(
+      p_home_id,
+      v_resolved_scope.scope_type,
+      v_resolved_scope.unit_id,
+      p_name
+    );
+  EXCEPTION
+    WHEN OTHERS THEN
+      v_purchase_memory := NULL;
+  END;
+
+  IF v_purchase_memory IS NOT NULL
+     AND COALESCE(p_confirm_recent_purchase, FALSE) = FALSE THEN
+    RETURN public._shopping_list__build_add_item_payload_v3(
+      NULL::public.shopping_list_items,
+      v_purchase_memory,
+      TRUE
+    );
+  END IF;
+
+  v_item := public._shopping_list__add_item_core(
+    p_home_id,
+    p_name,
+    p_quantity,
+    p_details,
+    p_reference_photo_path,
+    p_scope_type,
+    p_unit_id
+  );
+
+  RETURN public._shopping_list__build_add_item_payload_v3(
+    v_item,
+    v_purchase_memory,
+    FALSE
+  );
+END;
+$$;
+
+
+ALTER FUNCTION "public"."shopping_list_add_item_v3"("p_home_id" "uuid", "p_name" "text", "p_quantity" "text", "p_details" "text", "p_reference_photo_path" "text", "p_scope_type" "text", "p_unit_id" "uuid", "p_confirm_recent_purchase" boolean) OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."shopping_list_archive_item"("p_item_id" "uuid") RETURNS "public"."shopping_list_items"
@@ -32463,8 +32549,13 @@ GRANT ALL ON FUNCTION "public"."_shopping_list__assert_scope_target"("p_home_id"
 
 
 
-REVOKE ALL ON FUNCTION "public"."_shopping_list__build_add_item_payload"("p_item" "public"."shopping_list_items") FROM PUBLIC;
-GRANT ALL ON FUNCTION "public"."_shopping_list__build_add_item_payload"("p_item" "public"."shopping_list_items") TO "service_role";
+REVOKE ALL ON FUNCTION "public"."_shopping_list__build_add_item_payload_v2"("p_item" "public"."shopping_list_items") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_shopping_list__build_add_item_payload_v2"("p_item" "public"."shopping_list_items") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_shopping_list__build_add_item_payload_v3"("p_item" "public"."shopping_list_items", "p_purchase_memory" "jsonb", "p_needs_confirmation" boolean) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_shopping_list__build_add_item_payload_v3"("p_item" "public"."shopping_list_items", "p_purchase_memory" "jsonb", "p_needs_confirmation" boolean) TO "service_role";
 
 
 
@@ -35138,6 +35229,12 @@ GRANT ALL ON FUNCTION "public"."shopping_list_add_item"("p_home_id" "uuid", "p_n
 REVOKE ALL ON FUNCTION "public"."shopping_list_add_item_v2"("p_home_id" "uuid", "p_name" "text", "p_quantity" "text", "p_details" "text", "p_reference_photo_path" "text", "p_scope_type" "text", "p_unit_id" "uuid") FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."shopping_list_add_item_v2"("p_home_id" "uuid", "p_name" "text", "p_quantity" "text", "p_details" "text", "p_reference_photo_path" "text", "p_scope_type" "text", "p_unit_id" "uuid") TO "service_role";
 GRANT ALL ON FUNCTION "public"."shopping_list_add_item_v2"("p_home_id" "uuid", "p_name" "text", "p_quantity" "text", "p_details" "text", "p_reference_photo_path" "text", "p_scope_type" "text", "p_unit_id" "uuid") TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "public"."shopping_list_add_item_v3"("p_home_id" "uuid", "p_name" "text", "p_quantity" "text", "p_details" "text", "p_reference_photo_path" "text", "p_scope_type" "text", "p_unit_id" "uuid", "p_confirm_recent_purchase" boolean) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."shopping_list_add_item_v3"("p_home_id" "uuid", "p_name" "text", "p_quantity" "text", "p_details" "text", "p_reference_photo_path" "text", "p_scope_type" "text", "p_unit_id" "uuid", "p_confirm_recent_purchase" boolean) TO "service_role";
+GRANT ALL ON FUNCTION "public"."shopping_list_add_item_v3"("p_home_id" "uuid", "p_name" "text", "p_quantity" "text", "p_details" "text", "p_reference_photo_path" "text", "p_scope_type" "text", "p_unit_id" "uuid", "p_confirm_recent_purchase" boolean) TO "authenticated";
 
 
 

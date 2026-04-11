@@ -5,12 +5,12 @@ Scope: backend
 Artifact-Type: contract
 Stability: evolving
 Status: draft
-Version: v1.6
+Version: v1.7
 Audience: internal
-Last updated: 2026-03-31
+Last updated: 2026-04-11
 ---
 
-# Shopping List API Contract v1.6
+# Shopping List API Contract v1.7
 
 Backend RPC shapes and invariants for the shared shopping list. This version
 adds item-level scope semantics, scope-aware purchase memory, backend read
@@ -138,13 +138,13 @@ Response shape:
 Compatibility note:
 - existing callers may continue to use this row-returning RPC unchanged
 
-### 2.3 `shopping_list_add_item_v2(p_home_id uuid, p_name text, p_quantity text default NULL, p_details text default NULL, p_reference_photo_path text default NULL, p_scope_type text default 'house', p_unit_id uuid default NULL)`
+### 2.3 `shopping_list_add_item_v3(p_home_id uuid, p_name text, p_quantity text default NULL, p_details text default NULL, p_reference_photo_path text default NULL, p_scope_type text default 'house', p_unit_id uuid default NULL, p_confirm_recent_purchase boolean default false)`
 
 Versioned add-item RPC for reminder-aware clients.
 
 Behavior:
 - matches `shopping_list_add_item` for validation and insertion
-- performs the same purchase-memory lookup after insert
+- performs purchase-memory lookup before insert when confirmation is required
 - returns a wrapped payload rather than a bare row:
 
 ```json
@@ -171,6 +171,32 @@ Behavior:
     "created_at": "2026-03-28T00:00:00.000Z",
     "updated_at": "2026-03-28T00:00:00.000Z"
   },
+  "needs_confirmation": false,
+  "purchase_memory": null
+}
+```
+
+Compatibility note:
+- `shopping_list_add_item_v2` remains the wrapped-response RPC without the
+  confirmation parameter
+- `shopping_list_add_item_v3` is required for callers that use the explicit
+  recent-purchase confirmation flow
+- do not silently change legacy callers over in place
+
+Purchase-memory lookup:
+- performed before insert
+- uses the same bucket as the new item:
+  - `house` add -> house memory only
+  - `unit` add -> that unit's memory only
+- if no matching in-window memory exists, `purchase_memory` is `null` and
+  `needs_confirmation` is `false`
+- if a matching in-window memory record exists and
+  `p_confirm_recent_purchase = false`, the RPC MUST return:
+
+```json
+{
+  "item": null,
+  "needs_confirmation": true,
   "purchase_memory": {
     "last_purchased_at": "2026-03-10T14:22:00.000Z",
     "last_purchased_by_display_name": "Paris",
@@ -180,17 +206,22 @@ Behavior:
 }
 ```
 
-Compatibility note:
-- use this RPC only for callers that are ready for the wrapped response shape
-- do not silently change legacy callers over in place
+- if a matching in-window memory record exists and
+  `p_confirm_recent_purchase = true`, the RPC MUST create the row and return
+  `needs_confirmation = false`
+- lookup is non-blocking; if lookup fails, item creation still succeeds and
+  returns `purchase_memory = null`
 
-Purchase-memory lookup:
-- performed after insert
-- uses the same bucket as the new item:
-  - `house` add -> house memory only
-  - `unit` add -> that unit's memory only
-- if no matching in-window memory exists, `purchase_memory` is `null`
-- lookup is non-blocking; item creation still succeeds if lookup fails
+Confirmation behavior:
+- this RPC is intentionally designed for a two-call flow using the same RPC
+- first call:
+  - `p_confirm_recent_purchase = false`
+  - server checks purchase memory and may return `needs_confirmation = true`
+- second call, only after explicit user confirmation:
+  - same payload
+  - `p_confirm_recent_purchase = true`
+  - server creates the item even if the warning still applies
+- if the user dismisses the dialog, the client makes no second call
 
 ### 2.4 `shopping_list_update_item_v2(p_item_id uuid, p_name text default NULL, p_quantity text default NULL, p_details text default NULL, p_is_completed boolean default NULL, p_reference_photo_path text default NULL, p_replace_photo boolean default false, p_scope_type text default NULL, p_unit_id uuid default NULL)`
 

@@ -152,11 +152,21 @@ Rules:
 
 Never change RPC output shape without contract versioning.
 
+Treat client-callable Supabase RPCs in `public` as the compatibility boundary.
+If a public RPC changes its parameter list, return shape, semantics, or auth
+behavior, create a new versioned RPC instead of widening the existing one.
+
 Prefer additive changes:
 
 Add new fields (nullable) rather than rename/remove
 
 Add new RPCs rather than mutate semantics
+
+Internal helper functions are implementation details and do not require version
+bumps for compatibility by default. However, when a helper belongs to a
+versioned public RPC family and the newer flow materially diverges, prefer
+explicit internal version naming over overloading so the call graph mirrors the
+public API versions.
 
 If semantics must change:
 

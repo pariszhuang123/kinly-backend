@@ -5,12 +5,12 @@ Scope: shared
 Artifact-Type: contract
 Stability: evolving
 Status: draft
-Version: v1.4
+Version: v1.5
 Audience: internal
-Last updated: 2026-03-31
+Last updated: 2026-04-11
 ---
 
-# Shopping List Purchase Memory Contract v1.4
+# Shopping List Purchase Memory Contract v1.5
 
 ## 1. Purpose & scope
 
@@ -177,14 +177,26 @@ The backend MUST NOT fall back from unit memory to house memory in v1.
 
 Wire-shape note:
 - legacy `shopping_list_add_item` may remain row-returning for compatibility
-- `shopping_list_add_item_v2` carries the wrapped `purchase_memory` payload for
-  reminder-aware callers
+- existing `shopping_list_add_item_v2` may remain the wrapped-response RPC
+  without confirmation semantics
+- `shopping_list_add_item_v3` is the reminder-aware RPC for the confirmation
+  flow
+- `shopping_list_add_item_v3` SHOULD support a confirmation parameter so the
+  same RPC can be called twice:
+  - first call: check + maybe block creation
+  - second call: explicit confirmed create
 
-If a bucket match exists and `days_since_last_purchase < warning_window_days`,
-the add-item response includes:
+Recommended RPC shape:
+- `shopping_list_add_item_v3(..., p_confirm_recent_purchase boolean default false)`
+
+If a bucket match exists and `days_since_last_purchase < warning_window_days`
+and `p_confirm_recent_purchase = false`, the RPC MUST NOT create the item.
+Instead it returns a reminder payload plus a confirmation requirement:
 
 ```json
 {
+  "item": null,
+  "needs_confirmation": true,
   "purchase_memory": {
     "last_purchased_at": "2026-03-10T14:22:00.000Z",
     "last_purchased_by_display_name": "Paris",
@@ -194,11 +206,29 @@ the add-item response includes:
 }
 ```
 
-Otherwise `purchase_memory` is `null`.
+If there is no in-window match, or if `p_confirm_recent_purchase = true`, the
+RPC creates the item and returns:
+
+```json
+{
+  "item": {
+    "id": "uuid"
+  },
+  "needs_confirmation": false,
+  "purchase_memory": null
+}
+```
+
+If the caller confirms after a warning, the second call SHOULD still include
+the same `purchase_memory` payload in the response for informational use, but
+`needs_confirmation` MUST be `false` and the item MUST be created.
 
 Field notes:
 - `days_since_last_purchase` is computed server-side
 - `last_purchased_by_display_name` is nullable
+- `needs_confirmation = true` means no row was created
+- dialog dismissal on the client should simply abandon the flow; no cleanup RPC
+  is needed because no row was created
 - Memory lookup is non-blocking; if lookup fails, item creation still succeeds
   and returns `purchase_memory = null`
 
@@ -211,7 +241,11 @@ Architecture invariants are defined in
 
 ### 6.3 Reminder UX rules
 
-- Reminders are informational only
+- Reminders are soft-confirmation prompts, not hard errors
+- First call returns a prompt state when the item appears recently purchased
+- Client should show a single dialog with:
+  - primary action: continue / add anyway
+  - dismissal: close dialog and return to the editor with no item created
 - Client copy should stay soft, for example:
   - `Bought once before - 2 days ago`
   - `Last bought 13 days ago by Paris`

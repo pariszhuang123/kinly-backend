@@ -5625,9 +5625,17 @@ export type Database = {
           unit_id: string
         }[]
       }
-      _shopping_list__build_add_item_payload: {
+      _shopping_list__build_add_item_payload_v2: {
         Args: {
           p_item: Database["public"]["Tables"]["shopping_list_items"]["Row"]
+        }
+        Returns: Json
+      }
+      _shopping_list__build_add_item_payload_v3: {
+        Args: {
+          p_item: Database["public"]["Tables"]["shopping_list_items"]["Row"]
+          p_needs_confirmation: boolean
+          p_purchase_memory: Json
         }
         Returns: Json
       }
@@ -7512,6 +7520,19 @@ export type Database = {
       }
       shopping_list_add_item_v2: {
         Args: {
+          p_details?: string
+          p_home_id: string
+          p_name: string
+          p_quantity?: string
+          p_reference_photo_path?: string
+          p_scope_type?: string
+          p_unit_id?: string
+        }
+        Returns: Json
+      }
+      shopping_list_add_item_v3: {
+        Args: {
+          p_confirm_recent_purchase?: boolean
           p_details?: string
           p_home_id: string
           p_name: string
