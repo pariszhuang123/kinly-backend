@@ -34,6 +34,274 @@ export type Database = {
   }
   public: {
     Tables: {
+      ai_feature_steps: {
+        Row: {
+          active: boolean
+          created_at: string
+          feature_key: string
+          role_key: string
+          step_key: string
+          step_order: number
+          updated_at: string
+        }
+        Insert: {
+          active?: boolean
+          created_at?: string
+          feature_key: string
+          role_key: string
+          step_key: string
+          step_order: number
+          updated_at?: string
+        }
+        Update: {
+          active?: boolean
+          created_at?: string
+          feature_key?: string
+          role_key?: string
+          step_key?: string
+          step_order?: number
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "ai_feature_steps_role_key_fkey"
+            columns: ["role_key"]
+            isOneToOne: false
+            referencedRelation: "ai_roles"
+            referencedColumns: ["role_key"]
+          },
+        ]
+      }
+      ai_models: {
+        Row: {
+          active: boolean
+          created_at: string
+          model_id: string
+          model_key: string
+          provider_id: string
+          supports_structured_output: boolean
+          updated_at: string
+        }
+        Insert: {
+          active?: boolean
+          created_at?: string
+          model_id?: string
+          model_key: string
+          provider_id: string
+          supports_structured_output?: boolean
+          updated_at?: string
+        }
+        Update: {
+          active?: boolean
+          created_at?: string
+          model_id?: string
+          model_key?: string
+          provider_id?: string
+          supports_structured_output?: boolean
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "ai_models_provider_id_fkey"
+            columns: ["provider_id"]
+            isOneToOne: false
+            referencedRelation: "ai_providers"
+            referencedColumns: ["provider_id"]
+          },
+        ]
+      }
+      ai_providers: {
+        Row: {
+          active: boolean
+          adapter_kind: string
+          base_url: string | null
+          created_at: string
+          provider_id: string
+          provider_key: string
+          secret_name: string | null
+          updated_at: string
+        }
+        Insert: {
+          active?: boolean
+          adapter_kind: string
+          base_url?: string | null
+          created_at?: string
+          provider_id?: string
+          provider_key: string
+          secret_name?: string | null
+          updated_at?: string
+        }
+        Update: {
+          active?: boolean
+          adapter_kind?: string
+          base_url?: string | null
+          created_at?: string
+          provider_id?: string
+          provider_key?: string
+          secret_name?: string | null
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      ai_role_routes: {
+        Row: {
+          active: boolean
+          created_at: string
+          deterministic_fallback_allowed: boolean
+          execution_mode: string
+          max_retries: number
+          model_id: string
+          prompt_version: string
+          role_key: string
+          updated_at: string
+        }
+        Insert: {
+          active?: boolean
+          created_at?: string
+          deterministic_fallback_allowed?: boolean
+          execution_mode?: string
+          max_retries?: number
+          model_id: string
+          prompt_version: string
+          role_key: string
+          updated_at?: string
+        }
+        Update: {
+          active?: boolean
+          created_at?: string
+          deterministic_fallback_allowed?: boolean
+          execution_mode?: string
+          max_retries?: number
+          model_id?: string
+          prompt_version?: string
+          role_key?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "ai_role_routes_model_id_fkey"
+            columns: ["model_id"]
+            isOneToOne: false
+            referencedRelation: "ai_models"
+            referencedColumns: ["model_id"]
+          },
+          {
+            foreignKeyName: "ai_role_routes_role_key_fkey"
+            columns: ["role_key"]
+            isOneToOne: true
+            referencedRelation: "ai_roles"
+            referencedColumns: ["role_key"]
+          },
+        ]
+      }
+      ai_roles: {
+        Row: {
+          created_at: string
+          description: string
+          input_schema_key: string
+          output_schema_key: string
+          role_key: string
+          stage: string
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          description: string
+          input_schema_key: string
+          output_schema_key: string
+          role_key: string
+          stage: string
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          description?: string
+          input_schema_key?: string
+          output_schema_key?: string
+          role_key?: string
+          stage?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      ai_step_logs: {
+        Row: {
+          created_at: string
+          error_code: string | null
+          feature_key: string
+          home_id: string | null
+          input_tokens: number | null
+          latency_ms: number | null
+          model: string
+          output_tokens: number | null
+          prompt_version: string
+          provider: string
+          provider_request_id: string | null
+          request_id: string
+          role_key: string
+          stage: string
+          status: string
+          step_log_id: string
+          total_tokens: number | null
+          user_id: string | null
+        }
+        Insert: {
+          created_at?: string
+          error_code?: string | null
+          feature_key: string
+          home_id?: string | null
+          input_tokens?: number | null
+          latency_ms?: number | null
+          model: string
+          output_tokens?: number | null
+          prompt_version: string
+          provider: string
+          provider_request_id?: string | null
+          request_id: string
+          role_key: string
+          stage: string
+          status: string
+          step_log_id?: string
+          total_tokens?: number | null
+          user_id?: string | null
+        }
+        Update: {
+          created_at?: string
+          error_code?: string | null
+          feature_key?: string
+          home_id?: string | null
+          input_tokens?: number | null
+          latency_ms?: number | null
+          model?: string
+          output_tokens?: number | null
+          prompt_version?: string
+          provider?: string
+          provider_request_id?: string | null
+          request_id?: string
+          role_key?: string
+          stage?: string
+          status?: string
+          step_log_id?: string
+          total_tokens?: number | null
+          user_id?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "ai_step_logs_home_id_fkey"
+            columns: ["home_id"]
+            isOneToOne: false
+            referencedRelation: "homes"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "ai_step_logs_user_id_fkey"
+            columns: ["user_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       analytics_events: {
         Row: {
           event_type: string
@@ -350,6 +618,107 @@ export type Database = {
             columns: ["home_id"]
             isOneToOne: false
             referencedRelation: "homes"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      command_ai_requests: {
+        Row: {
+          charged_at: string
+          created_at: string
+          quota_date: string
+          request_id: string
+          user_id: string
+        }
+        Insert: {
+          charged_at?: string
+          created_at?: string
+          quota_date: string
+          request_id: string
+          user_id: string
+        }
+        Update: {
+          charged_at?: string
+          created_at?: string
+          quota_date?: string
+          request_id?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "command_ai_requests_user_id_fkey"
+            columns: ["user_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      command_handoffs: {
+        Row: {
+          confidence: number
+          context: Json
+          created_at: string
+          expires_at: string | null
+          handoff_id: string
+          home_id: string
+          intent: string
+          kind: string
+          module: string
+          request_id: string
+          resume_token: string
+          source_text: string
+          status: string
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          confidence: number
+          context?: Json
+          created_at?: string
+          expires_at?: string | null
+          handoff_id?: string
+          home_id: string
+          intent: string
+          kind: string
+          module: string
+          request_id: string
+          resume_token: string
+          source_text: string
+          status: string
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          confidence?: number
+          context?: Json
+          created_at?: string
+          expires_at?: string | null
+          handoff_id?: string
+          home_id?: string
+          intent?: string
+          kind?: string
+          module?: string
+          request_id?: string
+          resume_token?: string
+          source_text?: string
+          status?: string
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "command_handoffs_home_id_fkey"
+            columns: ["home_id"]
+            isOneToOne: false
+            referencedRelation: "homes"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "command_handoffs_user_id_fkey"
+            columns: ["user_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
             referencedColumns: ["id"]
           },
         ]
@@ -4474,6 +4843,7 @@ export type Database = {
       shopping_list_purchase_memory: {
         Row: {
           canonical_name: string
+          canonical_name_v2: string | null
           created_at: string
           display_name: string
           home_id: string
@@ -4487,6 +4857,7 @@ export type Database = {
         }
         Insert: {
           canonical_name: string
+          canonical_name_v2?: string | null
           created_at?: string
           display_name: string
           home_id: string
@@ -4500,6 +4871,7 @@ export type Database = {
         }
         Update: {
           canonical_name?: string
+          canonical_name_v2?: string | null
           created_at?: string
           display_name?: string
           home_id?: string
@@ -4566,6 +4938,75 @@ export type Database = {
             columns: ["home_id"]
             isOneToOne: false
             referencedRelation: "homes"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      unrecognized_intents: {
+        Row: {
+          classifier_confidence: string
+          classifier_intent: string
+          created_at: string
+          home_id: string | null
+          id: string
+          input_mode: string
+          locale: string | null
+          model_name: string | null
+          model_provider: string | null
+          raw_text: string | null
+          request_id: string
+          router_version: string | null
+          timezone: string | null
+          transcript_text: string | null
+          user_id: string | null
+        }
+        Insert: {
+          classifier_confidence?: string
+          classifier_intent?: string
+          created_at?: string
+          home_id?: string | null
+          id?: string
+          input_mode: string
+          locale?: string | null
+          model_name?: string | null
+          model_provider?: string | null
+          raw_text?: string | null
+          request_id: string
+          router_version?: string | null
+          timezone?: string | null
+          transcript_text?: string | null
+          user_id?: string | null
+        }
+        Update: {
+          classifier_confidence?: string
+          classifier_intent?: string
+          created_at?: string
+          home_id?: string | null
+          id?: string
+          input_mode?: string
+          locale?: string | null
+          model_name?: string | null
+          model_provider?: string | null
+          raw_text?: string | null
+          request_id?: string
+          router_version?: string | null
+          timezone?: string | null
+          transcript_text?: string | null
+          user_id?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "unrecognized_intents_home_id_fkey"
+            columns: ["home_id"]
+            isOneToOne: false
+            referencedRelation: "homes"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "unrecognized_intents_user_id_fkey"
+            columns: ["user_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
             referencedColumns: ["id"]
           },
         ]
@@ -4791,6 +5232,27 @@ export type Database = {
       }
     }
     Functions: {
+      _ai_log_step: {
+        Args: {
+          p_error_code?: string
+          p_feature_key: string
+          p_home_id: string
+          p_input_tokens?: number
+          p_latency_ms?: number
+          p_model: string
+          p_output_tokens?: number
+          p_prompt_version: string
+          p_provider: string
+          p_provider_request_id?: string
+          p_request_id: string
+          p_role_key: string
+          p_stage: string
+          p_status: string
+          p_total_tokens?: number
+          p_user_id?: string
+        }
+        Returns: string
+      }
       _assert_active_profile: { Args: never; Returns: undefined }
       _assert_authenticated: { Args: never; Returns: undefined }
       _assert_home_active: { Args: { p_home_id: string }; Returns: undefined }
@@ -4819,6 +5281,245 @@ export type Database = {
           name: string
           state: Database["public"]["Enums"]["chore_state"]
         }[]
+      }
+      _command_ai_quota_charge: {
+        Args: { p_home_id: string; p_now?: string; p_request_id: string }
+        Returns: Json
+      }
+      _command_ai_quota_date: { Args: { p_now?: string }; Returns: string }
+      _command_ai_quota_limit: { Args: never; Returns: number }
+      _command_ai_quota_release: {
+        Args: { p_now?: string; p_request_id: string; p_user_id?: string }
+        Returns: undefined
+      }
+      _command_ai_quota_resets_at: { Args: { p_now?: string }; Returns: string }
+      _command_ai_quota_status: {
+        Args: { p_home_id: string; p_now?: string; p_user_id?: string }
+        Returns: Json
+      }
+      _command_attach_handoff: {
+        Args: {
+          p_home_id: string
+          p_request_id: string
+          p_result: Json
+          p_source_text: string
+        }
+        Returns: Json
+      }
+      _command_confidence_score: {
+        Args: { p_confidence: string }
+        Returns: number
+      }
+      _command_context_value: {
+        Args: { p_field: string; p_supplied: string; p_user_id: string }
+        Returns: string
+      }
+      _command_default_grocery_scope: {
+        Args: { p_home_id: string }
+        Returns: Json
+      }
+      _command_effective_input: {
+        Args: {
+          p_input_mode: string
+          p_raw_text: string
+          p_transcript_text: string
+        }
+        Returns: string
+      }
+      _command_grocery_clean_token: {
+        Args: { p_token: string }
+        Returns: string
+      }
+      _command_grocery_items_from_parse: {
+        Args: { p_parse: Json }
+        Returns: string[]
+      }
+      _command_grocery_parse_items: { Args: { p_input: string }; Returns: Json }
+      _command_grocery_preflight: {
+        Args: {
+          p_home_id: string
+          p_items: string[]
+          p_scope_type: string
+          p_unit_id: string
+        }
+        Returns: Json
+      }
+      _command_grocery_result_pipeline: {
+        Args: {
+          p_home_id: string
+          p_parser_result?: Json
+          p_raw_input: string
+          p_request_id: string
+        }
+        Returns: Json
+      }
+      _command_handoff_expires_at: { Args: { p_kind: string }; Returns: string }
+      _command_handoff_state_result: {
+        Args: {
+          p_handoff: Database["public"]["Tables"]["command_handoffs"]["Row"]
+        }
+        Returns: Json
+      }
+      _command_legacy_to_v1_result: {
+        Args: {
+          p_confidence: number
+          p_force_confirm?: boolean
+          p_home_id: string
+          p_is_multi?: boolean
+          p_legacy: Json
+          p_request_id: string
+          p_source_text: string
+        }
+        Returns: Json
+      }
+      _command_log_unrecognized_intent: {
+        Args: {
+          p_classifier_confidence?: string
+          p_classifier_intent?: string
+          p_home_id: string
+          p_input_mode: string
+          p_locale?: string
+          p_model_name?: string
+          p_model_provider?: string
+          p_raw_text?: string
+          p_request_id: string
+          p_router_version?: string
+          p_timezone?: string
+          p_transcript_text?: string
+        }
+        Returns: string
+      }
+      _command_module_preview_result_pipeline: {
+        Args: {
+          p_effective_input: string
+          p_home_id: string
+          p_intent: string
+          p_parser_result?: Json
+          p_request_id: string
+        }
+        Returns: Json
+      }
+      _command_module_result_pipeline: {
+        Args: {
+          p_effective_input: string
+          p_home_id: string
+          p_intent: string
+          p_parser_result?: Json
+          p_request_id: string
+        }
+        Returns: Json
+      }
+      _command_navigation_result: {
+        Args: { p_intent: string; p_request_id: string }
+        Returns: Json
+      }
+      _command_navigation_target: { Args: { p_intent: string }; Returns: Json }
+      _command_pipeline_call: {
+        Args: { p_home_id: string; p_payload: Json; p_request_id: string }
+        Returns: Json
+      }
+      _command_pipeline_parser_result_for_intent: {
+        Args: { p_intent: string; p_pipeline: Json }
+        Returns: Json
+      }
+      _command_result_build: {
+        Args: {
+          p_confidence: number
+          p_execution: Json
+          p_fields: Json
+          p_intent: string
+          p_is_multi?: boolean
+          p_kind: string
+          p_missing_fields: Json
+          p_module: string
+          p_ui: Json
+        }
+        Returns: Json
+      }
+      _command_result_message: {
+        Args: {
+          p_fields: Json
+          p_intent: string
+          p_is_multi?: boolean
+          p_kind: string
+          p_module: string
+        }
+        Returns: Json
+      }
+      _command_resume_row_to_result: {
+        Args: {
+          p_handoff: Database["public"]["Tables"]["command_handoffs"]["Row"]
+        }
+        Returns: Json
+      }
+      _command_route_placeholder_result: {
+        Args: {
+          p_intent: string
+          p_module: string
+          p_request_id: string
+          p_summary: string
+          p_target: string
+        }
+        Returns: Json
+      }
+      _command_task_assignee_options: {
+        Args: { p_home_id: string }
+        Returns: Json
+      }
+      _command_task_detect_assignee: {
+        Args: { p_home_id: string; p_input: string }
+        Returns: string
+      }
+      _command_task_detect_assignee_hint: {
+        Args: { p_assignee_hint: string; p_home_id: string }
+        Returns: string
+      }
+      _command_task_extract_title: {
+        Args: { p_input: string }
+        Returns: string
+      }
+      _command_task_interpretation: {
+        Args: {
+          p_effective_input: string
+          p_home_id: string
+          p_parser_result?: Json
+        }
+        Returns: Json
+      }
+      _command_task_recurrence_interval_from_parse: {
+        Args: { p_parser_result: Json }
+        Returns: Database["public"]["Enums"]["recurrence_interval"]
+      }
+      _command_task_result_pipeline: {
+        Args: {
+          p_home_id: string
+          p_input: string
+          p_parser_result?: Json
+          p_request_id: string
+        }
+        Returns: Json
+      }
+      _command_task_route_result: {
+        Args: {
+          p_effective_input: string
+          p_home_id: string
+          p_parser_result?: Json
+          p_request_id: string
+          p_source_intent: string
+        }
+        Returns: Json
+      }
+      _command_task_start_date_from_parse: {
+        Args: { p_parser_result: Json }
+        Returns: string
+      }
+      _command_top_level_response: {
+        Args: { p_entrypoint: string; p_request_id: string; p_result: Json }
+        Returns: Json
+      }
+      _command_unknown_v1_result: {
+        Args: { p_confidence?: number; p_request_id: string }
+        Returns: Json
       }
       _complaint_topics_valid: { Args: { p: Json }; Returns: boolean }
       _current_user_id: { Args: never; Returns: string }
@@ -5643,6 +6344,10 @@ export type Database = {
         Args: { p_name: string }
         Returns: string
       }
+      _shopping_list__canonicalize_name_v2: {
+        Args: { p_name: string }
+        Returns: string
+      }
       _shopping_list__canonicalize_token: {
         Args: { p_token: string }
         Returns: string
@@ -5730,6 +6435,8 @@ export type Database = {
         Args: { p_home_id: string; p_reminder_id: string }
         Returns: Json
       }
+      ai_feature_steps_get: { Args: { p_feature_key: string }; Returns: Json }
+      ai_role_route_get: { Args: { p_role_key: string }; Returns: Json }
       api_assert: {
         Args: {
           p_code: string
@@ -5972,6 +6679,25 @@ export type Database = {
           rewrite_request_id: string
           routing_decision: Json
         }[]
+      }
+      command_cancel_v1: { Args: { p_handoff_id: string }; Returns: Json }
+      command_continue_v1: {
+        Args: { p_handoff_id: string; p_request_id: string; p_user_input: Json }
+        Returns: Json
+      }
+      command_resume_v1: { Args: { p_home_id: string }; Returns: Json }
+      command_submit_v1: {
+        Args: {
+          p_client_timestamp: string
+          p_home_id: string
+          p_input_mode: string
+          p_locale: string
+          p_raw_text: string
+          p_request_id: string
+          p_timezone: string
+          p_transcript_text: string
+        }
+        Returns: Json
       }
       complaint_build_recipient_snapshots: {
         Args: {
@@ -6876,6 +7602,16 @@ export type Database = {
         }[]
       }
       home_units_list_selectable_expense_units: {
+        Args: { p_home_id: string }
+        Returns: {
+          home_id: string
+          member_user_ids: string[]
+          name: string
+          unit_id: string
+          unit_type: string
+        }[]
+      }
+      home_units_list_selectable_expense_units_v2: {
         Args: { p_home_id: string }
         Returns: {
           home_id: string

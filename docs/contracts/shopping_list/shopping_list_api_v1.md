@@ -5,12 +5,12 @@ Scope: backend
 Artifact-Type: contract
 Stability: evolving
 Status: draft
-Version: v1.7
+Version: v1.8
 Audience: internal
-Last updated: 2026-04-11
+Last updated: 2026-04-13
 ---
 
-# Shopping List API Contract v1.7
+# Shopping List API Contract v1.8
 
 Backend RPC shapes and invariants for the shared shopping list. This version
 adds item-level scope semantics, scope-aware purchase memory, backend read
@@ -63,6 +63,7 @@ Required columns:
 - `scope_type`
 - `unit_id`
 - `canonical_name`
+- `canonical_name_v2`
 - `display_name`
 - `last_purchased_at`
 - `last_purchased_by_user_id`
@@ -72,19 +73,31 @@ Invariants:
 - `scope_type IN ('house', 'unit')`
 - `scope_type = 'house'` -> `unit_id IS NULL`
 - `scope_type = 'unit'` -> `unit_id IS NOT NULL`
-- `canonical_name` is derived from the item name after trim, lowercase,
-  punctuation folding, whitespace collapse, and simple singularisation
+- `canonical_name` remains the legacy bucket key used for compatibility during
+  the rollout
+- `canonical_name_v2` is the current multilingual-safe bucket key used for new
+  writes and preferred for lookup
+- `canonical_name_v2` is derived from the item name using the rollout rules
+  defined in `shopping_list_purchase_memory_v1.md` §4.2: trim, Unicode-aware
+  lowercase, curated Unicode whitespace/punctuation folding, whitespace
+  collapse, and English singularisation for Latin-script tokens only
 - `last_purchased_by_user_id` is the archived item's `completed_by_user_id`
-- `warning_window_days` is derived from the canonical name in the current
-  implementation
+- `warning_window_days` is derived from the effective canonical key used for the
+  row, with English-first defaults and fallback behavior
 - uniqueness must be enforced per bucket:
   - house bucket on `(home_id, canonical_name)`
   - unit bucket on `(home_id, unit_id, canonical_name)`
+  - house bucket on `(home_id, canonical_name_v2)` where populated
+  - unit bucket on `(home_id, unit_id, canonical_name_v2)` where populated
 
 Canonicalisation examples:
-- `Eggs` and `egg` resolve to the same canonical key
-- `paper-towels` and `paper towels` resolve to the same canonical key
-- `farmer's eggs` resolves to the canonical key `farmer egg`
+- `Eggs` and `egg` resolve to the same v2 canonical key (Latin: lower +
+  singularise)
+- `paper-towels` and `paper towels` resolve to the same v2 canonical key
+- `Farmer’s Eggs` and `farmer's egg` resolve to the same v2 canonical key
+- `Молоко` and `молоко` resolve to the same v2 canonical key
+- `牛奶` resolves to the same v2 canonical key as ` 牛奶 `
+- `milk` and `牛奶` are distinct canonical keys and do NOT match each other
 
 ## 2. RPCs
 
@@ -130,6 +143,8 @@ Behavior:
 - validates requested scope against the caller's allowed home-unit scope
 - validates photo path and applies photo quota rules as before
 - rejects blank names with `invalid_name`
+- rejects names that canonicalise to an empty string with `invalid_name`
+  (e.g. punctuation-only input like `---` or `。、、`)
 
 Response shape:
 - returns a bare `shopping_list_items` row
@@ -227,6 +242,10 @@ Confirmation behavior:
 
 Supports rename, quantity/details edit, completion, photo replacement, and
 optional re-scoping.
+
+Name validation:
+- if `p_name` is provided, rejects blank names and names that canonicalise to
+  an empty string with `invalid_name`
 
 Scope behavior:
 - `NULL` `p_scope_type` and `p_unit_id` means no scope change

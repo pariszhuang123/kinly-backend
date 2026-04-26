@@ -63,7 +63,9 @@ It exists to capture cross-layer invariants only.
   - `unit` bucket: `(home_id, scope_type = 'unit', unit_id, canonical_name)`
 - The implementation must enforce uniqueness per bucket; a plain unique
   constraint including nullable `unit_id` is not sufficient for house rows.
-- `canonical_name` is derived as `lower(btrim(name))` at archive time.
+- `canonical_name` is derived from the item name after lowercase,
+  punctuation folding, whitespace collapse, and simple singularisation while
+  preserving non-Latin letters and digits for exact-match reminders.
 - Memory is written only from completed rows actually archived by the archive
   RPC transaction.
 - The current implementation stores latest-purchase recency per bucket rather

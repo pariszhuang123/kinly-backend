@@ -256,6 +256,60 @@ CREATE TYPE "public"."subscription_store" AS ENUM (
 ALTER TYPE "public"."subscription_store" OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."_ai_log_step"("p_request_id" "uuid", "p_home_id" "uuid", "p_feature_key" "text", "p_stage" "text", "p_role_key" "text", "p_provider" "text", "p_model" "text", "p_prompt_version" "text", "p_status" "text", "p_user_id" "uuid" DEFAULT NULL::"uuid", "p_latency_ms" integer DEFAULT NULL::integer, "p_error_code" "text" DEFAULT NULL::"text", "p_provider_request_id" "text" DEFAULT NULL::"text", "p_input_tokens" integer DEFAULT NULL::integer, "p_output_tokens" integer DEFAULT NULL::integer, "p_total_tokens" integer DEFAULT NULL::integer) RETURNS "uuid"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+DECLARE
+  v_user_id uuid := COALESCE(p_user_id, auth.uid());
+  v_log_id uuid;
+BEGIN
+  INSERT INTO public.ai_step_logs (
+    request_id,
+    user_id,
+    home_id,
+    feature_key,
+    stage,
+    role_key,
+    provider,
+    model,
+    prompt_version,
+    status,
+    latency_ms,
+    error_code,
+    provider_request_id,
+    input_tokens,
+    output_tokens,
+    total_tokens
+  )
+  VALUES (
+    p_request_id,
+    v_user_id,
+    p_home_id,
+    p_feature_key,
+    p_stage,
+    p_role_key,
+    p_provider,
+    p_model,
+    p_prompt_version,
+    p_status,
+    p_latency_ms,
+    p_error_code,
+    p_provider_request_id,
+    p_input_tokens,
+    p_output_tokens,
+    p_total_tokens
+  )
+  RETURNING step_log_id INTO v_log_id;
+
+  RETURN v_log_id;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."_ai_log_step"("p_request_id" "uuid", "p_home_id" "uuid", "p_feature_key" "text", "p_stage" "text", "p_role_key" "text", "p_provider" "text", "p_model" "text", "p_prompt_version" "text", "p_status" "text", "p_user_id" "uuid", "p_latency_ms" integer, "p_error_code" "text", "p_provider_request_id" "text", "p_input_tokens" integer, "p_output_tokens" integer, "p_total_tokens" integer) OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."_assert_active_profile"() RETURNS "void"
     LANGUAGE "plpgsql"
     SET "search_path" TO ''
@@ -467,6 +521,1841 @@ $$;
 
 
 ALTER FUNCTION "public"."_chores_base_for_home"("p_home_id" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_command_ai_quota_charge"("p_home_id" "uuid", "p_request_id" "uuid", "p_now" timestamp with time zone DEFAULT "now"()) RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+DECLARE
+  v_user_id      uuid := auth.uid();
+  v_quota_date   date := public._command_ai_quota_date(p_now);
+  v_limit        integer := public._command_ai_quota_limit();
+  v_used         integer := 0;
+  v_bypassed     boolean := public._home_is_premium(p_home_id);
+  v_lock_key     bigint;
+BEGIN
+  PERFORM public._assert_home_member(p_home_id);
+  PERFORM public.api_assert(v_user_id IS NOT NULL, 'UNAUTHORIZED', 'Authentication required', '28000');
+  PERFORM public.api_assert(p_request_id IS NOT NULL, 'INVALID_REQUEST_ID', 'request_id is required.', '22023');
+
+  IF v_bypassed THEN
+    RETURN public._command_ai_quota_status(p_home_id, v_user_id, p_now);
+  END IF;
+
+  v_lock_key := hashtextextended(v_user_id::text || ':' || v_quota_date::text, 0);
+  PERFORM pg_catalog.pg_advisory_xact_lock(v_lock_key);
+
+  IF EXISTS (
+    SELECT 1
+      FROM public.command_ai_requests car
+     WHERE car.user_id = v_user_id
+       AND car.quota_date = v_quota_date
+       AND car.request_id = p_request_id
+  ) THEN
+    RETURN public._command_ai_quota_status(p_home_id, v_user_id, p_now);
+  END IF;
+
+  SELECT count(*)::integer
+    INTO v_used
+    FROM public.command_ai_requests car
+   WHERE car.user_id = v_user_id
+     AND car.quota_date = v_quota_date;
+
+  IF v_used >= v_limit THEN
+    PERFORM public.api_error(
+      'paywall_ai_command_daily_limit',
+      'Daily AI command quota reached.',
+      'P0001',
+      jsonb_build_object(
+        'metric', 'ai_command_requests',
+        'used', v_used,
+        'limit', v_limit,
+        'resets_at', public._command_ai_quota_resets_at(p_now)
+      )
+    );
+  END IF;
+
+  INSERT INTO public.command_ai_requests (user_id, quota_date, request_id, charged_at)
+  VALUES (v_user_id, v_quota_date, p_request_id, COALESCE(p_now, now()))
+  ON CONFLICT (user_id, quota_date, request_id) DO NOTHING;
+
+  RETURN public._command_ai_quota_status(p_home_id, v_user_id, p_now);
+END;
+$$;
+
+
+ALTER FUNCTION "public"."_command_ai_quota_charge"("p_home_id" "uuid", "p_request_id" "uuid", "p_now" timestamp with time zone) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_command_ai_quota_date"("p_now" timestamp with time zone DEFAULT "now"()) RETURNS "date"
+    LANGUAGE "sql" STABLE
+    SET "search_path" TO ''
+    AS $$
+  SELECT (timezone('UTC', COALESCE(p_now, now())))::date;
+$$;
+
+
+ALTER FUNCTION "public"."_command_ai_quota_date"("p_now" timestamp with time zone) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_command_ai_quota_limit"() RETURNS integer
+    LANGUAGE "plpgsql" STABLE
+    SET "search_path" TO ''
+    AS $$
+DECLARE
+  v_raw text := NULLIF(current_setting('app.settings.command_ai_quota_daily_limit', true), '');
+  v_limit integer;
+BEGIN
+  IF v_raw IS NULL THEN
+    RETURN 5;
+  END IF;
+
+  BEGIN
+    v_limit := v_raw::integer;
+  EXCEPTION WHEN invalid_text_representation THEN
+    RETURN 5;
+  END;
+
+  IF v_limit < 0 THEN
+    RETURN 5;
+  END IF;
+
+  RETURN v_limit;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."_command_ai_quota_limit"() OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_command_ai_quota_release"("p_request_id" "uuid", "p_user_id" "uuid" DEFAULT "auth"."uid"(), "p_now" timestamp with time zone DEFAULT "now"()) RETURNS "void"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+DECLARE
+  v_user_id uuid := COALESCE(p_user_id, auth.uid());
+  v_quota_date date := public._command_ai_quota_date(p_now);
+  v_lock_key bigint;
+BEGIN
+  PERFORM public.api_assert(v_user_id IS NOT NULL, 'UNAUTHORIZED', 'Authentication required', '28000');
+  PERFORM public.api_assert(p_request_id IS NOT NULL, 'INVALID_REQUEST_ID', 'request_id is required.', '22023');
+
+  v_lock_key := hashtextextended(v_user_id::text || ':' || v_quota_date::text, 0);
+  PERFORM pg_catalog.pg_advisory_xact_lock(v_lock_key);
+
+  DELETE FROM public.command_ai_requests car
+   WHERE car.user_id = v_user_id
+     AND car.quota_date = v_quota_date
+     AND car.request_id = p_request_id;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."_command_ai_quota_release"("p_request_id" "uuid", "p_user_id" "uuid", "p_now" timestamp with time zone) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_command_ai_quota_resets_at"("p_now" timestamp with time zone DEFAULT "now"()) RETURNS timestamp with time zone
+    LANGUAGE "sql" STABLE
+    SET "search_path" TO ''
+    AS $$
+  SELECT (
+    (date_trunc('day', timezone('UTC', COALESCE(p_now, now()))) + interval '1 day')
+    AT TIME ZONE 'UTC'
+  );
+$$;
+
+
+ALTER FUNCTION "public"."_command_ai_quota_resets_at"("p_now" timestamp with time zone) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_command_ai_quota_status"("p_home_id" "uuid", "p_user_id" "uuid" DEFAULT "auth"."uid"(), "p_now" timestamp with time zone DEFAULT "now"()) RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+DECLARE
+  v_user_id      uuid := COALESCE(p_user_id, auth.uid());
+  v_quota_date   date := public._command_ai_quota_date(p_now);
+  v_limit        integer := public._command_ai_quota_limit();
+  v_used         integer := 0;
+  v_bypassed     boolean := public._home_is_premium(p_home_id);
+BEGIN
+  PERFORM public.api_assert(v_user_id IS NOT NULL, 'UNAUTHORIZED', 'Authentication required', '28000');
+
+  SELECT count(*)::integer
+    INTO v_used
+    FROM public.command_ai_requests car
+   WHERE car.user_id = v_user_id
+     AND car.quota_date = v_quota_date;
+
+  RETURN jsonb_build_object(
+    'used', v_used,
+    'limit', v_limit,
+    'resets_at', public._command_ai_quota_resets_at(p_now),
+    'window', 'utc_calendar_day',
+    'bypassed_by_premium_home', v_bypassed
+  );
+END;
+$$;
+
+
+ALTER FUNCTION "public"."_command_ai_quota_status"("p_home_id" "uuid", "p_user_id" "uuid", "p_now" timestamp with time zone) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_command_attach_handoff"("p_home_id" "uuid", "p_request_id" "uuid", "p_source_text" "text", "p_result" "jsonb") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+DECLARE
+  v_kind text := p_result->>'kind';
+  v_user_id uuid := auth.uid();
+  v_handoff_id uuid;
+  v_resume_token text;
+  v_expires_at timestamptz;
+  v_source_text text := COALESCE(p_source_text, '');
+  v_context jsonb;
+BEGIN
+  IF v_kind NOT IN ('inline', 'route', 'confirm') THEN
+    RETURN p_result;
+  END IF;
+
+  v_resume_token := encode(extensions.gen_random_bytes(16), 'hex');
+  v_expires_at := public._command_handoff_expires_at(v_kind);
+  v_context := jsonb_build_object(
+    'result', jsonb_set(COALESCE(p_result, '{}'::jsonb), '{draft}', 'null'::jsonb)
+  );
+
+  INSERT INTO public.command_handoffs (
+    request_id,
+    user_id,
+    home_id,
+    intent,
+    module,
+    kind,
+    status,
+    source_text,
+    confidence,
+    context,
+    resume_token,
+    expires_at
+  )
+  VALUES (
+    p_request_id,
+    v_user_id,
+    p_home_id,
+    COALESCE(p_result->>'intent', 'unknown'),
+    COALESCE(p_result->>'module', 'navigation'),
+    v_kind,
+    'pending',
+    v_source_text,
+    COALESCE((p_result->>'confidence')::numeric, 0),
+    v_context,
+    v_resume_token,
+    v_expires_at
+  )
+  RETURNING handoff_id INTO v_handoff_id;
+
+  RETURN jsonb_set(
+    p_result,
+    '{draft}',
+    jsonb_build_object(
+      'handoff_id', v_handoff_id,
+      'resume_token', v_resume_token,
+      'expires_at', v_expires_at
+    )
+  );
+END;
+$$;
+
+
+ALTER FUNCTION "public"."_command_attach_handoff"("p_home_id" "uuid", "p_request_id" "uuid", "p_source_text" "text", "p_result" "jsonb") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_command_confidence_score"("p_confidence" "text") RETURNS numeric
+    LANGUAGE "sql" IMMUTABLE
+    SET "search_path" TO ''
+    AS $$
+  SELECT CASE COALESCE(p_confidence, 'low')
+    WHEN 'high' THEN 0.95::numeric
+    WHEN 'medium' THEN 0.75::numeric
+    ELSE 0.25::numeric
+  END;
+$$;
+
+
+ALTER FUNCTION "public"."_command_confidence_score"("p_confidence" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_command_context_value"("p_user_id" "uuid", "p_supplied" "text", "p_field" "text") RETURNS "text"
+    LANGUAGE "plpgsql" STABLE
+    SET "search_path" TO ''
+    AS $$
+DECLARE
+  v_value text := NULLIF(btrim(COALESCE(p_supplied, '')), '');
+BEGIN
+  IF v_value IS NOT NULL THEN
+    RETURN v_value;
+  END IF;
+
+  IF p_user_id IS NULL THEN
+    RETURN NULL;
+  END IF;
+
+  IF p_field = 'timezone' THEN
+    SELECT NULLIF(btrim(np.timezone), '')
+      INTO v_value
+      FROM public.notification_preferences np
+     WHERE np.user_id = p_user_id;
+  ELSIF p_field = 'locale' THEN
+    SELECT NULLIF(btrim(np.locale), '')
+      INTO v_value
+      FROM public.notification_preferences np
+     WHERE np.user_id = p_user_id;
+  END IF;
+
+  RETURN v_value;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."_command_context_value"("p_user_id" "uuid", "p_supplied" "text", "p_field" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_command_default_grocery_scope"("p_home_id" "uuid") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+DECLARE
+  v_user uuid := auth.uid();
+  v_membership_id uuid;
+  v_shared_unit_id uuid;
+BEGIN
+  PERFORM public._assert_home_member(p_home_id);
+
+  SELECT m.id
+    INTO v_membership_id
+    FROM public.memberships m
+   WHERE m.home_id = p_home_id
+     AND m.user_id = v_user
+     AND m.is_current = true
+   LIMIT 1;
+
+  IF v_membership_id IS NULL THEN
+    RETURN jsonb_build_object('scope_type', 'house', 'unit_id', NULL);
+  END IF;
+
+  SELECT hu.id
+    INTO v_shared_unit_id
+    FROM public.home_units hu
+    JOIN public.home_unit_members hum
+      ON hum.unit_id = hu.id
+   WHERE hu.home_id = p_home_id
+     AND hu.unit_type = 'shared'
+     AND hu.archived_at IS NULL
+     AND hum.membership_id = v_membership_id
+     AND hum.is_active_shared = true
+   LIMIT 1;
+
+  IF v_shared_unit_id IS NOT NULL THEN
+    RETURN jsonb_build_object('scope_type', 'unit', 'unit_id', v_shared_unit_id);
+  END IF;
+
+  RETURN jsonb_build_object('scope_type', 'house', 'unit_id', NULL);
+END;
+$$;
+
+
+ALTER FUNCTION "public"."_command_default_grocery_scope"("p_home_id" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_command_effective_input"("p_input_mode" "text", "p_raw_text" "text", "p_transcript_text" "text") RETURNS "text"
+    LANGUAGE "plpgsql" STABLE
+    SET "search_path" TO ''
+    AS $$
+DECLARE
+  v_raw text := NULLIF(btrim(COALESCE(p_raw_text, '')), '');
+  v_transcript text := NULLIF(btrim(COALESCE(p_transcript_text, '')), '');
+BEGIN
+  IF p_input_mode = 'text' THEN
+    RETURN v_raw;
+  ELSIF p_input_mode = 'voice' THEN
+    RETURN v_transcript;
+  END IF;
+
+  RETURN NULL;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."_command_effective_input"("p_input_mode" "text", "p_raw_text" "text", "p_transcript_text" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_command_grocery_clean_token"("p_token" "text") RETURNS "text"
+    LANGUAGE "plpgsql" IMMUTABLE
+    SET "search_path" TO ''
+    AS $$
+DECLARE
+  v_value text := lower(COALESCE(p_token, ''));
+BEGIN
+  v_value := regexp_replace(v_value, '^(add|buy|get|grab|pick up|put|put on|put on the)\s+', '', 'gi');
+  v_value := regexp_replace(v_value, '\b(to|the|my|our|a|an|some)\b', ' ', 'gi');
+  v_value := regexp_replace(v_value, '^\s*\d+([./]\d+)?\s*', '', 'g');
+  v_value := regexp_replace(v_value, '\s+', ' ', 'g');
+  v_value := btrim(v_value, ' ,.');
+  IF v_value = '' THEN
+    RETURN NULL;
+  END IF;
+  RETURN v_value;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."_command_grocery_clean_token"("p_token" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_command_grocery_items_from_parse"("p_parse" "jsonb") RETURNS "text"[]
+    LANGUAGE "plpgsql" IMMUTABLE
+    SET "search_path" TO ''
+    AS $$
+DECLARE
+  v_item jsonb;
+  v_name text;
+  v_items text[] := ARRAY[]::text[];
+BEGIN
+  FOR v_item IN
+    SELECT value
+    FROM jsonb_array_elements(COALESCE(p_parse->'items', '[]'::jsonb))
+  LOOP
+    v_name := NULL;
+
+    IF jsonb_typeof(v_item) = 'string' THEN
+      v_name := NULLIF(btrim(v_item #>> '{}'), '');
+    ELSIF jsonb_typeof(v_item) = 'object' THEN
+      v_name := COALESCE(
+        NULLIF(btrim(COALESCE(v_item->>'canonical_name', '')), ''),
+        NULLIF(btrim(COALESCE(v_item->>'raw_text', '')), '')
+      );
+    END IF;
+
+    IF v_name IS NOT NULL AND array_position(v_items, v_name) IS NULL THEN
+      v_items := array_append(v_items, v_name);
+    END IF;
+  END LOOP;
+
+  RETURN v_items;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."_command_grocery_items_from_parse"("p_parse" "jsonb") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_command_grocery_parse_items"("p_input" "text") RETURNS "jsonb"
+    LANGUAGE "plpgsql" IMMUTABLE
+    SET "search_path" TO ''
+    AS $$
+DECLARE
+  v_input text := lower(COALESCE(p_input, ''));
+  v_working text;
+  v_token text;
+  v_item text;
+  v_items text[] := ARRAY[]::text[];
+  v_protected text[] := ARRAY[
+    'fish and chips',
+    'mac and cheese',
+    'peanut butter and jelly'
+  ];
+  v_phrase text;
+  v_index integer := 1;
+BEGIN
+  IF NULLIF(btrim(v_input), '') IS NULL THEN
+    RETURN jsonb_build_object('items', '[]'::jsonb, 'is_ambiguous', false);
+  END IF;
+
+  v_working := regexp_replace(v_input, '^\s*(please\s+)?(can you\s+)?', '', 'gi');
+
+  FOREACH v_phrase IN ARRAY v_protected LOOP
+    v_working := replace(v_working, v_phrase, '__protected_' || v_index::text || '__');
+    v_index := v_index + 1;
+  END LOOP;
+
+  v_working := regexp_replace(v_working, '\b(and|then|plus)\b', ',', 'gi');
+  v_working := regexp_replace(v_working, '[;/]+', ',', 'g');
+
+  FOREACH v_token IN ARRAY regexp_split_to_array(v_working, '\s*,\s*') LOOP
+    v_item := v_token;
+    v_index := 1;
+    FOREACH v_phrase IN ARRAY v_protected LOOP
+      v_item := replace(v_item, '__protected_' || v_index::text || '__', v_phrase);
+      v_index := v_index + 1;
+    END LOOP;
+
+    v_item := public._command_grocery_clean_token(v_item);
+    IF v_item IS NOT NULL AND NOT (v_item = ANY(v_items)) THEN
+      v_items := array_append(v_items, v_item);
+    END IF;
+  END LOOP;
+
+  RETURN jsonb_build_object(
+    'items',
+    COALESCE(to_jsonb(v_items), '[]'::jsonb),
+    'is_ambiguous',
+    false
+  );
+END;
+$$;
+
+
+ALTER FUNCTION "public"."_command_grocery_parse_items"("p_input" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_command_grocery_preflight"("p_home_id" "uuid", "p_items" "text"[], "p_scope_type" "text", "p_unit_id" "uuid") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+DECLARE
+  v_item text;
+  v_confirm_items jsonb := '[]'::jsonb;
+  v_memory jsonb;
+BEGIN
+  FOREACH v_item IN ARRAY COALESCE(p_items, ARRAY[]::text[]) LOOP
+    BEGIN
+      v_memory := public._shopping_list__purchase_memory_payload(
+        p_home_id,
+        p_scope_type,
+        p_unit_id,
+        v_item
+      );
+    EXCEPTION WHEN OTHERS THEN
+      v_memory := NULL;
+    END;
+
+    IF v_memory IS NOT NULL THEN
+      v_confirm_items := v_confirm_items || jsonb_build_array(
+        jsonb_build_object(
+          'name', v_item,
+          'purchase_memory', v_memory
+        )
+      );
+    END IF;
+  END LOOP;
+
+  RETURN jsonb_build_object(
+    'requires_confirmation', jsonb_array_length(v_confirm_items) > 0,
+    'confirm_items', v_confirm_items
+  );
+END;
+$$;
+
+
+ALTER FUNCTION "public"."_command_grocery_preflight"("p_home_id" "uuid", "p_items" "text"[], "p_scope_type" "text", "p_unit_id" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_command_grocery_result_pipeline"("p_home_id" "uuid", "p_request_id" "uuid", "p_raw_input" "text", "p_parser_result" "jsonb" DEFAULT NULL::"jsonb") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+DECLARE
+  v_parse jsonb := COALESCE(p_parser_result, public._command_grocery_parse_items(p_raw_input));
+  v_items text[] := public._command_grocery_items_from_parse(v_parse);
+  v_scope jsonb;
+  v_scope_type text;
+  v_unit_id uuid;
+  v_preflight jsonb;
+  v_item text;
+  v_results jsonb := '[]'::jsonb;
+BEGIN
+  v_scope := public._command_default_grocery_scope(p_home_id);
+  v_scope_type := v_scope->>'scope_type';
+  v_unit_id := NULLIF(v_scope->>'unit_id', '')::uuid;
+
+  IF COALESCE(array_length(v_items, 1), 0) = 0 THEN
+    RETURN public._command_route_placeholder_result(
+      p_request_id,
+      'add_grocery_items',
+      'grocery',
+      '/shopping-list',
+      'Open shopping list'
+    );
+  END IF;
+
+  v_preflight := public._command_grocery_preflight(p_home_id, v_items, v_scope_type, v_unit_id);
+  IF COALESCE((v_preflight->>'requires_confirmation')::boolean, false) THEN
+    RETURN jsonb_build_object(
+      'contract_version', '1.1',
+      'request_id', p_request_id,
+      'source_intent', 'add_grocery_items',
+      'module', 'grocery',
+      'status', 'ambiguous',
+      'missing_fields', '[]'::jsonb,
+      'risk_level', 'low',
+      'fields', jsonb_build_object(
+        'items', to_jsonb(v_items),
+        'scope_type', v_scope_type,
+        'unit_id', v_unit_id,
+        'raw_input', p_raw_input
+      ),
+      'resolution', jsonb_build_object('mode', 'not_applicable', 'entity_type', 'none'),
+      'ui_hint', jsonb_build_object(
+        'type', 'confirm',
+        'component', 'grocery_confirm_recent_purchase',
+        'target', NULL,
+        'prefill', jsonb_build_object('confirm_items', v_preflight->'confirm_items'),
+        'options', '[]'::jsonb
+      ),
+      'summary', 'Confirm grocery items before adding them',
+      'policy', jsonb_build_object('suggested_outcome', 'confirm', 'requires_confirmation', true, 'is_executable_now', false, 'executor', 'shopping_list_add_item_v3')
+    );
+  END IF;
+
+  FOREACH v_item IN ARRAY v_items LOOP
+    v_results := v_results || jsonb_build_array(
+      public.shopping_list_add_item_v3(
+        p_home_id,
+        v_item,
+        NULL,
+        NULL,
+        NULL,
+        v_scope_type,
+        v_unit_id,
+        false
+      )
+    );
+  END LOOP;
+
+  RETURN jsonb_build_object(
+    'contract_version', '1.1',
+    'request_id', p_request_id,
+    'source_intent', 'add_grocery_items',
+    'module', 'grocery',
+    'status', 'complete',
+    'missing_fields', '[]'::jsonb,
+    'risk_level', 'low',
+    'fields', jsonb_build_object(
+      'items', to_jsonb(v_items),
+      'scope_type', v_scope_type,
+      'unit_id', v_unit_id,
+      'raw_input', p_raw_input
+    ),
+    'resolution', jsonb_build_object('mode', 'not_applicable', 'entity_type', 'none'),
+    'ui_hint', jsonb_build_object('type', 'execute', 'component', NULL, 'target', NULL, 'prefill', NULL, 'options', '[]'::jsonb),
+    'summary', format('Added %s to shopping list', array_to_string(v_items, ', ')),
+    'policy', jsonb_build_object('suggested_outcome', 'execute', 'requires_confirmation', false, 'is_executable_now', true, 'executor', 'shopping_list_add_item_v3'),
+    'execution', jsonb_build_object('results', v_results)
+  );
+END;
+$$;
+
+
+ALTER FUNCTION "public"."_command_grocery_result_pipeline"("p_home_id" "uuid", "p_request_id" "uuid", "p_raw_input" "text", "p_parser_result" "jsonb") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_command_handoff_expires_at"("p_kind" "text") RETURNS timestamp with time zone
+    LANGUAGE "sql" STABLE
+    SET "search_path" TO ''
+    AS $$
+  SELECT CASE p_kind
+    WHEN 'route' THEN now() + interval '3 days'
+    WHEN 'inline' THEN now() + interval '1 day'
+    WHEN 'confirm' THEN now() + interval '1 day'
+    ELSE NULL
+  END;
+$$;
+
+
+ALTER FUNCTION "public"."_command_handoff_expires_at"("p_kind" "text") OWNER TO "postgres";
+
+SET default_tablespace = '';
+
+SET default_table_access_method = "heap";
+
+
+CREATE TABLE IF NOT EXISTS "public"."command_handoffs" (
+    "handoff_id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "request_id" "uuid" NOT NULL,
+    "user_id" "uuid" NOT NULL,
+    "home_id" "uuid" NOT NULL,
+    "intent" "text" NOT NULL,
+    "module" "text" NOT NULL,
+    "kind" "text" NOT NULL,
+    "status" "text" NOT NULL,
+    "source_text" "text" NOT NULL,
+    "confidence" numeric(5,4) NOT NULL,
+    "context" "jsonb" DEFAULT '{}'::"jsonb" NOT NULL,
+    "resume_token" "text" NOT NULL,
+    "expires_at" timestamp with time zone,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "command_handoffs_confidence_check" CHECK ((("confidence" >= (0)::numeric) AND ("confidence" <= (1)::numeric))),
+    CONSTRAINT "command_handoffs_kind_check" CHECK (("kind" = ANY (ARRAY['inline'::"text", 'route'::"text", 'confirm'::"text"]))),
+    CONSTRAINT "command_handoffs_status_check" CHECK (("status" = ANY (ARRAY['pending'::"text", 'completed'::"text", 'cancelled'::"text", 'expired'::"text"])))
+);
+
+
+ALTER TABLE "public"."command_handoffs" OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_command_handoff_state_result"("p_handoff" "public"."command_handoffs") RETURNS "jsonb"
+    LANGUAGE "sql" STABLE
+    SET "search_path" TO ''
+    AS $$
+  SELECT CASE
+    WHEN jsonb_typeof(COALESCE(p_handoff.context->'result', 'null'::jsonb)) = 'object'
+      THEN p_handoff.context->'result'
+    ELSE jsonb_build_object(
+      'kind', p_handoff.kind,
+      'intent', p_handoff.intent,
+      'module', p_handoff.module,
+      'confidence', p_handoff.confidence,
+      'message', public._command_result_message(p_handoff.kind, p_handoff.intent, p_handoff.module, '{}'::jsonb, false),
+      'fields', '{}'::jsonb,
+      'missing_fields', '[]'::jsonb,
+      'ui', jsonb_build_object('component', NULL, 'target', NULL, 'options', '[]'::jsonb, 'prefill', '{}'::jsonb),
+      'draft', NULL,
+      'execution', NULL,
+      'meta', jsonb_build_object(
+        'requires_confirmation', (p_handoff.kind = 'confirm'),
+        'is_multi_intent_detected', false,
+        'raw_input_retained', true
+      )
+    )
+  END;
+$$;
+
+
+ALTER FUNCTION "public"."_command_handoff_state_result"("p_handoff" "public"."command_handoffs") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_command_legacy_to_v1_result"("p_home_id" "uuid", "p_request_id" "uuid", "p_source_text" "text", "p_legacy" "jsonb", "p_confidence" numeric, "p_is_multi" boolean DEFAULT false, "p_force_confirm" boolean DEFAULT false) RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+DECLARE
+  v_ui_hint jsonb := COALESCE(p_legacy->'ui_hint', '{}'::jsonb);
+  v_fields jsonb := COALESCE(p_legacy->'fields', '{}'::jsonb);
+  v_missing jsonb := COALESCE(p_legacy->'missing_fields', '[]'::jsonb);
+  v_execution jsonb := COALESCE(p_legacy->'execution', NULL);
+  v_kind text;
+  v_ui jsonb;
+  v_result jsonb;
+BEGIN
+  v_kind := CASE
+    WHEN p_force_confirm THEN 'confirm'
+    WHEN COALESCE(v_ui_hint->>'type', '') = 'execute' THEN 'execute'
+    WHEN COALESCE(v_ui_hint->>'type', '') = 'inline' THEN 'inline'
+    WHEN COALESCE(v_ui_hint->>'type', '') = 'confirm' THEN 'confirm'
+    WHEN COALESCE(v_ui_hint->>'type', '') = 'route' THEN 'route'
+    ELSE 'route'
+  END;
+
+  v_ui := jsonb_build_object(
+    'component',
+    CASE
+      WHEN v_kind = 'inline' THEN COALESCE(v_ui_hint->>'component', 'member_picker')
+      WHEN v_kind = 'confirm' THEN 'confirmation_card'
+      WHEN v_kind = 'unknown' THEN 'capability_suggestions'
+      ELSE NULL
+    END,
+    'target', NULLIF(v_ui_hint->>'target', ''),
+    'options',
+    CASE
+      WHEN v_kind = 'confirm' THEN jsonb_build_array(
+        jsonb_build_object('id', 'confirm', 'label', 'Confirm'),
+        jsonb_build_object('id', 'cancel', 'label', 'Cancel')
+      )
+      ELSE COALESCE(v_ui_hint->'options', '[]'::jsonb)
+    END,
+    'prefill', COALESCE(v_ui_hint->'prefill', v_fields, '{}'::jsonb)
+  );
+
+  v_result := public._command_result_build(
+    v_kind,
+    p_legacy->>'source_intent',
+    p_legacy->>'module',
+    p_confidence,
+    v_fields,
+    v_missing,
+    v_ui,
+    v_execution,
+    p_is_multi
+  );
+
+  RETURN public._command_attach_handoff(p_home_id, p_request_id, p_source_text, v_result);
+END;
+$$;
+
+
+ALTER FUNCTION "public"."_command_legacy_to_v1_result"("p_home_id" "uuid", "p_request_id" "uuid", "p_source_text" "text", "p_legacy" "jsonb", "p_confidence" numeric, "p_is_multi" boolean, "p_force_confirm" boolean) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_command_log_unrecognized_intent"("p_home_id" "uuid", "p_request_id" "uuid", "p_input_mode" "text", "p_raw_text" "text" DEFAULT NULL::"text", "p_transcript_text" "text" DEFAULT NULL::"text", "p_locale" "text" DEFAULT NULL::"text", "p_timezone" "text" DEFAULT NULL::"text", "p_classifier_intent" "text" DEFAULT 'unknown'::"text", "p_classifier_confidence" "text" DEFAULT 'low'::"text", "p_router_version" "text" DEFAULT NULL::"text", "p_model_provider" "text" DEFAULT NULL::"text", "p_model_name" "text" DEFAULT NULL::"text") RETURNS "uuid"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+DECLARE
+  v_user_id uuid := auth.uid();
+  v_id uuid;
+BEGIN
+  PERFORM public._assert_home_member(p_home_id);
+  PERFORM public.api_assert(p_request_id IS NOT NULL, 'INVALID_REQUEST_ID', 'request_id is required.', '22023');
+  PERFORM public.api_assert(p_input_mode IN ('text', 'voice'), 'INVALID_INPUT_MODE', 'input_mode must be text or voice.', '22023');
+
+  INSERT INTO public.unrecognized_intents (
+    request_id,
+    user_id,
+    home_id,
+    input_mode,
+    raw_text,
+    transcript_text,
+    locale,
+    timezone,
+    classifier_intent,
+    classifier_confidence,
+    router_version,
+    model_provider,
+    model_name
+  )
+  VALUES (
+    p_request_id,
+    v_user_id,
+    p_home_id,
+    p_input_mode,
+    p_raw_text,
+    p_transcript_text,
+    p_locale,
+    p_timezone,
+    COALESCE(NULLIF(btrim(p_classifier_intent), ''), 'unknown'),
+    COALESCE(NULLIF(btrim(p_classifier_confidence), ''), 'low'),
+    p_router_version,
+    p_model_provider,
+    p_model_name
+  )
+  RETURNING id INTO v_id;
+
+  RETURN v_id;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."_command_log_unrecognized_intent"("p_home_id" "uuid", "p_request_id" "uuid", "p_input_mode" "text", "p_raw_text" "text", "p_transcript_text" "text", "p_locale" "text", "p_timezone" "text", "p_classifier_intent" "text", "p_classifier_confidence" "text", "p_router_version" "text", "p_model_provider" "text", "p_model_name" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_command_module_preview_result_pipeline"("p_home_id" "uuid", "p_request_id" "uuid", "p_intent" "text", "p_effective_input" "text", "p_parser_result" "jsonb" DEFAULT NULL::"jsonb") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+DECLARE
+  v_parse jsonb := COALESCE(p_parser_result, '{}'::jsonb);
+  v_items text[];
+  v_scope jsonb;
+  v_scope_type text;
+  v_unit_id uuid;
+  v_preflight jsonb;
+  v_interpretation jsonb;
+  v_title text;
+  v_notes text;
+  v_assignee uuid;
+  v_start_date date;
+BEGIN
+  CASE p_intent
+    WHEN 'add_grocery_items' THEN
+      v_items := public._command_grocery_items_from_parse(
+        CASE
+          WHEN p_parser_result IS NULL THEN public._command_grocery_parse_items(p_effective_input)
+          ELSE v_parse
+        END
+      );
+      v_scope := public._command_default_grocery_scope(p_home_id);
+      v_scope_type := v_scope->>'scope_type';
+      v_unit_id := NULLIF(v_scope->>'unit_id', '')::uuid;
+
+      IF COALESCE(array_length(v_items, 1), 0) = 0 THEN
+        RETURN public._command_route_placeholder_result(
+          p_request_id,
+          'add_grocery_items',
+          'grocery',
+          '/shopping-list',
+          'Open shopping list'
+        );
+      END IF;
+
+      v_preflight := public._command_grocery_preflight(p_home_id, v_items, v_scope_type, v_unit_id);
+      IF COALESCE((v_preflight->>'requires_confirmation')::boolean, false) THEN
+        RETURN jsonb_build_object(
+          'contract_version', '1.1',
+          'request_id', p_request_id,
+          'source_intent', 'add_grocery_items',
+          'module', 'grocery',
+          'status', 'ambiguous',
+          'missing_fields', '[]'::jsonb,
+          'risk_level', 'low',
+          'fields', jsonb_build_object(
+            'items', to_jsonb(v_items),
+            'scope_type', v_scope_type,
+            'unit_id', v_unit_id,
+            'raw_input', p_effective_input
+          ),
+          'resolution', jsonb_build_object('mode', 'not_applicable', 'entity_type', 'none'),
+          'ui_hint', jsonb_build_object(
+            'type', 'confirm',
+            'component', 'grocery_confirm_recent_purchase',
+            'target', NULL,
+            'prefill', jsonb_build_object('confirm_items', v_preflight->'confirm_items'),
+            'options', '[]'::jsonb
+          ),
+          'summary', 'Confirm grocery items before adding them',
+          'policy', jsonb_build_object(
+            'suggested_outcome', 'confirm',
+            'requires_confirmation', true,
+            'is_executable_now', false,
+            'executor', 'shopping_list_add_item_v3'
+          )
+        );
+      END IF;
+
+      RETURN jsonb_build_object(
+        'contract_version', '1.1',
+        'request_id', p_request_id,
+        'source_intent', 'add_grocery_items',
+        'module', 'grocery',
+        'status', 'complete',
+        'missing_fields', '[]'::jsonb,
+        'risk_level', 'low',
+        'fields', jsonb_build_object(
+          'items', to_jsonb(v_items),
+          'scope_type', v_scope_type,
+          'unit_id', v_unit_id,
+          'raw_input', p_effective_input
+        ),
+        'resolution', jsonb_build_object('mode', 'not_applicable', 'entity_type', 'none'),
+        'ui_hint', jsonb_build_object('type', 'execute', 'component', NULL, 'target', NULL, 'prefill', NULL, 'options', '[]'::jsonb),
+        'summary', format('Add %s to shopping list', array_to_string(v_items, ', ')),
+        'policy', jsonb_build_object(
+          'suggested_outcome', 'execute',
+          'requires_confirmation', false,
+          'is_executable_now', true,
+          'executor', 'shopping_list_add_item_v3'
+        )
+      );
+    WHEN 'create_task' THEN
+      v_interpretation := public._command_task_interpretation(p_home_id, p_effective_input, v_parse);
+      v_title := NULLIF(btrim(COALESCE(v_interpretation->>'task_title', '')), '');
+      v_notes := NULLIF(btrim(COALESCE(v_interpretation->>'notes', '')), '');
+      v_assignee := NULLIF(COALESCE(v_interpretation->>'assigned_to', ''), '')::uuid;
+      v_start_date := NULLIF(COALESCE(v_interpretation->>'due_at', ''), '')::date;
+
+      IF COALESCE((v_interpretation->>'is_date_aware')::boolean, false) THEN
+        RETURN public._command_task_route_result(
+          p_home_id,
+          p_request_id,
+          CASE WHEN v_start_date IS NOT NULL THEN 'create_reminder' ELSE 'create_task' END,
+          p_effective_input,
+          v_parse
+        );
+      END IF;
+
+      IF v_title IS NULL THEN
+        RETURN public._command_route_placeholder_result(
+          p_request_id,
+          'create_task',
+          'task',
+          '/today',
+          'Open task flow'
+        );
+      END IF;
+
+      IF v_assignee IS NULL THEN
+        RETURN jsonb_build_object(
+          'contract_version', '1.1',
+          'request_id', p_request_id,
+          'source_intent', 'create_task',
+          'module', 'task',
+          'status', 'missing_fields',
+          'missing_fields', jsonb_build_array('assigned_to'),
+          'risk_level', 'low',
+          'fields', jsonb_build_object(
+            'task_title', v_title,
+            'assigned_to', NULL,
+            'due_at', v_start_date,
+            'notes', v_notes,
+            'recurrence_interval', NULLIF(COALESCE(v_interpretation->>'recurrence_interval', 'none'), 'none')
+          ),
+          'resolution', jsonb_build_object('mode', 'not_applicable', 'entity_type', 'none'),
+          'ui_hint', jsonb_build_object(
+            'type', 'inline',
+            'component', 'member_picker',
+            'target', NULL,
+            'prefill', NULL,
+            'options', public._command_task_assignee_options(p_home_id)
+          ),
+          'summary', format('Create task: %s', v_title),
+          'policy', jsonb_build_object(
+            'suggested_outcome', 'inline',
+            'requires_confirmation', false,
+            'is_executable_now', false,
+            'executor', 'chores_create'
+          )
+        );
+      END IF;
+
+      RETURN jsonb_build_object(
+        'contract_version', '1.1',
+        'request_id', p_request_id,
+        'source_intent', 'create_task',
+        'module', 'task',
+        'status', 'complete',
+        'missing_fields', '[]'::jsonb,
+        'risk_level', 'low',
+        'fields', jsonb_build_object(
+          'task_title', v_title,
+          'assigned_to', v_assignee,
+          'due_at', v_start_date,
+          'notes', v_notes
+        ),
+        'resolution', jsonb_build_object('mode', 'not_applicable', 'entity_type', 'none'),
+        'ui_hint', jsonb_build_object('type', 'execute', 'component', NULL, 'target', NULL, 'prefill', NULL, 'options', '[]'::jsonb),
+        'summary', format('Create task: %s', v_title),
+        'policy', jsonb_build_object(
+          'suggested_outcome', 'execute',
+          'requires_confirmation', false,
+          'is_executable_now', true,
+          'executor', 'chores_create'
+        )
+      );
+    ELSE
+      RETURN public._command_module_result_pipeline(
+        p_home_id,
+        p_request_id,
+        p_intent,
+        p_effective_input,
+        p_parser_result
+      );
+  END CASE;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."_command_module_preview_result_pipeline"("p_home_id" "uuid", "p_request_id" "uuid", "p_intent" "text", "p_effective_input" "text", "p_parser_result" "jsonb") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_command_module_result_pipeline"("p_home_id" "uuid", "p_request_id" "uuid", "p_intent" "text", "p_effective_input" "text", "p_parser_result" "jsonb" DEFAULT NULL::"jsonb") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+BEGIN
+  CASE p_intent
+    WHEN 'add_grocery_items' THEN
+      RETURN public._command_grocery_result_pipeline(p_home_id, p_request_id, p_effective_input, p_parser_result);
+    WHEN 'create_task' THEN
+      RETURN public._command_task_result_pipeline(p_home_id, p_request_id, p_effective_input, p_parser_result);
+    WHEN 'open_house_norms' THEN
+      RETURN public._command_navigation_result(p_request_id, p_intent);
+    WHEN 'view_due_items' THEN
+      RETURN public._command_navigation_result(p_request_id, p_intent);
+    WHEN 'view_service' THEN
+      RETURN public._command_navigation_result(p_request_id, p_intent);
+    WHEN 'mark_task_done' THEN
+      RETURN public._command_route_placeholder_result(p_request_id, p_intent, 'task', '/today', 'Open today view to complete a task');
+    WHEN 'create_reminder' THEN
+      RETURN public._command_task_route_result(
+        p_home_id,
+        p_request_id,
+        p_intent,
+        p_effective_input,
+        p_parser_result
+      );
+    WHEN 'create_expense' THEN
+      RETURN public._command_route_placeholder_result(p_request_id, p_intent, 'expense', '/expenses', 'Open expense flow');
+    ELSE
+      RETURN public._command_navigation_result(p_request_id, 'unknown');
+  END CASE;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."_command_module_result_pipeline"("p_home_id" "uuid", "p_request_id" "uuid", "p_intent" "text", "p_effective_input" "text", "p_parser_result" "jsonb") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_command_navigation_result"("p_request_id" "uuid", "p_intent" "text") RETURNS "jsonb"
+    LANGUAGE "plpgsql" STABLE
+    SET "search_path" TO ''
+    AS $$
+DECLARE
+  v_target jsonb := public._command_navigation_target(p_intent);
+BEGIN
+  RETURN jsonb_build_object(
+    'contract_version', '1.1',
+    'request_id', p_request_id,
+    'source_intent', p_intent,
+    'module', 'navigation',
+    'status', 'complete',
+    'missing_fields', '[]'::jsonb,
+    'risk_level', 'low',
+    'fields', jsonb_build_object('route_key', v_target->>'route_key'),
+    'resolution', jsonb_build_object('mode', 'not_applicable', 'entity_type', 'none'),
+    'ui_hint', jsonb_build_object(
+      'type', 'route',
+      'component', NULL,
+      'target', v_target->>'target',
+      'prefill', NULL,
+      'options', '[]'::jsonb
+    ),
+    'summary', v_target->>'summary',
+    'policy', jsonb_build_object(
+      'suggested_outcome', 'route',
+      'requires_confirmation', false,
+      'is_executable_now', false,
+      'executor', 'none'
+    )
+  );
+END;
+$$;
+
+
+ALTER FUNCTION "public"."_command_navigation_result"("p_request_id" "uuid", "p_intent" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_command_navigation_target"("p_intent" "text") RETURNS "jsonb"
+    LANGUAGE "sql" IMMUTABLE
+    SET "search_path" TO ''
+    AS $$
+  SELECT CASE p_intent
+    WHEN 'open_house_norms' THEN jsonb_build_object('route_key', 'house_norms', 'target', '/house-norms', 'summary', 'Open house norms')
+    WHEN 'view_due_items' THEN jsonb_build_object('route_key', 'today_view', 'target', '/today', 'summary', 'View due items')
+    WHEN 'view_service' THEN jsonb_build_object('route_key', 'services_home', 'target', '/services', 'summary', 'Open services')
+    ELSE jsonb_build_object('route_key', 'home', 'target', '/home', 'summary', 'I didn''t understand that. Taking you home.')
+  END;
+$$;
+
+
+ALTER FUNCTION "public"."_command_navigation_target"("p_intent" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_command_pipeline_call"("p_home_id" "uuid", "p_request_id" "uuid", "p_payload" "jsonb") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+DECLARE
+  v_supabase_url text := NULLIF(current_setting('app.settings.supabase_url', true), '');
+  v_secret text := NULLIF(current_setting('app.settings.worker_shared_secret', true), '');
+  v_req_id bigint;
+  v_started timestamptz := clock_timestamp();
+  v_deadline interval := interval '12 seconds';
+  v_status_code integer;
+  v_content text;
+  v_error_msg text;
+  v_body jsonb;
+BEGIN
+  PERFORM public.api_assert(
+    v_supabase_url IS NOT NULL,
+    'classification_failed',
+    'Missing app.settings.supabase_url.',
+    'P0001'
+  );
+
+  PERFORM public.api_assert(
+    v_secret IS NOT NULL,
+    'classification_failed',
+    'Missing app.settings.worker_shared_secret.',
+    'P0001'
+  );
+
+  v_req_id := net.http_post(
+    url := v_supabase_url || '/functions/v1/command_ai_sync',
+    headers := jsonb_build_object(
+      'Content-Type', 'application/json',
+      'x-internal-secret', v_secret
+    ),
+    body := jsonb_build_object(
+      'request_id', p_request_id,
+      'home_id', p_home_id,
+      'feature_key', 'command',
+      'payload', p_payload
+    )
+  );
+
+  LOOP
+    SELECT r.status_code, r.content, r.error_msg
+      INTO v_status_code, v_content, v_error_msg
+    FROM net._http_response r
+    WHERE r.id = v_req_id
+    ORDER BY r.created DESC
+    LIMIT 1;
+
+    EXIT WHEN v_status_code IS NOT NULL
+           OR v_error_msg IS NOT NULL
+           OR clock_timestamp() - v_started > v_deadline;
+
+    PERFORM pg_sleep(0.10);
+  END LOOP;
+
+  IF v_error_msg IS NOT NULL THEN
+    PERFORM public.api_error(
+      'classification_failed',
+      'Command AI pipeline request failed.',
+      'P0001',
+      jsonb_build_object('error', v_error_msg, 'request_id', v_req_id)
+    );
+  END IF;
+
+  PERFORM public.api_assert(
+    v_status_code IS NOT NULL,
+    'classification_failed',
+    'Command AI pipeline request timed out.',
+    'P0001',
+    jsonb_build_object('request_id', v_req_id)
+  );
+
+  PERFORM public.api_assert(
+    v_status_code BETWEEN 200 AND 299,
+    'classification_failed',
+    'Command AI pipeline returned non-success status.',
+    'P0001',
+    jsonb_build_object('status_code', v_status_code, 'body', v_content)
+  );
+
+  BEGIN
+    v_body := COALESCE(v_content, '{}')::jsonb;
+  EXCEPTION WHEN OTHERS THEN
+    PERFORM public.api_error(
+      'classification_failed',
+      'Command AI pipeline returned invalid JSON.',
+      'P0001',
+      jsonb_build_object('status_code', v_status_code, 'body', v_content)
+    );
+  END;
+
+  PERFORM public.api_assert(
+    COALESCE((v_body->>'ok')::boolean, false),
+    'classification_failed',
+    'Command AI pipeline reported failure.',
+    'P0001',
+    COALESCE(v_body->'details', '{}'::jsonb)
+  );
+
+  RETURN v_body;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."_command_pipeline_call"("p_home_id" "uuid", "p_request_id" "uuid", "p_payload" "jsonb") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_command_pipeline_parser_result_for_intent"("p_pipeline" "jsonb", "p_intent" "text") RETURNS "jsonb"
+    LANGUAGE "sql" STABLE
+    SET "search_path" TO ''
+    AS $$
+  SELECT item->'parsed'
+  FROM jsonb_array_elements(COALESCE(p_pipeline->'intent_work_items', '[]'::jsonb)) AS item
+  WHERE item->>'intent' = p_intent
+    AND jsonb_typeof(item->'parsed') = 'object'
+  LIMIT 1;
+$$;
+
+
+ALTER FUNCTION "public"."_command_pipeline_parser_result_for_intent"("p_pipeline" "jsonb", "p_intent" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_command_result_build"("p_kind" "text", "p_intent" "text", "p_module" "text", "p_confidence" numeric, "p_fields" "jsonb", "p_missing_fields" "jsonb", "p_ui" "jsonb", "p_execution" "jsonb", "p_is_multi" boolean DEFAULT false) RETURNS "jsonb"
+    LANGUAGE "sql" IMMUTABLE
+    SET "search_path" TO ''
+    AS $$
+  SELECT jsonb_build_object(
+    'kind', p_kind,
+    'intent', CASE WHEN p_kind = 'unknown' THEN NULL ELSE p_intent END,
+    'module', CASE WHEN p_kind = 'unknown' THEN NULL ELSE p_module END,
+    'confidence', p_confidence,
+    'message', public._command_result_message(p_kind, p_intent, p_module, COALESCE(p_fields, '{}'::jsonb), p_is_multi),
+    'fields', COALESCE(p_fields, '{}'::jsonb),
+    'missing_fields', COALESCE(p_missing_fields, '[]'::jsonb),
+    'ui', COALESCE(p_ui, jsonb_build_object('component', NULL, 'target', NULL, 'options', '[]'::jsonb, 'prefill', '{}'::jsonb)),
+    'draft', NULL,
+    'execution', p_execution,
+    'meta', jsonb_build_object(
+      'requires_confirmation', (p_kind = 'confirm'),
+      'is_multi_intent_detected', p_is_multi,
+      'raw_input_retained', true
+    )
+  );
+$$;
+
+
+ALTER FUNCTION "public"."_command_result_build"("p_kind" "text", "p_intent" "text", "p_module" "text", "p_confidence" numeric, "p_fields" "jsonb", "p_missing_fields" "jsonb", "p_ui" "jsonb", "p_execution" "jsonb", "p_is_multi" boolean) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_command_result_message"("p_kind" "text", "p_intent" "text", "p_module" "text", "p_fields" "jsonb", "p_is_multi" boolean DEFAULT false) RETURNS "jsonb"
+    LANGUAGE "plpgsql" IMMUTABLE
+    SET "search_path" TO ''
+    AS $$
+DECLARE
+  v_task_title text := NULLIF(COALESCE(p_fields->>'task_title', p_fields->>'title', ''), '');
+  v_items_count integer := COALESCE(jsonb_array_length(COALESCE(p_fields->'items', '[]'::jsonb)), 0);
+  v_amount text := NULLIF(COALESCE(p_fields->>'amount', ''), '');
+BEGIN
+  IF p_kind = 'unknown' THEN
+    RETURN jsonb_build_object(
+      'title_key', 'command.unsupported.title',
+      'body_key', 'command.unsupported.body',
+      'params', '{}'::jsonb
+    );
+  END IF;
+
+  IF p_is_multi THEN
+    RETURN jsonb_build_object(
+      'title_key', 'command.multi_intent.confirm_primary.title',
+      'body_key', 'command.multi_intent.confirm_primary.body',
+      'params', jsonb_build_object(
+        'primary_action',
+        CASE p_module
+          WHEN 'grocery' THEN 'Add groceries'
+          WHEN 'task' THEN 'Create task'
+          WHEN 'expense' THEN 'Create expense'
+          WHEN 'navigation' THEN 'Open page'
+          ELSE 'Continue'
+        END
+      )
+    );
+  END IF;
+
+  RETURN CASE
+    WHEN p_kind = 'execute' AND p_module = 'grocery' THEN jsonb_build_object(
+      'title_key', 'command.grocery.added.title',
+      'body_key', 'command.grocery.added.body',
+      'params', jsonb_build_object('count', v_items_count)
+    )
+    WHEN p_kind = 'confirm' AND p_module = 'grocery' THEN jsonb_build_object(
+      'title_key', 'command.grocery.confirm.title',
+      'body_key', 'command.grocery.confirm.body',
+      'params', jsonb_build_object('count', v_items_count)
+    )
+    WHEN p_kind = 'route' AND p_module = 'grocery' THEN jsonb_build_object(
+      'title_key', 'command.grocery.open_list.title',
+      'body_key', 'command.grocery.open_list.body',
+      'params', jsonb_build_object('count', v_items_count)
+    )
+    WHEN p_kind = 'execute' AND p_module = 'task' THEN jsonb_build_object(
+      'title_key', 'command.task.created.title',
+      'body_key', 'command.task.created.body',
+      'params', jsonb_build_object('task_title', v_task_title)
+    )
+    WHEN p_kind = 'inline' AND p_module = 'task' THEN jsonb_build_object(
+      'title_key', 'command.task.need_assignee.title',
+      'body_key', 'command.task.need_assignee.body',
+      'params', jsonb_build_object('task_title', v_task_title)
+    )
+    WHEN p_kind = 'confirm' AND p_module = 'task' THEN jsonb_build_object(
+      'title_key', 'command.task.confirm.title',
+      'body_key', 'command.task.confirm.body',
+      'params', jsonb_build_object('task_title', v_task_title)
+    )
+    WHEN p_kind = 'route' AND p_module = 'task' THEN jsonb_build_object(
+      'title_key', 'command.task.open_scheduler.title',
+      'body_key', 'command.task.open_scheduler.body',
+      'params', jsonb_build_object('task_title', v_task_title)
+    )
+    WHEN p_kind = 'route' AND p_module = 'expense' THEN jsonb_build_object(
+      'title_key', 'command.expense.open_editor.title',
+      'body_key', 'command.expense.open_editor.body',
+      'params', jsonb_build_object('amount', COALESCE(v_amount, ''))
+    )
+    WHEN p_kind = 'route' AND p_module = 'navigation' THEN jsonb_build_object(
+      'title_key', 'command.navigation.open.title',
+      'body_key', 'command.navigation.open.body',
+      'params', '{}'::jsonb
+    )
+    ELSE jsonb_build_object(
+      'title_key', 'command.generic.title',
+      'body_key', 'command.generic.body',
+      'params', '{}'::jsonb
+    )
+  END;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."_command_result_message"("p_kind" "text", "p_intent" "text", "p_module" "text", "p_fields" "jsonb", "p_is_multi" boolean) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_command_resume_row_to_result"("p_handoff" "public"."command_handoffs") RETURNS "jsonb"
+    LANGUAGE "plpgsql" STABLE
+    SET "search_path" TO ''
+    AS $$
+DECLARE
+  v_result jsonb := public._command_handoff_state_result(p_handoff);
+BEGIN
+  v_result := jsonb_set(
+    v_result,
+    '{draft}',
+    jsonb_build_object(
+      'handoff_id', p_handoff.handoff_id,
+      'resume_token', p_handoff.resume_token,
+      'expires_at', p_handoff.expires_at
+    )
+  );
+
+  RETURN jsonb_set(v_result, '{execution}', 'null'::jsonb, true);
+END;
+$$;
+
+
+ALTER FUNCTION "public"."_command_resume_row_to_result"("p_handoff" "public"."command_handoffs") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_command_route_placeholder_result"("p_request_id" "uuid", "p_intent" "text", "p_module" "text", "p_target" "text", "p_summary" "text") RETURNS "jsonb"
+    LANGUAGE "sql" STABLE
+    SET "search_path" TO ''
+    AS $$
+  SELECT jsonb_build_object(
+    'contract_version', '1.1',
+    'request_id', p_request_id,
+    'source_intent', p_intent,
+    'module', p_module,
+    'status', 'ambiguous',
+    'missing_fields', '[]'::jsonb,
+    'risk_level', CASE WHEN p_module = 'expense' THEN 'high' ELSE 'medium' END,
+    'fields', '{}'::jsonb,
+    'resolution', jsonb_build_object('mode', 'route_for_resolution', 'entity_type', 'none'),
+    'ui_hint', jsonb_build_object(
+      'type', 'route',
+      'component', NULL,
+      'target', p_target,
+      'prefill', NULL,
+      'options', '[]'::jsonb
+    ),
+    'summary', p_summary,
+    'policy', jsonb_build_object(
+      'suggested_outcome', 'route',
+      'requires_confirmation', false,
+      'is_executable_now', false,
+      'executor', 'none'
+    )
+  );
+$$;
+
+
+ALTER FUNCTION "public"."_command_route_placeholder_result"("p_request_id" "uuid", "p_intent" "text", "p_module" "text", "p_target" "text", "p_summary" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_command_task_assignee_options"("p_home_id" "uuid") RETURNS "jsonb"
+    LANGUAGE "sql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+  SELECT COALESCE(
+    jsonb_agg(
+      jsonb_build_object(
+        'id', a.user_id,
+        'label', a.full_name
+      )
+      ORDER BY a.full_name
+    ),
+    '[]'::jsonb
+  )
+  FROM public.home_assignees_list(p_home_id) a;
+$$;
+
+
+ALTER FUNCTION "public"."_command_task_assignee_options"("p_home_id" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_command_task_detect_assignee"("p_home_id" "uuid", "p_input" "text") RETURNS "uuid"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+DECLARE
+  v_input text := lower(COALESCE(p_input, ''));
+  v_user uuid := auth.uid();
+  v_candidate record;
+BEGIN
+  IF v_input ~ '\b(for me|assign to me)\b' THEN
+    RETURN v_user;
+  END IF;
+
+  FOR v_candidate IN
+    SELECT a.user_id, lower(a.full_name) AS full_name
+      FROM public.home_assignees_list(p_home_id) a
+  LOOP
+    IF v_candidate.full_name IS NOT NULL
+       AND v_candidate.full_name <> ''
+       AND v_input ~ ('\m' || regexp_replace(v_candidate.full_name, '\s+', '\\s+', 'g') || '\M') THEN
+      RETURN v_candidate.user_id;
+    END IF;
+  END LOOP;
+
+  RETURN NULL;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."_command_task_detect_assignee"("p_home_id" "uuid", "p_input" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_command_task_detect_assignee_hint"("p_home_id" "uuid", "p_assignee_hint" "text") RETURNS "uuid"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+DECLARE
+  v_hint text := lower(NULLIF(btrim(COALESCE(p_assignee_hint, '')), ''));
+  v_user uuid := auth.uid();
+  v_candidate record;
+BEGIN
+  IF v_hint IS NULL THEN
+    RETURN NULL;
+  END IF;
+
+  IF v_hint IN ('me', 'myself', 'self') THEN
+    RETURN v_user;
+  END IF;
+
+  FOR v_candidate IN
+    SELECT a.user_id, lower(a.full_name) AS full_name
+      FROM public.home_assignees_list(p_home_id) a
+  LOOP
+    IF v_candidate.full_name IS NOT NULL
+       AND v_candidate.full_name <> ''
+       AND (
+         v_hint = v_candidate.full_name
+         OR v_hint ~ ('\m' || regexp_replace(v_candidate.full_name, '\s+', '\\s+', 'g') || '\M')
+       ) THEN
+      RETURN v_candidate.user_id;
+    END IF;
+  END LOOP;
+
+  RETURN NULL;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."_command_task_detect_assignee_hint"("p_home_id" "uuid", "p_assignee_hint" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_command_task_extract_title"("p_input" "text") RETURNS "text"
+    LANGUAGE "plpgsql" IMMUTABLE
+    SET "search_path" TO ''
+    AS $_$
+DECLARE
+  v_value text := lower(COALESCE(p_input, ''));
+BEGIN
+  v_value := regexp_replace(v_value, '^\s*(please\s+)?(can you\s+)?', '', 'gi');
+  v_value := regexp_replace(v_value, '^\s*(create\s+task|add\s+task|task|todo|remind(?:\s+me)?\s+to)\s+', '', 'gi');
+  v_value := regexp_replace(v_value, '\s+(for me|assign to me|for [a-z0-9 .''-]+)$', '', 'gi');
+  v_value := regexp_replace(v_value, '\s+', ' ', 'g');
+  v_value := btrim(v_value, ' .');
+  IF v_value = '' THEN
+    RETURN NULL;
+  END IF;
+  RETURN v_value;
+END;
+$_$;
+
+
+ALTER FUNCTION "public"."_command_task_extract_title"("p_input" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_command_task_interpretation"("p_home_id" "uuid", "p_effective_input" "text", "p_parser_result" "jsonb" DEFAULT NULL::"jsonb") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+DECLARE
+  v_title text := COALESCE(
+    NULLIF(btrim(COALESCE(p_parser_result->>'task_title', '')), ''),
+    public._command_task_extract_title(p_effective_input)
+  );
+  v_notes text := NULLIF(btrim(COALESCE(p_parser_result->>'notes', '')), '');
+  v_assignee uuid := COALESCE(
+    public._command_task_detect_assignee_hint(p_home_id, p_parser_result->>'assignee_hint'),
+    public._command_task_detect_assignee(p_home_id, p_effective_input)
+  );
+  v_due_at date := public._command_task_start_date_from_parse(p_parser_result);
+  v_recurrence public.recurrence_interval := public._command_task_recurrence_interval_from_parse(p_parser_result);
+BEGIN
+  RETURN jsonb_build_object(
+    'task_title', v_title,
+    'notes', v_notes,
+    'assigned_to', v_assignee,
+    'due_at', v_due_at,
+    'recurrence_interval', v_recurrence,
+    'is_date_aware',
+      (
+        v_due_at IS NOT NULL
+        OR v_recurrence <> 'none'::public.recurrence_interval
+        OR p_effective_input ~ '\b(today|tomorrow|tonight|this evening|next week|by [a-z]+)\b'
+      )
+  );
+END;
+$$;
+
+
+ALTER FUNCTION "public"."_command_task_interpretation"("p_home_id" "uuid", "p_effective_input" "text", "p_parser_result" "jsonb") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_command_task_recurrence_interval_from_parse"("p_parser_result" "jsonb") RETURNS "public"."recurrence_interval"
+    LANGUAGE "plpgsql" IMMUTABLE
+    SET "search_path" TO ''
+    AS $$
+DECLARE
+  v_every integer;
+  v_unit text;
+BEGIN
+  IF p_parser_result IS NULL THEN
+    RETURN 'none'::public.recurrence_interval;
+  END IF;
+
+  v_every := CASE
+    WHEN jsonb_typeof(COALESCE(p_parser_result->'recurrence_every', 'null'::jsonb)) = 'number'
+      THEN (p_parser_result->>'recurrence_every')::integer
+    ELSE NULL
+  END;
+  v_unit := NULLIF(btrim(COALESCE(p_parser_result->>'recurrence_unit', '')), '');
+
+  CASE
+    WHEN v_every = 1 AND v_unit = 'day' THEN RETURN 'daily'::public.recurrence_interval;
+    WHEN v_every = 1 AND v_unit = 'week' THEN RETURN 'weekly'::public.recurrence_interval;
+    WHEN v_every = 2 AND v_unit = 'week' THEN RETURN 'every_2_weeks'::public.recurrence_interval;
+    WHEN v_every = 1 AND v_unit = 'month' THEN RETURN 'monthly'::public.recurrence_interval;
+    WHEN v_every = 2 AND v_unit = 'month' THEN RETURN 'every_2_months'::public.recurrence_interval;
+    WHEN v_every = 1 AND v_unit = 'year' THEN RETURN 'annual'::public.recurrence_interval;
+    ELSE RETURN 'none'::public.recurrence_interval;
+  END CASE;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."_command_task_recurrence_interval_from_parse"("p_parser_result" "jsonb") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_command_task_result_pipeline"("p_home_id" "uuid", "p_request_id" "uuid", "p_input" "text", "p_parser_result" "jsonb" DEFAULT NULL::"jsonb") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+DECLARE
+  v_interpretation jsonb := public._command_task_interpretation(p_home_id, p_input, p_parser_result);
+  v_title text := NULLIF(btrim(COALESCE(v_interpretation->>'task_title', '')), '');
+  v_notes text := NULLIF(btrim(COALESCE(v_interpretation->>'notes', '')), '');
+  v_assignee uuid := NULLIF(COALESCE(v_interpretation->>'assigned_to', ''), '')::uuid;
+  v_start_date date := NULLIF(COALESCE(v_interpretation->>'due_at', ''), '')::date;
+  v_recurrence public.recurrence_interval := COALESCE(
+    NULLIF(COALESCE(v_interpretation->>'recurrence_interval', ''), '')::public.recurrence_interval,
+    'none'::public.recurrence_interval
+  );
+  v_row public.chores%ROWTYPE;
+BEGIN
+  IF COALESCE((v_interpretation->>'is_date_aware')::boolean, false) THEN
+    RETURN public._command_task_route_result(
+      p_home_id,
+      p_request_id,
+      CASE WHEN v_start_date IS NOT NULL THEN 'create_reminder' ELSE 'create_task' END,
+      p_input,
+      p_parser_result
+    );
+  END IF;
+
+  IF v_title IS NULL THEN
+    RETURN public._command_route_placeholder_result(
+      p_request_id,
+      'create_task',
+      'task',
+      '/today',
+      'Open task flow'
+    );
+  END IF;
+
+  IF v_assignee IS NULL THEN
+    RETURN jsonb_build_object(
+      'contract_version', '1.1',
+      'request_id', p_request_id,
+      'source_intent', 'create_task',
+      'module', 'task',
+      'status', 'missing_fields',
+      'missing_fields', jsonb_build_array('assigned_to'),
+      'risk_level', 'low',
+      'fields', jsonb_build_object(
+        'task_title', v_title,
+        'assigned_to', NULL,
+        'due_at', NULL,
+        'notes', v_notes,
+        'recurrence_interval', NULLIF(v_recurrence::text, 'none')
+      ),
+      'resolution', jsonb_build_object('mode', 'not_applicable', 'entity_type', 'none'),
+      'ui_hint', jsonb_build_object(
+        'type', 'inline',
+        'component', 'member_picker',
+        'target', NULL,
+        'prefill', NULL,
+        'options', public._command_task_assignee_options(p_home_id)
+      ),
+      'summary', format('Create task: %s', v_title),
+      'policy', jsonb_build_object(
+        'suggested_outcome', 'inline',
+        'requires_confirmation', false,
+        'is_executable_now', false,
+        'executor', 'chores_create'
+      )
+    );
+  END IF;
+
+  v_row := public.chores_create(
+    p_home_id,
+    v_title,
+    v_assignee,
+    current_date,
+    v_recurrence,
+    NULL,
+    v_notes,
+    NULL
+  );
+
+  RETURN jsonb_build_object(
+    'contract_version', '1.1',
+    'request_id', p_request_id,
+    'source_intent', 'create_task',
+    'module', 'task',
+    'status', 'complete',
+    'missing_fields', '[]'::jsonb,
+    'risk_level', 'low',
+    'fields', jsonb_build_object(
+      'task_title', v_title,
+      'assigned_to', v_assignee,
+      'due_at', NULL,
+      'notes', v_notes,
+      'recurrence_interval', v_recurrence
+    ),
+    'resolution', jsonb_build_object('mode', 'not_applicable', 'entity_type', 'none'),
+    'ui_hint', jsonb_build_object('type', 'execute', 'component', NULL, 'target', NULL, 'prefill', NULL, 'options', '[]'::jsonb),
+    'summary', format('Created task: %s', v_title),
+    'policy', jsonb_build_object('suggested_outcome', 'execute', 'requires_confirmation', false, 'is_executable_now', true, 'executor', 'chores_create'),
+    'execution', jsonb_build_object('chore', to_jsonb(v_row))
+  );
+END;
+$$;
+
+
+ALTER FUNCTION "public"."_command_task_result_pipeline"("p_home_id" "uuid", "p_request_id" "uuid", "p_input" "text", "p_parser_result" "jsonb") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_command_task_route_result"("p_home_id" "uuid", "p_request_id" "uuid", "p_source_intent" "text", "p_effective_input" "text", "p_parser_result" "jsonb" DEFAULT NULL::"jsonb") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+DECLARE
+  v_interpretation jsonb := public._command_task_interpretation(p_home_id, p_effective_input, p_parser_result);
+  v_title text := NULLIF(btrim(COALESCE(v_interpretation->>'task_title', '')), '');
+  v_notes text := NULLIF(btrim(COALESCE(v_interpretation->>'notes', '')), '');
+  v_assignee uuid := NULLIF(COALESCE(v_interpretation->>'assigned_to', ''), '')::uuid;
+  v_due_at date := NULLIF(COALESCE(v_interpretation->>'due_at', ''), '')::date;
+  v_recurrence_every integer := CASE
+    WHEN jsonb_typeof(COALESCE(p_parser_result->'recurrence_every', 'null'::jsonb)) = 'number'
+      THEN (p_parser_result->>'recurrence_every')::integer
+    ELSE NULL
+  END;
+  v_recurrence_unit text := NULLIF(btrim(COALESCE(p_parser_result->>'recurrence_unit', '')), '');
+BEGIN
+  RETURN jsonb_build_object(
+    'contract_version', '1.1',
+    'request_id', p_request_id,
+    'source_intent', p_source_intent,
+    'module', 'task',
+    'status', 'ambiguous',
+    'missing_fields', '[]'::jsonb,
+    'risk_level', 'medium',
+    'fields', jsonb_strip_nulls(jsonb_build_object(
+      'task_title', v_title,
+      'assigned_to', v_assignee,
+      'due_at', v_due_at,
+      'notes', v_notes,
+      'recurrence_every', v_recurrence_every,
+      'recurrence_unit', v_recurrence_unit
+    )),
+    'resolution', jsonb_build_object('mode', 'route_for_resolution', 'entity_type', 'none'),
+    'ui_hint', jsonb_build_object(
+      'type', 'route',
+      'component', NULL,
+      'target', '/today',
+      'prefill', jsonb_strip_nulls(jsonb_build_object(
+        'task_title', v_title,
+        'assigned_to', v_assignee,
+        'due_at', v_due_at,
+        'notes', v_notes,
+        'recurrence_every', v_recurrence_every,
+        'recurrence_unit', v_recurrence_unit
+      )),
+      'options', '[]'::jsonb
+    ),
+    'summary', 'Open task flow for date-aware or recurring task setup',
+    'policy', jsonb_build_object(
+      'suggested_outcome', 'route',
+      'requires_confirmation', false,
+      'is_executable_now', false,
+      'executor', 'none'
+    )
+  );
+END;
+$$;
+
+
+ALTER FUNCTION "public"."_command_task_route_result"("p_home_id" "uuid", "p_request_id" "uuid", "p_source_intent" "text", "p_effective_input" "text", "p_parser_result" "jsonb") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_command_task_start_date_from_parse"("p_parser_result" "jsonb") RETURNS "date"
+    LANGUAGE "sql" IMMUTABLE
+    SET "search_path" TO ''
+    AS $_$
+  SELECT CASE
+    WHEN p_parser_result IS NULL THEN NULL
+    WHEN COALESCE(p_parser_result->>'start_date', '') ~ '^\d{4}-\d{2}-\d{2}$'
+      THEN (p_parser_result->>'start_date')::date
+    ELSE NULL
+  END;
+$_$;
+
+
+ALTER FUNCTION "public"."_command_task_start_date_from_parse"("p_parser_result" "jsonb") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_command_top_level_response"("p_entrypoint" "text", "p_request_id" "uuid", "p_result" "jsonb") RETURNS "jsonb"
+    LANGUAGE "sql" IMMUTABLE
+    SET "search_path" TO ''
+    AS $$
+  SELECT jsonb_build_object(
+    'contract_version', '1.0',
+    'request_id', p_request_id,
+    'entrypoint', p_entrypoint,
+    'result', p_result
+  );
+$$;
+
+
+ALTER FUNCTION "public"."_command_top_level_response"("p_entrypoint" "text", "p_request_id" "uuid", "p_result" "jsonb") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."_command_unknown_v1_result"("p_request_id" "uuid", "p_confidence" numeric DEFAULT 0.25) RETURNS "jsonb"
+    LANGUAGE "sql" IMMUTABLE
+    SET "search_path" TO ''
+    AS $$
+  SELECT public._command_result_build(
+    'unknown',
+    'unknown',
+    'navigation',
+    p_confidence,
+    '{}'::jsonb,
+    '[]'::jsonb,
+    jsonb_build_object(
+      'component', 'capability_suggestions',
+      'target', '/home',
+      'options', jsonb_build_array(
+        jsonb_build_object('id', 'groceries', 'label_key', 'commandCapability_groceries'),
+        jsonb_build_object('id', 'expenses', 'label_key', 'commandCapability_expenses'),
+        jsonb_build_object('id', 'tasks', 'label_key', 'commandCapability_tasks'),
+        jsonb_build_object('id', 'navigation', 'label_key', 'commandCapability_navigation')
+      ),
+      'prefill', '{}'::jsonb
+    ),
+    NULL,
+    false
+  );
+$$;
+
+
+ALTER FUNCTION "public"."_command_unknown_v1_result"("p_request_id" "uuid", "p_confidence" numeric) OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."_complaint_topics_valid"("p" "jsonb") RETURNS boolean
@@ -1203,10 +3092,6 @@ $$;
 
 
 ALTER FUNCTION "public"."_expense_get_validated_unit_splits"("p_home_id" "uuid", "p_creator_user_id" "uuid", "p_amount_cents" bigint, "p_split_mode" "public"."expense_split_type", "p_unit_ids" "uuid"[], "p_unit_splits" "jsonb") OWNER TO "postgres";
-
-SET default_tablespace = '';
-
-SET default_table_access_method = "heap";
 
 
 CREATE TABLE IF NOT EXISTS "public"."expenses" (
@@ -6840,6 +8725,88 @@ $$;
 ALTER FUNCTION "public"."_shopping_list__canonicalize_name"("p_name" "text") OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."_shopping_list__canonicalize_name_v2"("p_name" "text") RETURNS "text"
+    LANGUAGE "sql" IMMUTABLE
+    AS $$
+  WITH folded AS (
+    SELECT lower(
+      btrim(
+        replace(
+          replace(
+            replace(
+              replace(
+                replace(
+                  replace(
+                    replace(
+                      replace(
+                        replace(
+                          replace(
+                            replace(
+                              replace(
+                                replace(coalesce(p_name, ''), ' ', ' '),
+                                '　', ' '
+                              ),
+                              '’', ' '
+                            ),
+                            '‘', ' '
+                          ),
+                          '＇', ' '
+                        ),
+                        '‐', ' '
+                      ),
+                      '‑', ' '
+                    ),
+                    '‒', ' '
+                  ),
+                  '–', ' '
+                ),
+                '—', ' '
+              ),
+              '―', ' '
+            ),
+            '−', ' '
+          ),
+          '。', ' '
+        )
+      )
+    ) AS value
+  ),
+  cleaned AS (
+    SELECT regexp_replace(
+      regexp_replace(
+        regexp_replace(
+          value,
+          '、+',
+          ' ',
+          'g'
+        ),
+        '[[:punct:]]+',
+        ' ',
+        'g'
+      ),
+      '\s+',
+      ' ',
+      'g'
+    ) AS value
+    FROM folded
+  ),
+  tokens AS (
+    SELECT token, ordinality
+    FROM cleaned c
+    CROSS JOIN LATERAL regexp_split_to_table(btrim(c.value), '\s+') WITH ORDINALITY AS t(token, ordinality)
+    WHERE token <> ''
+  )
+  SELECT coalesce(
+    string_agg(public._shopping_list__canonicalize_token(token), ' ' ORDER BY ordinality),
+    ''
+  )
+  FROM tokens;
+$$;
+
+
+ALTER FUNCTION "public"."_shopping_list__canonicalize_name_v2"("p_name" "text") OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."_shopping_list__canonicalize_token"("p_token" "text") RETURNS "text"
     LANGUAGE "plpgsql" IMMUTABLE
     AS $_$
@@ -7031,24 +8998,60 @@ CREATE OR REPLACE FUNCTION "public"."_shopping_list__purchase_memory_payload"("p
     AS $$
 DECLARE
   v_row record;
+  v_canonical_name text := public._shopping_list__canonicalize_name(p_name);
+  v_canonical_name_v2 text := public._shopping_list__canonicalize_name_v2(p_name);
 BEGIN
+  WITH candidates AS (
+    SELECT
+      0 AS priority,
+      pm.last_purchased_at,
+      p.username AS last_purchased_by_display_name,
+      floor(extract(epoch FROM (now() - pm.last_purchased_at)) / 86400)::integer AS days_since_last_purchase,
+      pm.warning_window_days
+    FROM public.shopping_list_purchase_memory pm
+    LEFT JOIN public.profiles p
+      ON p.id = pm.last_purchased_by_user_id
+    WHERE pm.home_id = p_home_id
+      AND pm.scope_type = p_scope_type
+      AND pm.canonical_name_v2 = v_canonical_name_v2
+      AND (
+        (p_scope_type = 'house' AND pm.unit_id IS NULL)
+        OR
+        (p_scope_type = 'unit' AND pm.unit_id = p_unit_id)
+      )
+
+    UNION ALL
+
+    SELECT
+      1 AS priority,
+      pm.last_purchased_at,
+      p.username AS last_purchased_by_display_name,
+      floor(extract(epoch FROM (now() - pm.last_purchased_at)) / 86400)::integer AS days_since_last_purchase,
+      pm.warning_window_days
+    FROM public.shopping_list_purchase_memory pm
+    LEFT JOIN public.profiles p
+      ON p.id = pm.last_purchased_by_user_id
+    WHERE pm.home_id = p_home_id
+      AND pm.scope_type = p_scope_type
+      AND pm.canonical_name = v_canonical_name
+      AND (
+        pm.canonical_name_v2 IS NULL
+        OR pm.canonical_name_v2 <> v_canonical_name_v2
+      )
+      AND (
+        (p_scope_type = 'house' AND pm.unit_id IS NULL)
+        OR
+        (p_scope_type = 'unit' AND pm.unit_id = p_unit_id)
+      )
+  )
   SELECT
-    pm.last_purchased_at,
-    p.username AS last_purchased_by_display_name,
-    floor(extract(epoch FROM (now() - pm.last_purchased_at)) / 86400)::integer AS days_since_last_purchase,
-    pm.warning_window_days
+    c.last_purchased_at,
+    c.last_purchased_by_display_name,
+    c.days_since_last_purchase,
+    c.warning_window_days
   INTO v_row
-  FROM public.shopping_list_purchase_memory pm
-  LEFT JOIN public.profiles p
-    ON p.id = pm.last_purchased_by_user_id
-  WHERE pm.home_id = p_home_id
-    AND pm.scope_type = p_scope_type
-    AND pm.canonical_name = public._shopping_list__canonicalize_name(p_name)
-    AND (
-      (p_scope_type = 'house' AND pm.unit_id IS NULL)
-      OR
-      (p_scope_type = 'unit' AND pm.unit_id = p_unit_id)
-    )
+  FROM candidates c
+  ORDER BY c.priority
   LIMIT 1;
 
   IF NOT FOUND THEN
@@ -7302,12 +9305,16 @@ BEGIN
       i.home_id,
       i.scope_type,
       i.unit_id,
-      public._shopping_list__canonicalize_name(i.name)
+      public._shopping_list__canonicalize_name_v2(i.name)
     )
       i.home_id,
       i.scope_type,
       i.unit_id,
-      public._shopping_list__canonicalize_name(i.name) AS canonical_name,
+      COALESCE(
+        NULLIF(public._shopping_list__canonicalize_name(i.name), ''),
+        public._shopping_list__canonicalize_name_v2(i.name)
+      ) AS canonical_name,
+      public._shopping_list__canonicalize_name_v2(i.name) AS canonical_name_v2,
       btrim(i.name) AS display_name,
       i.completed_by_user_id AS last_purchased_by_user_id,
       i.completed_at AS last_purchased_at,
@@ -7317,11 +9324,12 @@ BEGIN
       AND i.is_completed = TRUE
       AND i.completed_by_user_id IS NOT NULL
       AND i.completed_at IS NOT NULL
+      AND public._shopping_list__canonicalize_name_v2(i.name) <> ''
     ORDER BY
       i.home_id,
       i.scope_type,
       i.unit_id,
-      public._shopping_list__canonicalize_name(i.name),
+      public._shopping_list__canonicalize_name_v2(i.name),
       i.completed_at DESC,
       i.id ASC
   )
@@ -7330,6 +9338,7 @@ BEGIN
     scope_type,
     unit_id,
     canonical_name,
+    canonical_name_v2,
     display_name,
     last_purchased_at,
     last_purchased_by_user_id,
@@ -7340,16 +9349,20 @@ BEGIN
     c.scope_type,
     c.unit_id,
     c.canonical_name,
+    c.canonical_name_v2,
     c.display_name,
     c.last_purchased_at,
     c.last_purchased_by_user_id,
-    public._shopping_list__warning_window_days(c.canonical_name)
+    public._shopping_list__warning_window_days(c.canonical_name_v2)
   FROM latest_candidate c
   WHERE c.scope_type = 'house'
-  ON CONFLICT (home_id, canonical_name)
+  ON CONFLICT (home_id, canonical_name_v2)
     WHERE scope_type = 'house'
+      AND canonical_name_v2 IS NOT NULL
   DO UPDATE
   SET
+    canonical_name = EXCLUDED.canonical_name,
+    canonical_name_v2 = EXCLUDED.canonical_name_v2,
     display_name = EXCLUDED.display_name,
     last_purchased_at = EXCLUDED.last_purchased_at,
     last_purchased_by_user_id = EXCLUDED.last_purchased_by_user_id,
@@ -7360,12 +9373,16 @@ BEGIN
       i.home_id,
       i.scope_type,
       i.unit_id,
-      public._shopping_list__canonicalize_name(i.name)
+      public._shopping_list__canonicalize_name_v2(i.name)
     )
       i.home_id,
       i.scope_type,
       i.unit_id,
-      public._shopping_list__canonicalize_name(i.name) AS canonical_name,
+      COALESCE(
+        NULLIF(public._shopping_list__canonicalize_name(i.name), ''),
+        public._shopping_list__canonicalize_name_v2(i.name)
+      ) AS canonical_name,
+      public._shopping_list__canonicalize_name_v2(i.name) AS canonical_name_v2,
       btrim(i.name) AS display_name,
       i.completed_by_user_id AS last_purchased_by_user_id,
       i.completed_at AS last_purchased_at,
@@ -7375,11 +9392,12 @@ BEGIN
       AND i.is_completed = TRUE
       AND i.completed_by_user_id IS NOT NULL
       AND i.completed_at IS NOT NULL
+      AND public._shopping_list__canonicalize_name_v2(i.name) <> ''
     ORDER BY
       i.home_id,
       i.scope_type,
       i.unit_id,
-      public._shopping_list__canonicalize_name(i.name),
+      public._shopping_list__canonicalize_name_v2(i.name),
       i.completed_at DESC,
       i.id ASC
   )
@@ -7388,6 +9406,7 @@ BEGIN
     scope_type,
     unit_id,
     canonical_name,
+    canonical_name_v2,
     display_name,
     last_purchased_at,
     last_purchased_by_user_id,
@@ -7398,16 +9417,20 @@ BEGIN
     c.scope_type,
     c.unit_id,
     c.canonical_name,
+    c.canonical_name_v2,
     c.display_name,
     c.last_purchased_at,
     c.last_purchased_by_user_id,
-    public._shopping_list__warning_window_days(c.canonical_name)
+    public._shopping_list__warning_window_days(c.canonical_name_v2)
   FROM latest_candidate c
   WHERE c.scope_type = 'unit'
-  ON CONFLICT (home_id, unit_id, canonical_name)
+  ON CONFLICT (home_id, unit_id, canonical_name_v2)
     WHERE scope_type = 'unit'
+      AND canonical_name_v2 IS NOT NULL
   DO UPDATE
   SET
+    canonical_name = EXCLUDED.canonical_name,
+    canonical_name_v2 = EXCLUDED.canonical_name_v2,
     display_name = EXCLUDED.display_name,
     last_purchased_at = EXCLUDED.last_purchased_at,
     last_purchased_by_user_id = EXCLUDED.last_purchased_by_user_id,
@@ -7588,6 +9611,68 @@ $$;
 
 
 ALTER FUNCTION "public"."acknowledge_home_directory_reminder"("p_home_id" "uuid", "p_reminder_id" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."ai_feature_steps_get"("p_feature_key" "text") RETURNS "jsonb"
+    LANGUAGE "sql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+  SELECT COALESCE(
+    jsonb_agg(
+      jsonb_build_object(
+        'feature_key', s.feature_key,
+        'step_key', s.step_key,
+        'step_order', s.step_order,
+        'role_key', s.role_key,
+        'stage', r.stage
+      )
+      ORDER BY s.step_order ASC
+    ),
+    '[]'::jsonb
+  )
+  FROM public.ai_feature_steps s
+  JOIN public.ai_roles r
+    ON r.role_key = s.role_key
+  WHERE s.feature_key = p_feature_key
+    AND s.active = true;
+$$;
+
+
+ALTER FUNCTION "public"."ai_feature_steps_get"("p_feature_key" "text") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."ai_role_route_get"("p_role_key" "text") RETURNS "jsonb"
+    LANGUAGE "sql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+  SELECT jsonb_build_object(
+    'role_key', r.role_key,
+    'stage', ar.stage,
+    'provider', p.provider_key,
+    'adapter_kind', p.adapter_kind,
+    'base_url', p.base_url,
+    'secret_name', p.secret_name,
+    'model', m.model_key,
+    'prompt_version', r.prompt_version,
+    'execution_mode', r.execution_mode,
+    'deterministic_fallback_allowed', r.deterministic_fallback_allowed,
+    'max_retries', r.max_retries
+  )
+  FROM public.ai_role_routes r
+  JOIN public.ai_models m
+    ON m.model_id = r.model_id
+  JOIN public.ai_providers p
+    ON p.provider_id = m.provider_id
+  JOIN public.ai_roles ar
+    ON ar.role_key = r.role_key
+  WHERE r.role_key = p_role_key
+    AND r.active = true
+    AND m.active = true
+    AND p.active = true;
+$$;
+
+
+ALTER FUNCTION "public"."ai_role_route_get"("p_role_key" "text") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."api_assert"("p_condition" boolean, "p_code" "text", "p_msg" "text", "p_sqlstate" "text" DEFAULT 'P0001'::"text", "p_details" "jsonb" DEFAULT NULL::"jsonb", "p_hint" "text" DEFAULT NULL::"text") RETURNS "void"
@@ -9182,6 +11267,446 @@ $$;
 
 
 ALTER FUNCTION "public"."claim_rewrite_jobs_for_batch_submit_v1"("p_limit" integer) OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."command_cancel_v1"("p_handoff_id" "uuid") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+DECLARE
+  v_handoff public.command_handoffs%ROWTYPE;
+BEGIN
+  SELECT *
+    INTO v_handoff
+    FROM public.command_handoffs
+   WHERE handoff_id = p_handoff_id
+     AND user_id = auth.uid()
+   LIMIT 1;
+
+  PERFORM public.api_assert(v_handoff.handoff_id IS NOT NULL, 'invalid_command_input', 'Handoff not found.', '22023');
+
+  UPDATE public.command_handoffs
+     SET status = 'cancelled'
+   WHERE handoff_id = p_handoff_id
+     AND status = 'pending';
+
+  RETURN jsonb_build_object(
+    'handoff_id', p_handoff_id,
+    'status', 'cancelled'
+  );
+END;
+$$;
+
+
+ALTER FUNCTION "public"."command_cancel_v1"("p_handoff_id" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."command_continue_v1"("p_handoff_id" "uuid", "p_request_id" "uuid", "p_user_input" "jsonb") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+DECLARE
+  v_handoff public.command_handoffs%ROWTYPE;
+  v_home_id uuid;
+  v_source_intent text;
+  v_source_text text;
+  v_module text;
+  v_state_result jsonb;
+  v_fields jsonb;
+  v_action text := COALESCE(NULLIF(btrim(COALESCE(p_user_input->>'action', '')), ''), 'confirm');
+  v_title text;
+  v_notes text;
+  v_assigned_to uuid;
+  v_due_at text;
+  v_recurrence public.recurrence_interval := 'none'::public.recurrence_interval;
+  v_items text[];
+  v_scope_type text;
+  v_unit_id uuid;
+  v_results jsonb := '[]'::jsonb;
+  v_item text;
+  v_row public.chores%ROWTYPE;
+  v_result jsonb;
+BEGIN
+  PERFORM public.api_assert(p_request_id IS NOT NULL, 'invalid_command_input', 'request_id is required.', '22023');
+  PERFORM public.api_assert(p_handoff_id IS NOT NULL, 'invalid_command_input', 'handoff_id is required.', '22023');
+
+  UPDATE public.command_handoffs
+     SET status = 'expired'
+   WHERE status = 'pending'
+     AND expires_at IS NOT NULL
+     AND expires_at <= now()
+     AND user_id = auth.uid();
+
+  SELECT *
+    INTO v_handoff
+    FROM public.command_handoffs
+   WHERE handoff_id = p_handoff_id
+     AND user_id = auth.uid()
+     AND status = 'pending'
+     AND (expires_at IS NULL OR expires_at > now())
+   LIMIT 1;
+
+  PERFORM public.api_assert(v_handoff.handoff_id IS NOT NULL, 'invalid_command_input', 'Pending handoff not found.', '22023');
+
+  v_home_id := v_handoff.home_id;
+  v_source_intent := v_handoff.intent;
+  v_source_text := v_handoff.source_text;
+  v_module := v_handoff.module;
+  v_state_result := public._command_handoff_state_result(v_handoff);
+  v_fields := COALESCE(v_state_result->'fields', '{}'::jsonb);
+
+  PERFORM public._assert_home_member(v_home_id);
+
+  IF v_action = 'cancel' THEN
+    UPDATE public.command_handoffs
+       SET status = 'cancelled'
+     WHERE handoff_id = v_handoff.handoff_id;
+    RETURN NULL;
+  END IF;
+
+  IF v_module = 'task' AND v_source_intent = 'create_task' THEN
+    v_title := NULLIF(btrim(COALESCE(v_fields->>'task_title', '')), '');
+    v_notes := NULLIF(btrim(COALESCE(v_fields->>'notes', '')), '');
+    v_due_at := NULLIF(btrim(COALESCE(v_fields->>'due_at', '')), '');
+    v_recurrence := COALESCE(
+      NULLIF(COALESCE(v_fields->>'recurrence_interval', ''), '')::public.recurrence_interval,
+      'none'::public.recurrence_interval
+    );
+    v_assigned_to := NULLIF(COALESCE(p_user_input->>'assigned_to', p_user_input->>'user_id', v_fields->>'assigned_to', ''), '')::uuid;
+
+    PERFORM public.api_assert(v_title IS NOT NULL, 'invalid_command_input', 'task_title is required for task continuation.', '22023');
+    PERFORM public.api_assert(v_assigned_to IS NOT NULL, 'invalid_command_input', 'assigned_to is required for task continuation.', '22023');
+    PERFORM public.api_assert(
+      EXISTS (
+        SELECT 1
+          FROM public.memberships m
+         WHERE m.home_id = v_home_id
+           AND m.user_id = v_assigned_to
+           AND m.is_current = true
+      ),
+      'invalid_command_input',
+      'Selected assignee must be a current home member.',
+      '22023'
+    );
+
+    IF v_due_at IS NOT NULL THEN
+      v_result := public._command_attach_handoff(
+        v_home_id,
+        p_request_id,
+        COALESCE(v_source_text, v_title),
+        public._command_result_build(
+          'route',
+          'create_reminder',
+          'task',
+          COALESCE(v_handoff.confidence, 0.75),
+          jsonb_strip_nulls(jsonb_build_object(
+            'task_title', v_title,
+            'assigned_to', v_assigned_to,
+            'due_at', v_due_at,
+            'notes', v_notes,
+            'recurrence_interval', NULLIF(v_recurrence::text, 'none')
+          )),
+          '[]'::jsonb,
+          jsonb_build_object(
+            'component', NULL,
+            'target', '/today',
+            'options', '[]'::jsonb,
+            'prefill', jsonb_strip_nulls(jsonb_build_object(
+              'task_title', v_title,
+              'assigned_to', v_assigned_to,
+              'due_at', v_due_at,
+              'notes', v_notes,
+              'recurrence_interval', NULLIF(v_recurrence::text, 'none')
+            ))
+          ),
+          NULL,
+          false
+        )
+      );
+      UPDATE public.command_handoffs SET status = 'completed' WHERE handoff_id = v_handoff.handoff_id;
+      RETURN public._command_top_level_response('command_continue_v1', p_request_id, v_result);
+    END IF;
+
+    v_row := public.chores_create(
+      v_home_id,
+      v_title,
+      v_assigned_to,
+      current_date,
+      v_recurrence,
+      NULL,
+      v_notes,
+      NULL
+    );
+
+    UPDATE public.command_handoffs
+       SET status = 'completed'
+     WHERE handoff_id = v_handoff.handoff_id;
+
+    v_result := public._command_result_build(
+      'execute',
+      'create_task',
+      'task',
+      COALESCE(v_handoff.confidence, 0.95),
+      jsonb_strip_nulls(jsonb_build_object(
+        'task_title', v_title,
+        'assigned_to', v_assigned_to,
+        'due_at', NULL,
+        'notes', v_notes,
+        'recurrence_interval', NULLIF(v_recurrence::text, 'none')
+      )),
+      '[]'::jsonb,
+      jsonb_build_object('component', NULL, 'target', NULL, 'options', '[]'::jsonb, 'prefill', '{}'::jsonb),
+      jsonb_build_object(
+        'entity_type', 'task',
+        'entity_ids', jsonb_build_array(v_row.id),
+        'results', jsonb_build_array(to_jsonb(v_row))
+      ),
+      false
+    );
+
+    RETURN public._command_top_level_response('command_continue_v1', p_request_id, v_result);
+  END IF;
+
+  IF v_module = 'grocery' AND v_source_intent = 'add_grocery_items' THEN
+    SELECT COALESCE(array_agg(value), ARRAY[]::text[])
+      INTO v_items
+      FROM jsonb_array_elements_text(COALESCE(v_fields->'items', '[]'::jsonb));
+
+    v_scope_type := COALESCE(NULLIF(v_fields->>'scope_type', ''), 'house');
+    v_unit_id := NULLIF(v_fields->>'unit_id', '')::uuid;
+
+    PERFORM public.api_assert(
+      COALESCE((p_user_input->>'confirm')::boolean, v_action = 'confirm'),
+      'invalid_command_input',
+      'Grocery continuation requires confirm action.',
+      '22023'
+    );
+
+    FOREACH v_item IN ARRAY v_items LOOP
+      v_results := v_results || jsonb_build_array(
+        public.shopping_list_add_item_v3(
+          v_home_id,
+          v_item,
+          NULL,
+          NULL,
+          NULL,
+          v_scope_type,
+          v_unit_id,
+          true
+        )
+      );
+    END LOOP;
+
+    UPDATE public.command_handoffs
+       SET status = 'completed'
+     WHERE handoff_id = v_handoff.handoff_id;
+
+    v_result := public._command_result_build(
+      'execute',
+      'add_grocery_items',
+      'grocery',
+      COALESCE(v_handoff.confidence, 0.95),
+      jsonb_build_object('items', to_jsonb(v_items), 'scope_type', v_scope_type, 'unit_id', v_unit_id),
+      '[]'::jsonb,
+      jsonb_build_object('component', NULL, 'target', NULL, 'options', '[]'::jsonb, 'prefill', '{}'::jsonb),
+      jsonb_build_object(
+        'entity_type', 'shopping_items',
+        'entity_ids', COALESCE((SELECT jsonb_agg(value->>'id') FROM jsonb_array_elements(v_results) value), '[]'::jsonb),
+        'results', v_results
+      ),
+      false
+    );
+
+    RETURN public._command_top_level_response('command_continue_v1', p_request_id, v_result);
+  END IF;
+
+  PERFORM public.api_error(
+    'invalid_command_input',
+    'Unsupported handoff continuation.',
+    '22023',
+    jsonb_build_object('module', v_module, 'intent', v_source_intent)
+  );
+END;
+$$;
+
+
+ALTER FUNCTION "public"."command_continue_v1"("p_handoff_id" "uuid", "p_request_id" "uuid", "p_user_input" "jsonb") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."command_resume_v1"("p_home_id" "uuid") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+DECLARE
+  v_handoff public.command_handoffs%ROWTYPE;
+BEGIN
+  PERFORM public._assert_home_member(p_home_id);
+
+  UPDATE public.command_handoffs
+     SET status = 'expired'
+   WHERE status = 'pending'
+     AND expires_at IS NOT NULL
+     AND expires_at <= now()
+     AND user_id = auth.uid()
+     AND home_id = p_home_id;
+
+  SELECT *
+    INTO v_handoff
+    FROM public.command_handoffs
+   WHERE user_id = auth.uid()
+     AND home_id = p_home_id
+     AND status = 'pending'
+     AND (expires_at IS NULL OR expires_at > now())
+   ORDER BY updated_at DESC
+   LIMIT 1;
+
+  IF v_handoff.handoff_id IS NULL THEN
+    RETURN NULL;
+  END IF;
+
+  RETURN public._command_top_level_response(
+    'command_resume_v1',
+    v_handoff.request_id,
+    public._command_resume_row_to_result(v_handoff)
+  );
+END;
+$$;
+
+
+ALTER FUNCTION "public"."command_resume_v1"("p_home_id" "uuid") OWNER TO "postgres";
+
+
+CREATE OR REPLACE FUNCTION "public"."command_submit_v1"("p_home_id" "uuid", "p_input_mode" "text", "p_raw_text" "text", "p_transcript_text" "text", "p_timezone" "text", "p_locale" "text", "p_client_timestamp" timestamp with time zone, "p_request_id" "uuid") RETURNS "jsonb"
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+DECLARE
+  v_user_id uuid := auth.uid();
+  v_quota_now timestamptz := now();
+  v_effective_input text;
+  v_timezone text;
+  v_locale text;
+  v_ai jsonb;
+  v_pipeline jsonb;
+  v_classification jsonb;
+  v_parser_result jsonb;
+  v_intent text;
+  v_intents text[];
+  v_confidence numeric;
+  v_legacy jsonb;
+  v_result jsonb;
+BEGIN
+  PERFORM public._assert_home_member(p_home_id);
+  PERFORM public.api_assert(p_request_id IS NOT NULL, 'invalid_command_input', 'request_id is required.', '22023');
+  PERFORM public.api_assert(p_input_mode IN ('text', 'voice'), 'invalid_command_input', 'input_mode must be text or voice.', '22023');
+
+  v_effective_input := public._command_effective_input(p_input_mode, p_raw_text, p_transcript_text);
+  PERFORM public.api_assert(v_effective_input IS NOT NULL, 'invalid_command_input', 'Command text is required.', '22023');
+
+  v_timezone := COALESCE(public._command_context_value(v_user_id, p_timezone, 'timezone'), 'UTC');
+  v_locale := COALESCE(public._command_context_value(v_user_id, p_locale, 'locale'), 'en');
+
+  PERFORM public._command_ai_quota_charge(p_home_id, p_request_id, v_quota_now);
+
+  BEGIN
+    v_ai := public._command_pipeline_call(
+      p_home_id,
+      p_request_id,
+      jsonb_build_object(
+        'input_mode', p_input_mode,
+        'raw_text', p_raw_text,
+        'transcript_text', p_transcript_text,
+        'effective_input', v_effective_input,
+        'timezone', v_timezone,
+        'locale', v_locale,
+        'client_timestamp', p_client_timestamp,
+        'user_id', v_user_id
+      )
+    );
+  EXCEPTION WHEN OTHERS THEN
+    PERFORM public._command_ai_quota_release(p_request_id, v_user_id, v_quota_now);
+    RAISE;
+  END;
+
+  v_pipeline := COALESCE(v_ai->'result', '{}'::jsonb);
+  v_classification := COALESCE(v_pipeline->'classification', '{}'::jsonb);
+  v_intent := COALESCE(NULLIF(v_classification->>'primary_intent', ''), NULLIF(v_classification->>'intent', ''), 'unknown');
+  v_confidence := public._command_confidence_score(COALESCE(v_classification->>'confidence', 'low'));
+  v_parser_result := public._command_pipeline_parser_result_for_intent(v_pipeline, v_intent);
+
+  IF v_intent = 'unknown' OR v_confidence < 0.60 THEN
+    PERFORM public._command_log_unrecognized_intent(
+      p_home_id,
+      p_request_id,
+      p_input_mode,
+      p_raw_text,
+      p_transcript_text,
+      v_locale,
+      v_timezone,
+      COALESCE(NULLIF(v_intent, ''), 'unknown'),
+      COALESCE(NULLIF(v_classification->>'confidence', ''), 'low'),
+      'command-router-v1',
+      COALESCE(v_classification->>'provider', 'unknown'),
+      COALESCE(v_classification->>'model', 'unknown')
+    );
+    v_result := public._command_unknown_v1_result(p_request_id, v_confidence);
+    RETURN public._command_top_level_response('command_submit_v1', p_request_id, v_result);
+  END IF;
+
+  SELECT COALESCE(array_agg(DISTINCT value), ARRAY[]::text[])
+    INTO v_intents
+  FROM jsonb_array_elements_text(COALESCE(v_classification->'intents_detected', jsonb_build_array(v_intent)));
+
+  IF COALESCE(array_length(v_intents, 1), 0) > 1 THEN
+    v_legacy := public._command_module_preview_result_pipeline(
+      p_home_id,
+      p_request_id,
+      v_intent,
+      v_effective_input,
+      CASE WHEN v_intent IN ('add_grocery_items', 'create_task', 'create_reminder')
+        THEN v_parser_result
+        ELSE NULL
+      END
+    );
+    v_result := public._command_legacy_to_v1_result(
+      p_home_id,
+      p_request_id,
+      v_effective_input,
+      v_legacy,
+      v_confidence,
+      true,
+      COALESCE(v_legacy->'ui_hint'->>'type', '') = 'execute'
+    );
+    RETURN public._command_top_level_response('command_submit_v1', p_request_id, v_result);
+  END IF;
+
+  v_legacy := public._command_module_result_pipeline(
+    p_home_id,
+    p_request_id,
+    v_intent,
+    v_effective_input,
+    CASE WHEN v_intent IN ('add_grocery_items', 'create_task', 'create_reminder')
+      THEN v_parser_result
+      ELSE NULL
+    END
+  );
+
+  v_result := public._command_legacy_to_v1_result(
+    p_home_id,
+    p_request_id,
+    v_effective_input,
+    v_legacy,
+    v_confidence,
+    false,
+    false
+  );
+
+  RETURN public._command_top_level_response('command_submit_v1', p_request_id, v_result);
+END;
+$$;
+
+
+ALTER FUNCTION "public"."command_submit_v1"("p_home_id" "uuid", "p_input_mode" "text", "p_raw_text" "text", "p_transcript_text" "text", "p_timezone" "text", "p_locale" "text", "p_client_timestamp" timestamp with time zone, "p_request_id" "uuid") OWNER TO "postgres";
 
 
 CREATE OR REPLACE FUNCTION "public"."complaint_build_recipient_snapshots"("p_rewrite_request_id" "uuid", "p_home_id" "uuid", "p_recipient_user_id" "uuid", "p_preference_payload" "jsonb") RETURNS "jsonb"
@@ -17360,6 +19885,103 @@ $$;
 ALTER FUNCTION "public"."home_units_list_selectable_expense_units"("p_home_id" "uuid") OWNER TO "postgres";
 
 
+CREATE OR REPLACE FUNCTION "public"."home_units_list_selectable_expense_units_v2"("p_home_id" "uuid") RETURNS TABLE("unit_id" "uuid", "home_id" "uuid", "name" "text", "unit_type" "text", "member_user_ids" "text"[])
+    LANGUAGE "plpgsql" SECURITY DEFINER
+    SET "search_path" TO ''
+    AS $$
+DECLARE
+  v_user uuid := auth.uid();
+  v_membership_id uuid;
+  v_personal_unit_id uuid;
+  v_shared_unit_id uuid;
+BEGIN
+  PERFORM public._assert_authenticated();
+  PERFORM public._assert_home_member(p_home_id);
+
+  SELECT m.id
+  INTO v_membership_id
+  FROM public.memberships m
+  WHERE m.home_id = p_home_id
+    AND m.user_id = v_user
+    AND m.valid_to IS NULL
+  LIMIT 1;
+
+  IF v_membership_id IS NULL THEN
+    PERFORM public.api_error(
+      'not_home_member',
+      'Caller is not a current home member.',
+      '42501'
+    );
+  END IF;
+
+  v_personal_unit_id := public._home_units__ensure_personal(
+    p_home_id,
+    v_membership_id,
+    v_user
+  );
+
+  SELECT hu.id
+  INTO v_shared_unit_id
+  FROM public.home_units hu
+  JOIN public.home_unit_members hum
+    ON hum.unit_id = hu.id
+  WHERE hu.home_id = p_home_id
+    AND hu.unit_type = 'shared'
+    AND hu.archived_at IS NULL
+    AND hum.membership_id = v_membership_id
+    AND hum.is_active_shared = TRUE
+  LIMIT 1;
+
+  RETURN QUERY
+  WITH candidate_units AS (
+    SELECT
+      hu.id,
+      hu.home_id,
+      hu.name,
+      hu.unit_type,
+      hu.created_at
+    FROM public.home_units hu
+    JOIN public.memberships m
+      ON m.id = hu.personal_membership_id
+    WHERE hu.home_id = p_home_id
+      AND hu.unit_type = 'personal'
+      AND hu.archived_at IS NULL
+      AND m.valid_to IS NULL
+
+    UNION
+
+    SELECT
+      hu.id,
+      hu.home_id,
+      hu.name,
+      hu.unit_type,
+      hu.created_at
+    FROM public.home_units hu
+    WHERE hu.id = v_shared_unit_id
+  )
+  SELECT
+    cu.id,
+    cu.home_id,
+    cu.name,
+    cu.unit_type,
+    public._home_units__member_user_ids(cu.id)
+  FROM candidate_units cu
+  ORDER BY
+    CASE
+      WHEN cu.id = v_shared_unit_id THEN 0
+      WHEN cu.id = v_personal_unit_id THEN 1
+      ELSE 2
+    END,
+    lower(cu.name),
+    cu.created_at,
+    cu.id;
+END;
+$$;
+
+
+ALTER FUNCTION "public"."home_units_list_selectable_expense_units_v2"("p_home_id" "uuid") OWNER TO "postgres";
+
+
 CREATE OR REPLACE FUNCTION "public"."home_units_update_shared"("p_unit_id" "uuid", "p_name" "text") RETURNS "uuid"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO ''
@@ -23268,53 +25890,63 @@ CREATE OR REPLACE FUNCTION "public"."paywall_status_get"("p_home_id" "uuid") RET
     SET "search_path" TO ''
     AS $$
 DECLARE
-  v_plan text;
-  v_now  timestamptz := now();
+  v_plan        text;
+  v_expires_at  timestamptz;
+  v_now         timestamptz := now();
+  v_user_quota  jsonb;
 BEGIN
   PERFORM public._assert_home_member(p_home_id);
 
-  SELECT COALESCE(he.plan, 'free')
-    INTO v_plan
+  SELECT COALESCE(he.plan, 'free'), he.expires_at
+    INTO v_plan, v_expires_at
     FROM public.home_entitlements he
    WHERE he.home_id = p_home_id;
 
-  RETURN jsonb_build_object(
-    'plan', v_plan,
-    'is_premium', (v_plan <> 'free'),
-    'has_ai',     (v_plan = 'premium_ai'),
-    'usage', COALESCE((
-      SELECT jsonb_build_object(
-        'active_chores',   c.active_chores,
-        'chore_photos',    c.chore_photos,
-        'active_members',  c.active_members,
-        'active_expenses', c.active_expenses,
-        'expense_photos',  c.expense_photos,   -- added
-        'updated_at',      c.updated_at
-      )
-      FROM public.home_usage_counters c
-      WHERE c.home_id = p_home_id
-    ), jsonb_build_object(
-      'active_chores', 0,
-      'chore_photos', 0,
-      'active_members', 0,
-      'active_expenses', 0,
-      'expense_photos', 0,                      -- added
-      'updated_at', v_now
-    )),
-    'limits', COALESCE((
-      SELECT jsonb_agg(
-        jsonb_build_object(
-          'metric',    x.metric::text,
-          'max_value', x.max_value
+  v_plan := COALESCE(v_plan, 'free');
+  v_user_quota := public._command_ai_quota_status(p_home_id, auth.uid(), v_now);
+
+  RETURN jsonb_strip_nulls(
+    jsonb_build_object(
+      'plan', v_plan,
+      'expires_at', v_expires_at,
+      'is_premium', (v_plan <> 'free' AND (v_expires_at IS NULL OR v_expires_at > v_now)),
+      'usage', COALESCE((
+        SELECT jsonb_build_object(
+          'active_chores',   c.active_chores,
+          'chore_photos',    c.chore_photos,
+          'active_members',  c.active_members,
+          'active_expenses', c.active_expenses,
+          'expense_photos',  c.expense_photos,
+          'updated_at',      c.updated_at
         )
-        ORDER BY x.metric::text
+        FROM public.home_usage_counters c
+        WHERE c.home_id = p_home_id
+      ), jsonb_build_object(
+        'active_chores', 0,
+        'chore_photos', 0,
+        'active_members', 0,
+        'active_expenses', 0,
+        'expense_photos', 0,
+        'updated_at', v_now
+      )),
+      'limits', COALESCE((
+        SELECT jsonb_agg(
+          jsonb_build_object(
+            'metric',    x.metric::text,
+            'max_value', x.max_value
+          )
+          ORDER BY x.metric::text
+        )
+        FROM (
+          SELECT l.metric, l.max_value
+          FROM public.home_plan_limits l
+          WHERE l.plan = v_plan
+        ) x
+      ), '[]'::jsonb),
+      'userQuotas', jsonb_build_object(
+        'ai_command_requests', v_user_quota
       )
-      FROM (
-        SELECT l.metric, l.max_value
-        FROM public.home_plan_limits l
-        WHERE l.plan = v_plan
-      ) x
-    ), '[]'::jsonb)
+    )
   );
 END;
 $$;
@@ -26756,6 +29388,114 @@ $_$;
 ALTER FUNCTION "public"."withyou_log_pack_download_v1"("p_language" "text", "p_pack_version" "text", "p_platform" "text", "p_app_version" "text", "p_request_path" "text", "p_user_agent" "text", "p_country_code" "text") OWNER TO "postgres";
 
 
+CREATE TABLE IF NOT EXISTS "public"."ai_feature_steps" (
+    "feature_key" "text" NOT NULL,
+    "step_key" "text" NOT NULL,
+    "step_order" integer NOT NULL,
+    "role_key" "text" NOT NULL,
+    "active" boolean DEFAULT true NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL
+);
+
+
+ALTER TABLE "public"."ai_feature_steps" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."ai_models" (
+    "model_id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "provider_id" "uuid" NOT NULL,
+    "model_key" "text" NOT NULL,
+    "supports_structured_output" boolean DEFAULT false NOT NULL,
+    "active" boolean DEFAULT true NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL
+);
+
+
+ALTER TABLE "public"."ai_models" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."ai_providers" (
+    "provider_id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "provider_key" "text" NOT NULL,
+    "adapter_kind" "text" NOT NULL,
+    "base_url" "text",
+    "secret_name" "text",
+    "active" boolean DEFAULT true NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "ck_ai_providers_adapter_kind" CHECK (("adapter_kind" = ANY (ARRAY['openai_responses'::"text", 'openai_compat_responses'::"text", 'gemini'::"text", 'stub'::"text"])))
+);
+
+
+ALTER TABLE "public"."ai_providers" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."ai_role_routes" (
+    "role_key" "text" NOT NULL,
+    "model_id" "uuid" NOT NULL,
+    "prompt_version" "text" NOT NULL,
+    "execution_mode" "text" DEFAULT 'sync'::"text" NOT NULL,
+    "deterministic_fallback_allowed" boolean DEFAULT false NOT NULL,
+    "max_retries" integer DEFAULT 0 NOT NULL,
+    "active" boolean DEFAULT true NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "ck_ai_role_routes_execution_mode" CHECK (("execution_mode" = ANY (ARRAY['sync'::"text", 'async'::"text"]))),
+    CONSTRAINT "ck_ai_role_routes_max_retries" CHECK (("max_retries" >= 0))
+);
+
+
+ALTER TABLE "public"."ai_role_routes" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."ai_roles" (
+    "role_key" "text" NOT NULL,
+    "stage" "text" NOT NULL,
+    "input_schema_key" "text" NOT NULL,
+    "output_schema_key" "text" NOT NULL,
+    "description" "text" NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "ck_ai_roles_stage" CHECK (("stage" = ANY (ARRAY['normalization'::"text", 'understanding'::"text", 'execution'::"text"])))
+);
+
+
+ALTER TABLE "public"."ai_roles" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."ai_step_logs" (
+    "step_log_id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "request_id" "uuid" NOT NULL,
+    "user_id" "uuid",
+    "home_id" "uuid",
+    "feature_key" "text" NOT NULL,
+    "stage" "text" NOT NULL,
+    "role_key" "text" NOT NULL,
+    "provider" "text" NOT NULL,
+    "model" "text" NOT NULL,
+    "prompt_version" "text" NOT NULL,
+    "status" "text" NOT NULL,
+    "latency_ms" integer,
+    "error_code" "text",
+    "provider_request_id" "text",
+    "input_tokens" integer,
+    "output_tokens" integer,
+    "total_tokens" integer,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "ck_ai_step_logs_input_tokens" CHECK ((("input_tokens" IS NULL) OR ("input_tokens" >= 0))),
+    CONSTRAINT "ck_ai_step_logs_latency" CHECK ((("latency_ms" IS NULL) OR ("latency_ms" >= 0))),
+    CONSTRAINT "ck_ai_step_logs_output_tokens" CHECK ((("output_tokens" IS NULL) OR ("output_tokens" >= 0))),
+    CONSTRAINT "ck_ai_step_logs_stage" CHECK (("stage" = ANY (ARRAY['normalization'::"text", 'understanding'::"text", 'execution'::"text"]))),
+    CONSTRAINT "ck_ai_step_logs_status" CHECK (("status" = ANY (ARRAY['started'::"text", 'completed'::"text", 'failed'::"text", 'timeout'::"text"]))),
+    CONSTRAINT "ck_ai_step_logs_total_tokens" CHECK ((("total_tokens" IS NULL) OR ("total_tokens" >= 0)))
+);
+
+
+ALTER TABLE "public"."ai_step_logs" OWNER TO "postgres";
+
+
 CREATE TABLE IF NOT EXISTS "public"."analytics_events" (
     "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
     "user_id" "uuid" NOT NULL,
@@ -26934,6 +29674,26 @@ COMMENT ON COLUMN "public"."chore_events"."payload" IS 'Structured diff / metada
 
 
 COMMENT ON COLUMN "public"."chore_events"."occurred_at" IS 'Timestamp of event.';
+
+
+
+CREATE TABLE IF NOT EXISTS "public"."command_ai_requests" (
+    "user_id" "uuid" NOT NULL,
+    "quota_date" "date" NOT NULL,
+    "request_id" "uuid" NOT NULL,
+    "charged_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL
+);
+
+
+ALTER TABLE "public"."command_ai_requests" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."command_ai_requests" IS 'Per-user AI command quota ledger keyed by UTC quota day and stable request_id.';
+
+
+
+COMMENT ON COLUMN "public"."command_ai_requests"."quota_date" IS 'UTC calendar date for quota charging.';
 
 
 
@@ -28806,7 +31566,9 @@ CREATE TABLE IF NOT EXISTS "public"."shopping_list_purchase_memory" (
     "warning_window_days" integer NOT NULL,
     "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
     "updated_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    "canonical_name_v2" "text",
     CONSTRAINT "chk_shopping_list_purchase_memory_canonical_name" CHECK (("btrim"("canonical_name") <> ''::"text")),
+    CONSTRAINT "chk_shopping_list_purchase_memory_canonical_name_v2" CHECK ((("canonical_name_v2" IS NULL) OR ("btrim"("canonical_name_v2") <> ''::"text"))),
     CONSTRAINT "chk_shopping_list_purchase_memory_scope_shape" CHECK (((("scope_type" = 'house'::"text") AND ("unit_id" IS NULL)) OR (("scope_type" = 'unit'::"text") AND ("unit_id" IS NOT NULL)))),
     CONSTRAINT "shopping_list_purchase_memory_scope_type_check" CHECK (("scope_type" = ANY (ARRAY['house'::"text", 'unit'::"text"]))),
     CONSTRAINT "shopping_list_purchase_memory_warning_window_days_check" CHECK (("warning_window_days" >= 1))
@@ -28814,6 +31576,33 @@ CREATE TABLE IF NOT EXISTS "public"."shopping_list_purchase_memory" (
 
 
 ALTER TABLE "public"."shopping_list_purchase_memory" OWNER TO "postgres";
+
+
+CREATE TABLE IF NOT EXISTS "public"."unrecognized_intents" (
+    "id" "uuid" DEFAULT "gen_random_uuid"() NOT NULL,
+    "request_id" "uuid" NOT NULL,
+    "user_id" "uuid",
+    "home_id" "uuid",
+    "input_mode" "text" NOT NULL,
+    "raw_text" "text",
+    "transcript_text" "text",
+    "locale" "text",
+    "timezone" "text",
+    "classifier_intent" "text" DEFAULT 'unknown'::"text" NOT NULL,
+    "classifier_confidence" "text" DEFAULT 'low'::"text" NOT NULL,
+    "router_version" "text",
+    "model_provider" "text",
+    "model_name" "text",
+    "created_at" timestamp with time zone DEFAULT "now"() NOT NULL,
+    CONSTRAINT "unrecognized_intents_input_mode_check" CHECK (("input_mode" = ANY (ARRAY['text'::"text", 'voice'::"text"])))
+);
+
+
+ALTER TABLE "public"."unrecognized_intents" OWNER TO "postgres";
+
+
+COMMENT ON TABLE "public"."unrecognized_intents" IS 'Audit/discovery log for unsupported or low-confidence command requests.';
+
 
 
 CREATE TABLE IF NOT EXISTS "public"."user_subscriptions" (
@@ -28905,6 +31694,41 @@ COMMENT ON TABLE "public"."withyou_pack_downloads" IS 'Append-only telemetry for
 
 
 
+ALTER TABLE ONLY "public"."ai_feature_steps"
+    ADD CONSTRAINT "ai_feature_steps_pkey" PRIMARY KEY ("feature_key", "step_key");
+
+
+
+ALTER TABLE ONLY "public"."ai_models"
+    ADD CONSTRAINT "ai_models_pkey" PRIMARY KEY ("model_id");
+
+
+
+ALTER TABLE ONLY "public"."ai_providers"
+    ADD CONSTRAINT "ai_providers_pkey" PRIMARY KEY ("provider_id");
+
+
+
+ALTER TABLE ONLY "public"."ai_providers"
+    ADD CONSTRAINT "ai_providers_provider_key_key" UNIQUE ("provider_key");
+
+
+
+ALTER TABLE ONLY "public"."ai_role_routes"
+    ADD CONSTRAINT "ai_role_routes_pkey" PRIMARY KEY ("role_key");
+
+
+
+ALTER TABLE ONLY "public"."ai_roles"
+    ADD CONSTRAINT "ai_roles_pkey" PRIMARY KEY ("role_key");
+
+
+
+ALTER TABLE ONLY "public"."ai_step_logs"
+    ADD CONSTRAINT "ai_step_logs_pkey" PRIMARY KEY ("step_log_id");
+
+
+
 ALTER TABLE ONLY "public"."analytics_events"
     ADD CONSTRAINT "analytics_events_pkey" PRIMARY KEY ("id");
 
@@ -28942,6 +31766,21 @@ ALTER TABLE ONLY "public"."chore_events"
 
 ALTER TABLE ONLY "public"."chores"
     ADD CONSTRAINT "chores_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."command_ai_requests"
+    ADD CONSTRAINT "command_ai_requests_pkey" PRIMARY KEY ("user_id", "quota_date", "request_id");
+
+
+
+ALTER TABLE ONLY "public"."command_handoffs"
+    ADD CONSTRAINT "command_handoffs_pkey" PRIMARY KEY ("handoff_id");
+
+
+
+ALTER TABLE ONLY "public"."command_handoffs"
+    ADD CONSTRAINT "command_handoffs_resume_token_key" UNIQUE ("resume_token");
 
 
 
@@ -29429,6 +32268,21 @@ ALTER TABLE ONLY "public"."shopping_lists"
 
 
 
+ALTER TABLE ONLY "public"."unrecognized_intents"
+    ADD CONSTRAINT "unrecognized_intents_pkey" PRIMARY KEY ("id");
+
+
+
+ALTER TABLE ONLY "public"."ai_feature_steps"
+    ADD CONSTRAINT "uq_ai_feature_steps_order" UNIQUE ("feature_key", "step_order");
+
+
+
+ALTER TABLE ONLY "public"."ai_models"
+    ADD CONSTRAINT "uq_ai_models" UNIQUE ("provider_id", "model_key");
+
+
+
 ALTER TABLE ONLY "public"."app_version"
     ADD CONSTRAINT "uq_app_version" UNIQUE ("version_number");
 
@@ -29496,6 +32350,10 @@ ALTER TABLE ONLY "public"."user_subscriptions"
 
 ALTER TABLE ONLY "public"."withyou_pack_downloads"
     ADD CONSTRAINT "withyou_pack_downloads_pkey" PRIMARY KEY ("id");
+
+
+
+CREATE INDEX "command_ai_requests_user_date_idx" ON "public"."command_ai_requests" USING "btree" ("user_id", "quota_date");
 
 
 
@@ -29859,6 +32717,22 @@ CREATE INDEX "idx_shopping_lists_home_active" ON "public"."shopping_lists" USING
 
 
 
+CREATE INDEX "ix_ai_step_logs_feature_role" ON "public"."ai_step_logs" USING "btree" ("feature_key", "role_key", "created_at" DESC);
+
+
+
+CREATE INDEX "ix_ai_step_logs_request" ON "public"."ai_step_logs" USING "btree" ("request_id", "created_at" DESC);
+
+
+
+CREATE INDEX "ix_command_handoffs_request" ON "public"."command_handoffs" USING "btree" ("request_id", "created_at" DESC);
+
+
+
+CREATE INDEX "ix_command_handoffs_user_home_status" ON "public"."command_handoffs" USING "btree" ("user_id", "home_id", "status", "updated_at" DESC);
+
+
+
 CREATE INDEX "ix_complaint_routes_lookup" ON "public"."complaint_rewrite_routes" USING "btree" ("surface", "lane", "rewrite_strength", "active", "priority");
 
 
@@ -29912,6 +32786,14 @@ CREATE INDEX "revenuecat_webhook_events_orig_txn_idx" ON "public"."revenuecat_we
 
 
 CREATE INDEX "revenuecat_webhook_events_rc_event_idx" ON "public"."revenuecat_webhook_events" USING "btree" ("environment", "rc_event_id") WHERE ("rc_event_id" IS NOT NULL);
+
+
+
+CREATE INDEX "unrecognized_intents_home_created_idx" ON "public"."unrecognized_intents" USING "btree" ("home_id", "created_at" DESC);
+
+
+
+CREATE INDEX "unrecognized_intents_user_created_idx" ON "public"."unrecognized_intents" USING "btree" ("user_id", "created_at" DESC);
 
 
 
@@ -30063,7 +32945,15 @@ CREATE UNIQUE INDEX "uq_shopping_list_purchase_memory_house" ON "public"."shoppi
 
 
 
+CREATE UNIQUE INDEX "uq_shopping_list_purchase_memory_house_v2" ON "public"."shopping_list_purchase_memory" USING "btree" ("home_id", "canonical_name_v2") WHERE (("scope_type" = 'house'::"text") AND ("canonical_name_v2" IS NOT NULL));
+
+
+
 CREATE UNIQUE INDEX "uq_shopping_list_purchase_memory_unit" ON "public"."shopping_list_purchase_memory" USING "btree" ("home_id", "unit_id", "canonical_name") WHERE ("scope_type" = 'unit'::"text");
+
+
+
+CREATE UNIQUE INDEX "uq_shopping_list_purchase_memory_unit_v2" ON "public"."shopping_list_purchase_memory" USING "btree" ("home_id", "unit_id", "canonical_name_v2") WHERE (("scope_type" = 'unit'::"text") AND ("canonical_name_v2" IS NOT NULL));
 
 
 
@@ -30116,6 +33006,30 @@ CREATE INDEX "withyou_pack_downloads_requested_at_idx" ON "public"."withyou_pack
 
 
 CREATE OR REPLACE TRIGGER "chores_events_trigger" AFTER INSERT OR DELETE OR UPDATE ON "public"."chores" FOR EACH ROW EXECUTE FUNCTION "public"."chores_events_trigger"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_ai_feature_steps_updated_at" BEFORE UPDATE ON "public"."ai_feature_steps" FOR EACH ROW EXECUTE FUNCTION "public"."_touch_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_ai_models_updated_at" BEFORE UPDATE ON "public"."ai_models" FOR EACH ROW EXECUTE FUNCTION "public"."_touch_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_ai_providers_updated_at" BEFORE UPDATE ON "public"."ai_providers" FOR EACH ROW EXECUTE FUNCTION "public"."_touch_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_ai_role_routes_updated_at" BEFORE UPDATE ON "public"."ai_role_routes" FOR EACH ROW EXECUTE FUNCTION "public"."_touch_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_ai_roles_updated_at" BEFORE UPDATE ON "public"."ai_roles" FOR EACH ROW EXECUTE FUNCTION "public"."_touch_updated_at"();
+
+
+
+CREATE OR REPLACE TRIGGER "trg_command_handoffs_updated_at" BEFORE UPDATE ON "public"."command_handoffs" FOR EACH ROW EXECUTE FUNCTION "public"."_touch_updated_at"();
 
 
 
@@ -30335,6 +33249,36 @@ CREATE OR REPLACE TRIGGER "user_subscriptions_home_entitlements_trg" AFTER INSER
 
 
 
+ALTER TABLE ONLY "public"."ai_feature_steps"
+    ADD CONSTRAINT "ai_feature_steps_role_key_fkey" FOREIGN KEY ("role_key") REFERENCES "public"."ai_roles"("role_key");
+
+
+
+ALTER TABLE ONLY "public"."ai_models"
+    ADD CONSTRAINT "ai_models_provider_id_fkey" FOREIGN KEY ("provider_id") REFERENCES "public"."ai_providers"("provider_id");
+
+
+
+ALTER TABLE ONLY "public"."ai_role_routes"
+    ADD CONSTRAINT "ai_role_routes_model_id_fkey" FOREIGN KEY ("model_id") REFERENCES "public"."ai_models"("model_id");
+
+
+
+ALTER TABLE ONLY "public"."ai_role_routes"
+    ADD CONSTRAINT "ai_role_routes_role_key_fkey" FOREIGN KEY ("role_key") REFERENCES "public"."ai_roles"("role_key");
+
+
+
+ALTER TABLE ONLY "public"."ai_step_logs"
+    ADD CONSTRAINT "ai_step_logs_home_id_fkey" FOREIGN KEY ("home_id") REFERENCES "public"."homes"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."ai_step_logs"
+    ADD CONSTRAINT "ai_step_logs_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."profiles"("id") ON DELETE SET NULL;
+
+
+
 ALTER TABLE ONLY "public"."analytics_events"
     ADD CONSTRAINT "analytics_events_home_id_fkey" FOREIGN KEY ("home_id") REFERENCES "public"."homes"("id") ON DELETE SET NULL;
 
@@ -30392,6 +33336,21 @@ ALTER TABLE ONLY "public"."chores"
 
 ALTER TABLE ONLY "public"."chores"
     ADD CONSTRAINT "chores_home_id_fkey" FOREIGN KEY ("home_id") REFERENCES "public"."homes"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."command_ai_requests"
+    ADD CONSTRAINT "command_ai_requests_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."profiles"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."command_handoffs"
+    ADD CONSTRAINT "command_handoffs_home_id_fkey" FOREIGN KEY ("home_id") REFERENCES "public"."homes"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."command_handoffs"
+    ADD CONSTRAINT "command_handoffs_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."profiles"("id") ON DELETE CASCADE;
 
 
 
@@ -31130,6 +34089,16 @@ ALTER TABLE ONLY "public"."shopping_lists"
 
 
 
+ALTER TABLE ONLY "public"."unrecognized_intents"
+    ADD CONSTRAINT "unrecognized_intents_home_id_fkey" FOREIGN KEY ("home_id") REFERENCES "public"."homes"("id") ON DELETE CASCADE;
+
+
+
+ALTER TABLE ONLY "public"."unrecognized_intents"
+    ADD CONSTRAINT "unrecognized_intents_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."profiles"("id") ON DELETE SET NULL;
+
+
+
 ALTER TABLE ONLY "public"."user_subscriptions"
     ADD CONSTRAINT "user_subscriptions_home_id_fkey" FOREIGN KEY ("home_id") REFERENCES "public"."homes"("id") ON DELETE CASCADE;
 
@@ -31138,6 +34107,24 @@ ALTER TABLE ONLY "public"."user_subscriptions"
 ALTER TABLE ONLY "public"."user_subscriptions"
     ADD CONSTRAINT "user_subscriptions_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "public"."profiles"("id") ON DELETE CASCADE;
 
+
+
+ALTER TABLE "public"."ai_feature_steps" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."ai_models" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."ai_providers" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."ai_role_routes" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."ai_roles" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."ai_step_logs" ENABLE ROW LEVEL SECURITY;
 
 
 ALTER TABLE "public"."analytics_events" ENABLE ROW LEVEL SECURITY;
@@ -31163,6 +34150,12 @@ ALTER TABLE "public"."chore_events" ENABLE ROW LEVEL SECURITY;
 
 
 ALTER TABLE "public"."chores" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."command_ai_requests" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."command_handoffs" ENABLE ROW LEVEL SECURITY;
 
 
 ALTER TABLE "public"."complaint_ai_providers" ENABLE ROW LEVEL SECURITY;
@@ -31457,6 +34450,9 @@ ALTER TABLE "public"."shopping_list_purchase_memory" ENABLE ROW LEVEL SECURITY;
 
 
 ALTER TABLE "public"."shopping_lists" ENABLE ROW LEVEL SECURITY;
+
+
+ALTER TABLE "public"."unrecognized_intents" ENABLE ROW LEVEL SECURITY;
 
 
 ALTER TABLE "public"."user_subscriptions" ENABLE ROW LEVEL SECURITY;
@@ -31793,6 +34789,11 @@ GRANT ALL ON FUNCTION "public"."citext"("inet") TO "service_role";
 
 
 
+REVOKE ALL ON FUNCTION "public"."_ai_log_step"("p_request_id" "uuid", "p_home_id" "uuid", "p_feature_key" "text", "p_stage" "text", "p_role_key" "text", "p_provider" "text", "p_model" "text", "p_prompt_version" "text", "p_status" "text", "p_user_id" "uuid", "p_latency_ms" integer, "p_error_code" "text", "p_provider_request_id" "text", "p_input_tokens" integer, "p_output_tokens" integer, "p_total_tokens" integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_ai_log_step"("p_request_id" "uuid", "p_home_id" "uuid", "p_feature_key" "text", "p_stage" "text", "p_role_key" "text", "p_provider" "text", "p_model" "text", "p_prompt_version" "text", "p_status" "text", "p_user_id" "uuid", "p_latency_ms" integer, "p_error_code" "text", "p_provider_request_id" "text", "p_input_tokens" integer, "p_output_tokens" integer, "p_total_tokens" integer) TO "service_role";
+
+
+
 REVOKE ALL ON FUNCTION "public"."_assert_active_profile"() FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."_assert_active_profile"() TO "anon";
 GRANT ALL ON FUNCTION "public"."_assert_active_profile"() TO "authenticated";
@@ -31831,6 +34832,215 @@ GRANT ALL ON FUNCTION "public"."_chore_recurrence_to_every_unit"("p_recurrence" 
 REVOKE ALL ON FUNCTION "public"."_chores_base_for_home"("p_home_id" "uuid") FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."_chores_base_for_home"("p_home_id" "uuid") TO "service_role";
 GRANT ALL ON FUNCTION "public"."_chores_base_for_home"("p_home_id" "uuid") TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_command_ai_quota_charge"("p_home_id" "uuid", "p_request_id" "uuid", "p_now" timestamp with time zone) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_command_ai_quota_charge"("p_home_id" "uuid", "p_request_id" "uuid", "p_now" timestamp with time zone) TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_command_ai_quota_date"("p_now" timestamp with time zone) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_command_ai_quota_date"("p_now" timestamp with time zone) TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_command_ai_quota_limit"() FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_command_ai_quota_limit"() TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_command_ai_quota_release"("p_request_id" "uuid", "p_user_id" "uuid", "p_now" timestamp with time zone) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_command_ai_quota_release"("p_request_id" "uuid", "p_user_id" "uuid", "p_now" timestamp with time zone) TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_command_ai_quota_resets_at"("p_now" timestamp with time zone) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_command_ai_quota_resets_at"("p_now" timestamp with time zone) TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_command_ai_quota_status"("p_home_id" "uuid", "p_user_id" "uuid", "p_now" timestamp with time zone) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_command_ai_quota_status"("p_home_id" "uuid", "p_user_id" "uuid", "p_now" timestamp with time zone) TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_command_attach_handoff"("p_home_id" "uuid", "p_request_id" "uuid", "p_source_text" "text", "p_result" "jsonb") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_command_attach_handoff"("p_home_id" "uuid", "p_request_id" "uuid", "p_source_text" "text", "p_result" "jsonb") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_command_confidence_score"("p_confidence" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_command_confidence_score"("p_confidence" "text") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_command_context_value"("p_user_id" "uuid", "p_supplied" "text", "p_field" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_command_context_value"("p_user_id" "uuid", "p_supplied" "text", "p_field" "text") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_command_default_grocery_scope"("p_home_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_command_default_grocery_scope"("p_home_id" "uuid") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_command_effective_input"("p_input_mode" "text", "p_raw_text" "text", "p_transcript_text" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_command_effective_input"("p_input_mode" "text", "p_raw_text" "text", "p_transcript_text" "text") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_command_grocery_clean_token"("p_token" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_command_grocery_clean_token"("p_token" "text") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_command_grocery_items_from_parse"("p_parse" "jsonb") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_command_grocery_items_from_parse"("p_parse" "jsonb") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_command_grocery_parse_items"("p_input" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_command_grocery_parse_items"("p_input" "text") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_command_grocery_preflight"("p_home_id" "uuid", "p_items" "text"[], "p_scope_type" "text", "p_unit_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_command_grocery_preflight"("p_home_id" "uuid", "p_items" "text"[], "p_scope_type" "text", "p_unit_id" "uuid") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_command_grocery_result_pipeline"("p_home_id" "uuid", "p_request_id" "uuid", "p_raw_input" "text", "p_parser_result" "jsonb") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_command_grocery_result_pipeline"("p_home_id" "uuid", "p_request_id" "uuid", "p_raw_input" "text", "p_parser_result" "jsonb") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_command_handoff_expires_at"("p_kind" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_command_handoff_expires_at"("p_kind" "text") TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."command_handoffs" TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_command_handoff_state_result"("p_handoff" "public"."command_handoffs") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_command_handoff_state_result"("p_handoff" "public"."command_handoffs") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_command_legacy_to_v1_result"("p_home_id" "uuid", "p_request_id" "uuid", "p_source_text" "text", "p_legacy" "jsonb", "p_confidence" numeric, "p_is_multi" boolean, "p_force_confirm" boolean) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_command_legacy_to_v1_result"("p_home_id" "uuid", "p_request_id" "uuid", "p_source_text" "text", "p_legacy" "jsonb", "p_confidence" numeric, "p_is_multi" boolean, "p_force_confirm" boolean) TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_command_log_unrecognized_intent"("p_home_id" "uuid", "p_request_id" "uuid", "p_input_mode" "text", "p_raw_text" "text", "p_transcript_text" "text", "p_locale" "text", "p_timezone" "text", "p_classifier_intent" "text", "p_classifier_confidence" "text", "p_router_version" "text", "p_model_provider" "text", "p_model_name" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_command_log_unrecognized_intent"("p_home_id" "uuid", "p_request_id" "uuid", "p_input_mode" "text", "p_raw_text" "text", "p_transcript_text" "text", "p_locale" "text", "p_timezone" "text", "p_classifier_intent" "text", "p_classifier_confidence" "text", "p_router_version" "text", "p_model_provider" "text", "p_model_name" "text") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_command_module_preview_result_pipeline"("p_home_id" "uuid", "p_request_id" "uuid", "p_intent" "text", "p_effective_input" "text", "p_parser_result" "jsonb") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_command_module_preview_result_pipeline"("p_home_id" "uuid", "p_request_id" "uuid", "p_intent" "text", "p_effective_input" "text", "p_parser_result" "jsonb") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_command_module_result_pipeline"("p_home_id" "uuid", "p_request_id" "uuid", "p_intent" "text", "p_effective_input" "text", "p_parser_result" "jsonb") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_command_module_result_pipeline"("p_home_id" "uuid", "p_request_id" "uuid", "p_intent" "text", "p_effective_input" "text", "p_parser_result" "jsonb") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_command_navigation_result"("p_request_id" "uuid", "p_intent" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_command_navigation_result"("p_request_id" "uuid", "p_intent" "text") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_command_navigation_target"("p_intent" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_command_navigation_target"("p_intent" "text") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_command_pipeline_call"("p_home_id" "uuid", "p_request_id" "uuid", "p_payload" "jsonb") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_command_pipeline_call"("p_home_id" "uuid", "p_request_id" "uuid", "p_payload" "jsonb") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_command_pipeline_parser_result_for_intent"("p_pipeline" "jsonb", "p_intent" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_command_pipeline_parser_result_for_intent"("p_pipeline" "jsonb", "p_intent" "text") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_command_result_build"("p_kind" "text", "p_intent" "text", "p_module" "text", "p_confidence" numeric, "p_fields" "jsonb", "p_missing_fields" "jsonb", "p_ui" "jsonb", "p_execution" "jsonb", "p_is_multi" boolean) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_command_result_build"("p_kind" "text", "p_intent" "text", "p_module" "text", "p_confidence" numeric, "p_fields" "jsonb", "p_missing_fields" "jsonb", "p_ui" "jsonb", "p_execution" "jsonb", "p_is_multi" boolean) TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_command_result_message"("p_kind" "text", "p_intent" "text", "p_module" "text", "p_fields" "jsonb", "p_is_multi" boolean) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_command_result_message"("p_kind" "text", "p_intent" "text", "p_module" "text", "p_fields" "jsonb", "p_is_multi" boolean) TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_command_resume_row_to_result"("p_handoff" "public"."command_handoffs") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_command_resume_row_to_result"("p_handoff" "public"."command_handoffs") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_command_route_placeholder_result"("p_request_id" "uuid", "p_intent" "text", "p_module" "text", "p_target" "text", "p_summary" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_command_route_placeholder_result"("p_request_id" "uuid", "p_intent" "text", "p_module" "text", "p_target" "text", "p_summary" "text") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_command_task_assignee_options"("p_home_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_command_task_assignee_options"("p_home_id" "uuid") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_command_task_detect_assignee"("p_home_id" "uuid", "p_input" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_command_task_detect_assignee"("p_home_id" "uuid", "p_input" "text") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_command_task_detect_assignee_hint"("p_home_id" "uuid", "p_assignee_hint" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_command_task_detect_assignee_hint"("p_home_id" "uuid", "p_assignee_hint" "text") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_command_task_extract_title"("p_input" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_command_task_extract_title"("p_input" "text") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_command_task_interpretation"("p_home_id" "uuid", "p_effective_input" "text", "p_parser_result" "jsonb") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_command_task_interpretation"("p_home_id" "uuid", "p_effective_input" "text", "p_parser_result" "jsonb") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_command_task_recurrence_interval_from_parse"("p_parser_result" "jsonb") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_command_task_recurrence_interval_from_parse"("p_parser_result" "jsonb") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_command_task_result_pipeline"("p_home_id" "uuid", "p_request_id" "uuid", "p_input" "text", "p_parser_result" "jsonb") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_command_task_result_pipeline"("p_home_id" "uuid", "p_request_id" "uuid", "p_input" "text", "p_parser_result" "jsonb") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_command_task_route_result"("p_home_id" "uuid", "p_request_id" "uuid", "p_source_intent" "text", "p_effective_input" "text", "p_parser_result" "jsonb") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_command_task_route_result"("p_home_id" "uuid", "p_request_id" "uuid", "p_source_intent" "text", "p_effective_input" "text", "p_parser_result" "jsonb") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_command_task_start_date_from_parse"("p_parser_result" "jsonb") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_command_task_start_date_from_parse"("p_parser_result" "jsonb") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_command_top_level_response"("p_entrypoint" "text", "p_request_id" "uuid", "p_result" "jsonb") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_command_top_level_response"("p_entrypoint" "text", "p_request_id" "uuid", "p_result" "jsonb") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."_command_unknown_v1_result"("p_request_id" "uuid", "p_confidence" numeric) FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_command_unknown_v1_result"("p_request_id" "uuid", "p_confidence" numeric) TO "service_role";
 
 
 
@@ -32564,6 +35774,11 @@ GRANT ALL ON FUNCTION "public"."_shopping_list__canonicalize_name"("p_name" "tex
 
 
 
+REVOKE ALL ON FUNCTION "public"."_shopping_list__canonicalize_name_v2"("p_name" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."_shopping_list__canonicalize_name_v2"("p_name" "text") TO "service_role";
+
+
+
 REVOKE ALL ON FUNCTION "public"."_shopping_list__canonicalize_token"("p_token" "text") FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."_shopping_list__canonicalize_token"("p_token" "text") TO "service_role";
 
@@ -32622,6 +35837,20 @@ GRANT ALL ON FUNCTION "public"."_touch_updated_at"() TO "service_role";
 REVOKE ALL ON FUNCTION "public"."acknowledge_home_directory_reminder"("p_home_id" "uuid", "p_reminder_id" "uuid") FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."acknowledge_home_directory_reminder"("p_home_id" "uuid", "p_reminder_id" "uuid") TO "service_role";
 GRANT ALL ON FUNCTION "public"."acknowledge_home_directory_reminder"("p_home_id" "uuid", "p_reminder_id" "uuid") TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "public"."ai_feature_steps_get"("p_feature_key" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."ai_feature_steps_get"("p_feature_key" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."ai_feature_steps_get"("p_feature_key" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."ai_feature_steps_get"("p_feature_key" "text") TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."ai_role_route_get"("p_role_key" "text") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."ai_role_route_get"("p_role_key" "text") TO "anon";
+GRANT ALL ON FUNCTION "public"."ai_role_route_get"("p_role_key" "text") TO "authenticated";
+GRANT ALL ON FUNCTION "public"."ai_role_route_get"("p_role_key" "text") TO "service_role";
 
 
 
@@ -32871,6 +36100,30 @@ REVOKE ALL ON FUNCTION "public"."claim_rewrite_jobs_for_batch_submit_v1"("p_limi
 GRANT ALL ON FUNCTION "public"."claim_rewrite_jobs_for_batch_submit_v1"("p_limit" integer) TO "anon";
 GRANT ALL ON FUNCTION "public"."claim_rewrite_jobs_for_batch_submit_v1"("p_limit" integer) TO "authenticated";
 GRANT ALL ON FUNCTION "public"."claim_rewrite_jobs_for_batch_submit_v1"("p_limit" integer) TO "service_role";
+
+
+
+REVOKE ALL ON FUNCTION "public"."command_cancel_v1"("p_handoff_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."command_cancel_v1"("p_handoff_id" "uuid") TO "service_role";
+GRANT ALL ON FUNCTION "public"."command_cancel_v1"("p_handoff_id" "uuid") TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "public"."command_continue_v1"("p_handoff_id" "uuid", "p_request_id" "uuid", "p_user_input" "jsonb") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."command_continue_v1"("p_handoff_id" "uuid", "p_request_id" "uuid", "p_user_input" "jsonb") TO "service_role";
+GRANT ALL ON FUNCTION "public"."command_continue_v1"("p_handoff_id" "uuid", "p_request_id" "uuid", "p_user_input" "jsonb") TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "public"."command_resume_v1"("p_home_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."command_resume_v1"("p_home_id" "uuid") TO "service_role";
+GRANT ALL ON FUNCTION "public"."command_resume_v1"("p_home_id" "uuid") TO "authenticated";
+
+
+
+REVOKE ALL ON FUNCTION "public"."command_submit_v1"("p_home_id" "uuid", "p_input_mode" "text", "p_raw_text" "text", "p_transcript_text" "text", "p_timezone" "text", "p_locale" "text", "p_client_timestamp" timestamp with time zone, "p_request_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."command_submit_v1"("p_home_id" "uuid", "p_input_mode" "text", "p_raw_text" "text", "p_transcript_text" "text", "p_timezone" "text", "p_locale" "text", "p_client_timestamp" timestamp with time zone, "p_request_id" "uuid") TO "service_role";
+GRANT ALL ON FUNCTION "public"."command_submit_v1"("p_home_id" "uuid", "p_input_mode" "text", "p_raw_text" "text", "p_transcript_text" "text", "p_timezone" "text", "p_locale" "text", "p_client_timestamp" timestamp with time zone, "p_request_id" "uuid") TO "authenticated";
 
 
 
@@ -34566,6 +37819,12 @@ GRANT ALL ON FUNCTION "public"."home_units_list_selectable_expense_units"("p_hom
 
 
 
+REVOKE ALL ON FUNCTION "public"."home_units_list_selectable_expense_units_v2"("p_home_id" "uuid") FROM PUBLIC;
+GRANT ALL ON FUNCTION "public"."home_units_list_selectable_expense_units_v2"("p_home_id" "uuid") TO "service_role";
+GRANT ALL ON FUNCTION "public"."home_units_list_selectable_expense_units_v2"("p_home_id" "uuid") TO "authenticated";
+
+
+
 REVOKE ALL ON FUNCTION "public"."home_units_update_shared"("p_unit_id" "uuid", "p_name" "text") FROM PUBLIC;
 GRANT ALL ON FUNCTION "public"."home_units_update_shared"("p_unit_id" "uuid", "p_name" "text") TO "service_role";
 GRANT ALL ON FUNCTION "public"."home_units_update_shared"("p_unit_id" "uuid", "p_name" "text") TO "authenticated";
@@ -35492,6 +38751,30 @@ GRANT ALL ON FUNCTION "public"."min"("public"."citext") TO "service_role";
 
 
 
+GRANT ALL ON TABLE "public"."ai_feature_steps" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."ai_models" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."ai_providers" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."ai_role_routes" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."ai_roles" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."ai_step_logs" TO "service_role";
+
+
+
 GRANT ALL ON TABLE "public"."analytics_events" TO "service_role";
 
 
@@ -35515,6 +38798,10 @@ GRANT ALL ON TABLE "public"."candidate_fit_submissions" TO "service_role";
 
 
 GRANT ALL ON TABLE "public"."chore_events" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."command_ai_requests" TO "service_role";
 
 
 
@@ -35844,6 +39131,10 @@ GRANT ALL ON TABLE "public"."share_events" TO "service_role";
 
 
 GRANT ALL ON TABLE "public"."shopping_list_purchase_memory" TO "service_role";
+
+
+
+GRANT ALL ON TABLE "public"."unrecognized_intents" TO "service_role";
 
 
 

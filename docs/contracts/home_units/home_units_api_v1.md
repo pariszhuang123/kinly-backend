@@ -5,10 +5,10 @@ Scope: backend
 Artifact-Type: contract
 Stability: evolving
 Status: draft
-Version: v1.3
+Version: v1.4
 ---
 
-# Home Units API Contract v1.3
+# Home Units API Contract v1.4
 
 Status: Draft
 
@@ -206,9 +206,13 @@ For a current member in a home, the backend resolves:
 - if the member has an active shared unit, the allowed unit scope is that exact
   shared `unit_id`
 
-Dependent RPCs such as shopping-list and expense mutations MUST reject attempts
-to target a different unit with `invalid_unit_scope` or an equivalent canonical
+Shopping-list RPCs that accept explicit unit scope MUST reject attempts to
+target a different unit with `invalid_unit_scope` or an equivalent canonical
 error.
+
+Expense unit-based flows may expose a broader target set when the expense
+contract and picker RPC version explicitly allow selecting other active
+personal units in the same home.
 
 ## Shopping-list integration
 
@@ -347,6 +351,39 @@ Behavior:
   - their active shared unit
   - their personal unit only if debtor selection rules in the expense contract
     still allow switching back to personal targeting
+
+Compatibility:
+- this v1 RPC remains caller-scoped for existing clients
+- clients that need a bills picker with all personal units MUST use
+  `home_units_list_selectable_expense_units_v2`
+
+### `home_units_list_selectable_expense_units_v2`
+
+Returns bill-targetable units for a home-scoped unit-based expense picker while
+preserving the v1 caller-scoped RPC for compatibility.
+
+| Param | Type | Required | Notes |
+|---|---|---|---|
+| `p_home_id` | `uuid` | yes | Must be a home where the caller has a current membership |
+
+Returns:
+- `setof object`
+  - `unit_id`
+  - `home_id`
+  - `name`
+  - `unit_type`
+  - `member_user_ids text[]`
+
+Behavior:
+- returns every active personal unit whose linked membership is current in the
+  home
+- if the caller has an active shared unit, also returns that exact shared unit
+- excludes archived units
+- excludes personal units linked to non-current memberships
+- does not return shared units the caller is not a member of
+- orders the caller's active shared unit first when present
+- orders the caller's personal unit next
+- orders the remaining personal units deterministically for stable picker rows
 
 ### `home_units_list_create_shared_candidates`
 

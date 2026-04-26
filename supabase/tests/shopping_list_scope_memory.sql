@@ -234,6 +234,18 @@ SELECT isnt(
   'two couples in the same home get distinct shared unit ids'
 );
 
+SELECT is(
+  public._shopping_list__canonicalize_name_v2('Farmer’s Eggs'),
+  'farmer egg',
+  'canonicalize_name_v2 folds curly apostrophes and Latin plurals'
+);
+
+SELECT is(
+  public._shopping_list__canonicalize_name_v2('牛　奶'),
+  '牛 奶',
+  'canonicalize_name_v2 folds ideographic space for non-Latin input'
+);
+
 SELECT set_config(
   'request.jwt.claim.sub',
   (SELECT user_id::text FROM tmp_users WHERE label = 'owner'),
@@ -453,6 +465,18 @@ SELECT is(
   'purchase memory is written to the exact unit bucket using the normalised canonical name'
 );
 
+SELECT is(
+  (
+    SELECT canonical_name_v2
+    FROM public.shopping_list_purchase_memory
+    WHERE home_id = (SELECT home_id FROM tmp_homes WHERE label = 'primary')
+      AND unit_id = (SELECT unit_id FROM tmp_units WHERE label = 'couple_a')
+      AND canonical_name = 'farmer egg'
+  ),
+  'farmer egg',
+  'purchase memory stores canonical_name_v2 for newly archived Latin rows'
+);
+
 WITH payload AS (
   SELECT public.shopping_list_add_item_v2(
     (SELECT home_id FROM tmp_homes WHERE label = 'primary'),
@@ -532,6 +556,127 @@ WITH payload AS (
 SELECT ok(
   ((payload->'purchase_memory') IS NULL),
   'house-scoped item does not read unit-scoped memory even with the same normalised name'
+)
+FROM payload;
+
+WITH payload AS (
+  SELECT public.shopping_list_add_item_v2(
+    (SELECT home_id FROM tmp_homes WHERE label = 'primary'),
+    '牛奶',
+    NULL,
+    NULL,
+    NULL,
+    'house',
+    NULL
+  ) AS payload
+)
+INSERT INTO tmp_items (label, item_id)
+SELECT 'house_milk_zh', (payload->'item'->>'id')::uuid
+FROM payload;
+
+SELECT public.shopping_list_update_item(
+  (SELECT item_id FROM tmp_items WHERE label = 'house_milk_zh'),
+  NULL,
+  NULL,
+  NULL,
+  TRUE,
+  NULL,
+  FALSE
+);
+
+SELECT is(
+  public.shopping_list_archive_items_for_user(
+    (SELECT home_id FROM tmp_homes WHERE label = 'primary'),
+    ARRAY[(SELECT item_id FROM tmp_items WHERE label = 'house_milk_zh')]
+  ),
+  1,
+  'archiving a non-Latin item writes purchase memory instead of failing canonical-name validation'
+);
+
+SELECT is(
+  (
+    SELECT canonical_name
+    FROM public.shopping_list_purchase_memory
+    WHERE home_id = (SELECT home_id FROM tmp_homes WHERE label = 'primary')
+      AND scope_type = 'house'
+      AND unit_id IS NULL
+      AND display_name = '牛奶'
+  ),
+  '牛奶',
+  'purchase memory preserves a non-Latin canonical name for exact-match reminders'
+);
+
+SELECT is(
+  (
+    SELECT canonical_name_v2
+    FROM public.shopping_list_purchase_memory
+    WHERE home_id = (SELECT home_id FROM tmp_homes WHERE label = 'primary')
+      AND scope_type = 'house'
+      AND unit_id IS NULL
+      AND display_name = '牛奶'
+  ),
+  '牛奶',
+  'purchase memory stores canonical_name_v2 for newly archived non-Latin rows'
+);
+
+WITH payload AS (
+  SELECT public.shopping_list_add_item_v3(
+    (SELECT home_id FROM tmp_homes WHERE label = 'primary'),
+    '牛奶',
+    NULL,
+    NULL,
+    NULL,
+    'house',
+    NULL,
+    FALSE
+  ) AS payload
+)
+SELECT ok(
+  (payload->>'needs_confirmation')::boolean,
+  'recent non-Latin duplicate returns a confirmation requirement instead of failing'
+)
+FROM payload;
+
+INSERT INTO public.shopping_list_purchase_memory (
+  id,
+  home_id,
+  scope_type,
+  unit_id,
+  canonical_name,
+  canonical_name_v2,
+  display_name,
+  last_purchased_at,
+  last_purchased_by_user_id,
+  warning_window_days
+)
+VALUES (
+  '10000000-0000-4000-9000-000000000299',
+  (SELECT home_id FROM tmp_homes WHERE label = 'primary'),
+  'house',
+  NULL,
+  'legacy fallback item',
+  NULL,
+  'Legacy Fallback Item',
+  now(),
+  (SELECT user_id FROM tmp_users WHERE label = 'owner'),
+  14
+);
+
+WITH payload AS (
+  SELECT public.shopping_list_add_item_v3(
+    (SELECT home_id FROM tmp_homes WHERE label = 'primary'),
+    'Legacy Fallback Item',
+    NULL,
+    NULL,
+    NULL,
+    'house',
+    NULL,
+    FALSE
+  ) AS payload
+)
+SELECT ok(
+  (payload->>'needs_confirmation')::boolean,
+  'purchase memory lookup falls back to legacy canonical_name when canonical_name_v2 is absent'
 )
 FROM payload;
 

@@ -3,7 +3,7 @@ SET search_path = pgtap, public, auth, extensions;
 BEGIN;
 SET ROLE postgres;
 
-SELECT plan(6);
+SELECT plan(10);
 
 CREATE OR REPLACE FUNCTION pg_temp.expect_api_error(
   p_sql         text,
@@ -56,6 +56,16 @@ SET active_chores = EXCLUDED.active_chores,
     active_expenses = EXCLUDED.active_expenses,
     updated_at = EXCLUDED.updated_at;
 
+SELECT set_config('app.settings.command_ai_quota_daily_limit', '5', true);
+
+INSERT INTO public.command_ai_requests (user_id, quota_date, request_id)
+VALUES (
+  '00000000-0000-4000-8000-000000000801',
+  public._command_ai_quota_date(now()),
+  '11111111-1111-4111-8111-111111111111'
+)
+ON CONFLICT DO NOTHING;
+
 -- Member can fetch status
 SELECT set_config('request.jwt.claim.sub', '00000000-0000-4000-8000-000000000801', true);
 SELECT set_config('request.jwt.claim.role', 'authenticated', true);
@@ -75,6 +85,18 @@ SELECT is(
   (SELECT (public.paywall_status_get('00000000-0000-4000-8000-000000000901')->>'is_premium')::boolean),
   true,
   'paywall_status_get flags premium'
+);
+
+SELECT is(
+  (SELECT (public.paywall_status_get('00000000-0000-4000-8000-000000000901')->'userQuotas'->'ai_command_requests'->>'used')::int),
+  1,
+  'paywall_status_get returns ai command quota usage'
+);
+
+SELECT is(
+  (SELECT (public.paywall_status_get('00000000-0000-4000-8000-000000000901')->'userQuotas'->'ai_command_requests'->>'bypassed_by_premium_home')::boolean),
+  true,
+  'paywall_status_get marks premium-home quota bypass'
 );
 
 SELECT is(
@@ -108,10 +130,30 @@ INSERT INTO public.home_entitlements (home_id, plan, expires_at)
 VALUES ('00000000-0000-4000-8000-000000000902', 'free', NULL)
 ON CONFLICT (home_id) DO UPDATE SET plan = EXCLUDED.plan, expires_at = EXCLUDED.expires_at;
 
+INSERT INTO public.command_ai_requests (user_id, quota_date, request_id)
+VALUES (
+  '00000000-0000-4000-8000-000000000803',
+  public._command_ai_quota_date(now()),
+  '22222222-2222-4222-8222-222222222222'
+)
+ON CONFLICT DO NOTHING;
+
 SELECT is(
   (SELECT (public.paywall_status_get('00000000-0000-4000-8000-000000000902')->>'plan')),
   'free',
   'missing entitlement defaults to free'
+);
+
+SELECT is(
+  (SELECT (public.paywall_status_get('00000000-0000-4000-8000-000000000902')->'userQuotas'->'ai_command_requests'->>'limit')::int),
+  5,
+  'paywall_status_get returns configured ai command limit'
+);
+
+SELECT is(
+  (SELECT (public.paywall_status_get('00000000-0000-4000-8000-000000000902')->'userQuotas'->'ai_command_requests'->>'bypassed_by_premium_home')::boolean),
+  false,
+  'free-home quota is not marked as bypassed'
 );
 
 SELECT * FROM finish();

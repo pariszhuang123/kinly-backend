@@ -1,5 +1,8 @@
 {
   "functions": {
+    "command_ai_sync": {
+      "path": "supabase/functions/command_ai_sync"
+    },
     "complaint_classifier": {
       "path": "supabase/functions/complaint_classifier"
     },

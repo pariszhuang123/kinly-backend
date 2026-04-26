@@ -85,6 +85,8 @@ Recommended selector behavior:
 - if the member belongs to a shared unit, grouped-by-unit SHOULD be preselected
 - when grouped-by-unit is selected, the picker SHOULD show unit targets such as
   shared units and personal units
+- when unit-based bills support household-wide personal-unit targeting, the
+  picker SHOULD show all current members' personal units as separate rows
 - when grouped-by-unit is not selected, the picker MAY show individual debtors
   only where debtor-based expense mode is supported
 

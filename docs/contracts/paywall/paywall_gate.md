@@ -8,7 +8,9 @@ Status: Draft
 Version: v1.0
 ---
 
-# Paywall Gate Contract (Product / Client Behavior)
+# Paywall Gate Contract (Client)
+
+Note: Split into `paywall_gate_product_v1.md` (behavior) and `paywall_gate_copy_v1.md` (copy). Keep this file as the legacy combined view until migration completes.
 
 Scope: client-side paywall gating + deterministic retry.
 
@@ -19,7 +21,7 @@ Scope: client-side paywall gating + deterministic retry.
 
 ## Non-goals
 - No new backend tables or RLS changes.
-- No server-side retry queue.
+- No server-side “retry queue”.
 - No feature-specific callbacks for retry.
 
 ## Shared module
@@ -38,7 +40,7 @@ Requirements:
 - Push `KinlyPaywallScreen` and await result (forward `request.triggers` so benefits can be ordered by trigger).
 - If result indicates purchase success/restore:
   - call `await paywallRepository.refreshStatus(homeId)`
-  - optional backoff retry refresh: 250ms + 500ms + 1000ms (max 3)
+  - optional backoff retry refresh: 250ms → 500ms → 1000ms (max 3)
 - Return outcome with status.
 
 ## Feature BLoC integration (per feature)
@@ -50,16 +52,18 @@ Requirements:
 - `String? paywallInFlightRequestId` (guard)
 
 ### On cap error
-If backend error code in `{paywallActiveCap, paywallMediaCap}`:
+If backend error code in `{paywallActiveCap, paywallMediaCap, paywallExpenseActiveCap, paywallMembersCap, paywallAiCommandDailyLimit}`:
 - set `paywallAction = PaywallRetryAction.submit`
 - increment `paywallRequestTick`
 - create `paywallRequest` with:
-  - `requestId = uuid`
+  - `requestId = uuid` for the paywall interaction itself
   - `homeId = state.homeId`
-  - `source = PaywallSource.flowCreateChore` (constant)
+  - `source = PaywallSource.commandAiQuota` for AI quota exhaustion; otherwise use the feature-specific paywall source constant
   - `action = submit`
   - `tick = paywallRequestTick`
+  - `blockedCommandRequestId = original command request id` when the blocked action came from command entry and must replay the same request
 - **do NOT clear in-progress form fields**
+- For AI quota exhaustion specifically, preserve the original command payload and `requestId` for deterministic post-upgrade replay
 
 ### Event
 `PaywallGateResolved({ required PaywallGateOutcome outcome })`
@@ -68,6 +72,7 @@ Handler:
 - clear `paywallInFlightRequestId`
 - if `outcome.status == granted` and `outcome.action == submit`:
   - call the same submit code path again (no new validation flow)
+  - when replaying an AI-quota-blocked command, reuse `blockedCommandRequestId` rather than the paywall interaction `requestId`
 - else do nothing (optionally emit a non-blocking message on cancelled/failed)
 
 ## UI integration (shared wrapper preferred)
@@ -86,8 +91,19 @@ Examples:
 - `static const flowCreateChore = 'flow.create_chore';`
 - `static const flowEditChore = 'flow.edit_chore';`
 - `static const shareCreateExpense = 'share.create_expense';`
+- `static const commandAiQuota = 'command.ai_quota';`
 
 Requirement: No inline strings in features.
+
+### Error code mapping
+
+If backend wire-format errors use snake_case and app-layer constants use camelCase, the mapping MUST be explicit.
+
+Example:
+
+- backend: `paywall_ai_command_daily_limit`
+- client constant: `paywallAiCommandDailyLimit`
+- backend feature-cap errors MUST remain distinct from `paywall_ai_command_daily_limit`
 
 ## Acceptance tests (minimum)
 - When cap error occurs, paywall opens once.
@@ -95,3 +111,5 @@ Requirement: No inline strings in features.
 - If user completes purchase, refreshStatus is called and retry is attempted.
 - If rebuild happens during paywall open, no second paywall route is pushed.
 - Form state remains intact across paywall route.
+- AI quota replay after upgrade reuses the original `requestId`.
+- Paywall interaction `requestId` and blocked command `requestId` remain distinct.

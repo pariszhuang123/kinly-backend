@@ -206,6 +206,34 @@ SELECT is(
   'home_units_list_selectable_expense_units returns only the personal unit before shared membership exists'
 );
 
+SELECT is(
+  (
+    SELECT count(*)::int
+    FROM public.home_units_list_selectable_expense_units_v2(
+      (SELECT home_id FROM tmp_homes WHERE label = 'primary')
+    )
+  ),
+  5,
+  'home_units_list_selectable_expense_units_v2 returns every active personal unit before shared membership exists for the caller'
+);
+
+SELECT ok(
+  (
+    SELECT EXISTS (
+      SELECT 1
+      FROM public.home_units_list_selectable_expense_units_v2(
+        (SELECT home_id FROM tmp_homes WHERE label = 'primary')
+      ) selectable
+      JOIN public.home_units hu
+        ON hu.id = selectable.unit_id
+      JOIN public.memberships m
+        ON m.id = hu.personal_membership_id
+      WHERE m.user_id = (SELECT user_id FROM tmp_users WHERE label = 'carol')
+    )
+  ),
+  'home_units_list_selectable_expense_units_v2 includes another member personal unit as a separate row'
+);
+
 SELECT pg_temp.expect_api_error(
   format($sql$
     SELECT public.expenses_create_v5(
@@ -287,6 +315,53 @@ SELECT is(
   ),
   2,
   'home_units_list_selectable_expense_units returns shared and personal units for a caller in an active shared unit'
+);
+
+SELECT is(
+  (
+    SELECT count(*)::int
+    FROM public.home_units_list_selectable_expense_units_v2(
+      (SELECT home_id FROM tmp_homes WHERE label = 'primary')
+    )
+  ),
+  6,
+  'home_units_list_selectable_expense_units_v2 returns the caller shared unit plus every active personal unit'
+);
+
+SELECT is(
+  (
+    SELECT unit_type
+    FROM public.home_units_list_selectable_expense_units_v2(
+      (SELECT home_id FROM tmp_homes WHERE label = 'primary')
+    )
+    LIMIT 1
+  ),
+  'shared',
+  'home_units_list_selectable_expense_units_v2 orders the caller active shared unit before personal units'
+);
+
+SELECT is(
+  (
+    SELECT unit_id::text
+    FROM public.home_units_list_selectable_expense_units_v2(
+      (SELECT home_id FROM tmp_homes WHERE label = 'primary')
+    )
+    OFFSET 1
+    LIMIT 1
+  ),
+  (
+    SELECT hu.id::text
+    FROM public.home_units hu
+    JOIN public.memberships m
+      ON m.id = hu.personal_membership_id
+    WHERE hu.home_id = (SELECT home_id FROM tmp_homes WHERE label = 'primary')
+      AND hu.unit_type = 'personal'
+      AND hu.archived_at IS NULL
+      AND m.user_id = (SELECT user_id FROM tmp_users WHERE label = 'alice')
+      AND m.valid_to IS NULL
+    LIMIT 1
+  ),
+  'home_units_list_selectable_expense_units_v2 orders the caller personal unit immediately after the active shared unit'
 );
 
 SELECT is(

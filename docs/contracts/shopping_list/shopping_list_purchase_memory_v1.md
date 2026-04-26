@@ -5,12 +5,12 @@ Scope: shared
 Artifact-Type: contract
 Stability: evolving
 Status: draft
-Version: v1.5
+Version: v1.6
 Audience: internal
-Last updated: 2026-04-11
+Last updated: 2026-04-13
 ---
 
-# Shopping List Purchase Memory Contract v1.5
+# Shopping List Purchase Memory Contract v1.6
 
 ## 1. Purpose & scope
 
@@ -53,7 +53,8 @@ known purchase in that bucket.
 | `home_id` | uuid | NOT NULL | FK -> homes, ON DELETE CASCADE |
 | `scope_type` | text | NOT NULL | `house` or `unit` |
 | `unit_id` | uuid | NULL | FK -> `home_units(id)` when `scope_type = 'unit'`; null for `house` |
-| `canonical_name` | text | NOT NULL | Normalised item name at archive time after trim, lowercase, punctuation folding, whitespace collapse, and simple singularisation |
+| `canonical_name` | text | NOT NULL | Legacy canonical key retained for compatibility during rollout |
+| `canonical_name_v2` | text | NULL | Current multilingual-safe canonical key used for new writes and preferred for lookup |
 | `display_name` | text | NOT NULL | Most recent casing/spelling used in this bucket |
 | `last_purchased_at` | timestamptz | NOT NULL | Timestamp of most recent archive event in this bucket |
 | `last_purchased_by_user_id` | uuid | NOT NULL | Item completer, not archiver |
@@ -66,6 +67,7 @@ Constraints:
 - `scope_type = 'house'` implies `unit_id IS NULL`
 - `scope_type = 'unit'` implies `unit_id IS NOT NULL`
 - `CHECK (canonical_name <> '')`
+- `CHECK (canonical_name_v2 IS NULL OR canonical_name_v2 <> '')`
 - `CHECK (warning_window_days >= 1)`
 - `home_id` FK -> `homes(id)` with `ON DELETE CASCADE`
 - `unit_id` FK -> `home_units(id)` with `ON DELETE CASCADE`
@@ -77,6 +79,12 @@ Uniqueness:
   `(home_id, canonical_name)` where `scope_type = 'house'`
 - Unit bucket uniqueness MUST be enforced for
   `(home_id, unit_id, canonical_name)` where `scope_type = 'unit'`
+- House bucket uniqueness MUST also be enforced for
+  `(home_id, canonical_name_v2)` where `scope_type = 'house'` and
+  `canonical_name_v2 IS NOT NULL`
+- Unit bucket uniqueness MUST also be enforced for
+  `(home_id, unit_id, canonical_name_v2)` where `scope_type = 'unit'` and
+  `canonical_name_v2 IS NOT NULL`
 - A single nullable unique key across `(home_id, scope_type, unit_id,
   canonical_name)` is not sufficient by itself for house rows
 
@@ -87,24 +95,61 @@ Access model:
 
 ### 4.2 Canonicalisation rules
 
-- Start from `lower(btrim(shopping_list_items.name))`
-- Replace punctuation and separators, including characters such as `-` and `'`,
-  with spaces
-- Collapse repeated whitespace to a single space and trim again
-- Apply simple token-level singularisation so common plural variants map to the
-  same key, for example:
-  - `eggs` -> `egg`
-  - `tomatoes` -> `tomato`
-  - `paper-towels` -> `paper towel`
-  - `farmer's eggs` -> `farmer egg`
-- Reminder matching is still deterministic exact match on the resulting
-  canonical key
-- No synonym mapping or fuzzy similarity in v1
+Migration A introduces a compatibility-preserving v2 canonical key. New writes
+populate both `canonical_name` and `canonical_name_v2`. Reminder lookup prefers
+`canonical_name_v2` and falls back to legacy `canonical_name` only when needed.
+
+#### Legacy key (`canonical_name`)
+
+Legacy `canonical_name` remains the rollback and compatibility key. Its behavior
+is the pre-v2 lowercasing and token normalization already present in the
+database.
+
+#### Current rollout key (`canonical_name_v2`)
+
+`canonical_name_v2` is the current multilingual-safe key used for new writes and
+preferred for reminder lookup.
+
+Current rollout behavior:
+
+1. `btrim()` leading/trailing whitespace
+2. Unicode-aware `lower()`
+3. Fold curated Unicode whitespace and punctuation variants used in Kinly test
+   cases to ASCII space, including non-breaking space, ideographic space,
+   curly apostrophes, dash variants, and `。` / `、`
+4. Replace ASCII punctuation with ASCII space
+5. Collapse repeated whitespace to a single ASCII space and trim again
+6. Apply existing English token singularisation to Latin-script tokens only
+7. Preserve token order
+
+Current rollout examples:
+
+- `Eggs` -> `egg`
+- `paper-towels` -> `paper towel`
+- `Farmer’s Eggs` -> `farmer egg`
+- `Молоко` -> `молоко`
+- `牛奶` -> `牛奶`
+- ` 牛奶 ` -> `牛奶`
+- `牛　奶` -> `牛 奶`
+
+Current rollout non-goals:
+
+- No transliteration
+- No fuzzy matching
+- No token reordering
+- No cross-language synonym matching
+- `milk` and `牛奶` are distinct canonical keys and do NOT match each other
+
+Planned future enhancement:
+
+- full Unicode property-driven normalization beyond the curated fold set
+- broader punctuation/whitespace coverage if needed
 
 ### 4.3 Warning window defaults
 
-`warning_window_days` is derived from the canonical name. If no explicit match
-exists, fallback is `14` days.
+`warning_window_days` is derived from the canonical name. The known-item list
+below is English-only; non-Latin canonical names will almost always use the
+14-day fallback. If no explicit match exists, fallback is `14` days.
 
 #### 7 days
 
@@ -122,8 +167,9 @@ exists, fallback is `14` days.
 
 Any unmatched canonical name defaults to `14` days.
 
-The current implementation rewrites `warning_window_days` from the canonical
-name on upsert, which is behaviorally stable for unchanged canonical names.
+The current implementation rewrites `warning_window_days` from the effective
+canonical key used for the row on upsert, which is behaviorally stable for
+unchanged canonical names.
 
 ## 5. When memory is written
 
